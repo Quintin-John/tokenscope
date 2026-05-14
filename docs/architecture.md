@@ -334,3 +334,145 @@ The parser:
   marks duplicates with the `IsDuplicate` flag based on a per-session
   observed-requests set, but does not drop them — that's an aggregator
   decision.
+
+---
+
+# Phase 5: Collector host
+
+The collector is a .NET Worker Service that ties together the Phase 3
+parser, the Phase 2 cost engine, and the Phase 4 metrics. Two
+configuration files: `tokenscope.yaml` (the collector's own settings)
+and `pricing.json` (the cost engine's rate table, hot-reloadable from
+Phase 2).
+
+## `tokenscope.yaml`
+
+See [`config/tokenscope.example.yaml`](../config/tokenscope.example.yaml)
+for the canonical reference. Key behaviours:
+
+- `schema_version` must be `1`. Loader fails fast on other values.
+- Path fields accept `null` (auto-detect to a platform default) or an
+  explicit absolute path. **Validation differs**: `null` is
+  permissive (warn + watch); explicit is strict (fail-fast if the
+  directory doesn't exist).
+- `initial_scan_max_age_days: 30` is the default. Set to `null` to
+  remove the age limit on fresh installs that want full history.
+- Unknown keys are rejected with a full-path error
+  (`Unknown configuration key 'session_logs.scan_recursive'`).
+- `subscription_mode` affects display labels only. The collector
+  emits it as the OTEL resource attribute
+  `tokenscope.subscription_mode` so Grafana and the CLI can read it
+  from the metrics stream rather than re-parsing config.
+
+### OTLP advanced configuration via env vars
+
+`tokenscope.yaml.otlp` only carries `endpoint` and `protocol` — the
+common-case fields. Authentication headers, TLS certificates, and
+timeouts are configured via standard OTEL environment variables that
+the OTEL .NET SDK reads automatically. Worked examples:
+
+```sh
+# Bearer-token auth to a managed OTEL collector.
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ${TOKEN}"
+
+# Self-signed TLS cert for the receiver.
+export OTEL_EXPORTER_OTLP_CERTIFICATE=/etc/ssl/certs/my-otel-collector.pem
+
+# Increase the default export timeout.
+export OTEL_EXPORTER_OTLP_TIMEOUT=30000
+```
+
+Documenting these in YAML would duplicate OTEL's own configuration
+surface. Single source of truth.
+
+## State file (`seen.json`)
+
+Persisted at `state.path/seen.json` (default
+`$HOME/.tokenscope/state/seen.json`). One entry per session file the
+collector has processed at least one line from.
+
+```json
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "/Users/q/.claude/projects/-Users-q-foo/abc-uuid.jsonl",
+      "last_modified_utc": "2026-05-14T02:30:11.123Z",
+      "byte_offset": 1827392,
+      "last_processed_line_number": 9421
+    }
+  ]
+}
+```
+
+### Resume rules
+
+On startup, the collector evaluates each entry in `seen.json`:
+
+| Condition | Action |
+|---|---|
+| File missing | Drop the entry. No work needed. |
+| File length `<` saved `byte_offset` | File was truncated or replaced. Warn and full rescan. |
+| File `LastWriteTimeUtc` differs from saved `last_modified_utc` | Treat as stale. Warn and full rescan. (Conservative — we don't trust mtime drift to mean "appended only".) |
+| Otherwise | Resume reading at `byte_offset`. |
+
+A startup log line summarises the rebuild:
+`Resumed N files from state; M files require full rescan; dedup set starts empty.`
+
+### Atomicity
+
+Every state save writes to `seen.json.tmp` first, then
+`File.Move(...,_overwrite: true)`. A crash mid-write cannot corrupt
+the destination file — the worst case is the previous good state
+remains.
+
+If the state file is unreadable (corrupt JSON or I/O error), the
+collector logs the failure and treats state as empty. The result is
+"more work" (full rescan of every file), not "incorrect work" — every
+recovery path is safe.
+
+### Dedup across restart
+
+The in-memory `(sessionId, requestId)` dedup set is **per-process**.
+After restart it starts empty. Resume-by-`byte_offset` guarantees we
+don't re-read lines we've already processed, so we don't re-see
+already-counted `requestId`s — no cross-restart double-count concern.
+
+At the Prometheus layer, counter resets at process restart are
+detected by Prometheus's standard reset-detection logic; aggregations
+remain correct.
+
+## Byte-exact offset advancement
+
+The coordinator reads the file byte-by-byte (8 KB buffer) and only
+advances `byte_offset` past a confirmed `\n`. A partial last line
+(no terminating newline) is **not** processed and the offset stays
+at the position right after the last seen `\n`. On the next pass
+(triggered by the FileSystemWatcher), the partial line will either
+be complete (newline arrived since) and processed, or remain partial
+and be skipped again.
+
+## `FileSystemWatcher` debouncing
+
+`FileSystemWatcher` fires on the session-logs root with
+`IncludeSubdirectories = true` and filter `*.jsonl`. Events go
+through a per-file debounce (250 ms) before reaching the work queue
+to absorb the "burst of Changed events per save" that the watcher
+emits on many platforms.
+
+The processing path is single-consumer (one `Channel<string>`
+reader). All file processing serialises through one in-process lock,
+so per-file ordering is deterministic and the dedup HashSet doesn't
+need its own lock.
+
+## Graceful shutdown
+
+`IHostApplicationLifetime` → `BackgroundService.StopAsync` →
+- complete the channel writer
+- disable + dispose the FileSystemWatcher
+- wait for in-flight `ProcessFile` to finish (it holds the
+  processing lock)
+- flush state file one last time
+
+A second `Ctrl-C` accelerates shutdown via the standard host pattern.
+
