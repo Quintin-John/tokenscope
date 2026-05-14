@@ -789,6 +789,35 @@ Both labels are sanitized: control characters stripped, ≤ 64 chars
 (truncated with `...` if longer). Missing `cwd` → both labels =
 `"unknown"`.
 
+## Scope: Claude Code only
+
+tokenscope tracks **Claude Code session logs only**. This is a
+deliberate constraint baked into the project from Phase 3 (the audit
+that defined the parser schema) and stated in CLAUDE.md's
+architectural decisions table ("Data scope: Claude Code local session
+logs only").
+
+What this excludes:
+
+- **claude.ai web / desktop conversations.** Stored server-side, not
+  in any local filesystem location tokenscope can read. Capturing
+  these would require integration with Anthropic's Admin API, which
+  is only available on Enterprise plans and was explicitly listed as
+  out of scope in CLAUDE.md ("no API integration, no Admin API, no
+  remote sources").
+- **Anthropic API calls from user code.** Direct SDK calls don't go
+  through Claude Code and produce no `~/.claude/projects/` log
+  entries.
+
+For users who split work between Claude Code and claude.ai
+web/desktop, the dashboard under-counts. The mode-banner row makes
+this explicit ("Claude Code sessions only — claude.ai web/desktop
+not tracked") so users don't read $X as their full Claude spend.
+
+A future v0.2+ could add Admin API integration as an opt-in
+collector mode for Enterprise users. v0.1.0 deliberately stays
+local-first to honour the privacy and zero-network-call constraints.
+
 ## Editing dashboards: code, not UI
 
 Grafana's provisioning is read-only for the panel JSON. **Edits in the

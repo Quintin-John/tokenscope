@@ -126,6 +126,30 @@ Requires the .NET 8 SDK (pinned via [`global.json`](./global.json)). The
 .NET workflow is for working on the code itself; for using tokenscope as
 a tool, the Docker stack is the supported path.
 
+## What's tracked, and what's not
+
+**Tracked:**
+- Claude Code (CLI / `claude` command) session logs from `~/.claude/projects/`
+- Token usage by component (input / output / cache read / cache write 5m / cache write 1h)
+- Cost in USD, computed from token counts × current Anthropic rates in `config/pricing.json`
+- Cache efficiency (hit ratios, write/read ratios, estimated savings)
+- Session and project metadata (UUIDs, `cwd`-derived project names)
+
+**Not tracked:**
+- **claude.ai web / desktop conversations.** Those are stored
+  server-side; they don't appear in `~/.claude/projects/` and there's
+  no local file to parse. Capturing them would require the Anthropic
+  Admin API (Enterprise plans only) — deliberately out of v0.1.0 scope
+  per CLAUDE.md (Claude Code local logs only).
+- **Anthropic API calls from your own apps.** If you're calling the
+  Anthropic API directly (e.g., from a Python script with the
+  `anthropic` SDK), those calls don't go through Claude Code and
+  aren't logged to `~/.claude/projects/`. Different scope.
+
+If you split work between Claude Code and claude.ai web/desktop,
+tokenscope's numbers will be an under-count of your full Claude bill.
+The dashboard banner makes this explicit.
+
 ## Troubleshooting
 
 See [`docs/troubleshooting.md`](./docs/troubleshooting.md). Common
