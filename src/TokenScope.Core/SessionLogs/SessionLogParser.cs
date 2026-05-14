@@ -92,6 +92,52 @@ public static class SessionLogParser
         }
     }
 
+    /// <summary>
+    /// Parse one JSON-encoded line in isolation. The caller is responsible
+    /// for line-by-line reading and dedup tracking — useful when a host
+    /// (like the Collector) needs byte-offset accounting that the
+    /// iterator-based API doesn't expose.
+    ///
+    /// Warnings reported via the returned outcome use
+    /// <paramref name="source"/> and <paramref name="lineNumber"/> so the
+    /// caller's real-file context appears in the messages.
+    /// </summary>
+    public static ParseLineOutcome ParseLine(string jsonLine, string source = "", int lineNumber = 1)
+    {
+        ArgumentNullException.ThrowIfNull(jsonLine);
+        ArgumentNullException.ThrowIfNull(source);
+
+        if (jsonLine.Length == 0)
+        {
+            return ParseLineOutcome.Blank.Instance;
+        }
+
+        LogEntryDto? dto;
+        try
+        {
+            dto = System.Text.Json.JsonSerializer.Deserialize<LogEntryDto>(jsonLine, JsonOptions);
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            return new ParseLineOutcome.MalformedJson(
+                new ParseWarning.MalformedJson(source, lineNumber, ex.Message));
+        }
+
+        if (dto is null || !string.Equals(dto.Type, AssistantType, StringComparison.Ordinal))
+        {
+            return ParseLineOutcome.SkippedNonAssistant.Instance;
+        }
+
+        var warnings = System.Collections.Immutable.ImmutableArray.CreateBuilder<ParseWarning>();
+        var ev = TryProject(dto, source, lineNumber, warnings.Add);
+        if (ev is null)
+        {
+            return new ParseLineOutcome.InvalidEvent(warnings.ToImmutable());
+        }
+
+        return new ParseLineOutcome.AssistantEvent(ev);
+    }
+
     private static ParsedAssistantEvent? TryProject(
         LogEntryDto dto,
         string source,

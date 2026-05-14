@@ -37,6 +37,12 @@ dotnet_diagnostic.CS8604.severity = error
 dotnet_diagnostic.CS8618.severity = error
 dotnet_diagnostic.CS8625.severity = error
 
+# CA1848 requires LoggerMessage source-generated delegates for ILogger calls.
+# That's worthwhile in hot paths (request pipelines, etc.) but the collector
+# is a low-volume event-driven service; the perf benefit doesn't outweigh
+# the readability cost. Keep standard LogX extension methods.
+dotnet_diagnostic.CA1848.severity = none
+
 # Test code is held to slightly relaxed analyzer rules:
 #   CA1707 — Method names contain underscores (xUnit convention: Method_Scenario_Expected).
 #   CA1305 — IFormatProvider on string interpolation (fixtures use literal/invariant data).
