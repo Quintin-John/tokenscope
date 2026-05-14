@@ -82,6 +82,15 @@ services:
     networks:
       - tokenscope
 
+  renderer:
+    image: grafana/grafana-image-renderer:3.12.4
+    container_name: tokenscope-renderer
+    restart: unless-stopped
+    environment:
+      ENABLE_METRICS: "true"
+    networks:
+      - tokenscope
+
   grafana:
     image: grafana/grafana:12.4.3
     container_name: tokenscope-grafana
@@ -92,6 +101,10 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_INSTALL_PLUGINS: ""
+      # Image rendering via the separate grafana/grafana-image-renderer
+      # service (the in-container plugin isn't published for linux-arm64).
+      GF_RENDERING_SERVER_URL: "http://renderer:8081/render"
+      GF_RENDERING_CALLBACK_URL: "http://grafana:3000/"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

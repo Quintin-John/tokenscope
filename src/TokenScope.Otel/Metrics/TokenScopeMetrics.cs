@@ -118,11 +118,25 @@ public sealed class TokenScopeMetrics : IDisposable
     /// Record one (already-deduplicated) API request. Updates token counters,
     /// cost counter, request counter, and the trackers feeding the
     /// observable gauges.
+    ///
+    /// <paramref name="project"/> is the lossless encoded project identifier
+    /// (Claude Code's directory-name encoding of <c>cwd</c>);
+    /// <paramref name="projectName"/> is the friendly last-segment display
+    /// name. Two different cwds can share a projectName but never a project.
     /// </summary>
-    public void RecordRequest(string model, string sessionId, TokenUsage usage, Cost cost, DateTimeOffset at)
+    public void RecordRequest(
+        string model,
+        string sessionId,
+        string project,
+        string projectName,
+        TokenUsage usage,
+        Cost cost,
+        DateTimeOffset at)
     {
         ArgumentException.ThrowIfNullOrEmpty(model);
         ArgumentException.ThrowIfNullOrEmpty(sessionId);
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(projectName);
         ArgumentNullException.ThrowIfNull(usage);
         ArgumentNullException.ThrowIfNull(cost);
 
@@ -130,6 +144,8 @@ public sealed class TokenScopeMetrics : IDisposable
         {
             { "model", model },
             { "session_id", sessionId },
+            { "project", project },
+            { "project_name", projectName },
         };
 
         if (usage.Input > 0)
@@ -162,7 +178,7 @@ public sealed class TokenScopeMetrics : IDisposable
         _requestsTotal.Add(1, baseTags);
 
         _activity.MarkActive(sessionId, at);
-        _cacheRatios.Record(sessionId, usage.CacheRead, usage.Input);
+        _cacheRatios.Record(sessionId, project, projectName, usage.CacheRead, usage.Input);
     }
 
     public void Dispose() => _meter.Dispose();
@@ -185,9 +201,13 @@ public sealed class TokenScopeMetrics : IDisposable
 
     private IEnumerable<Measurement<double>> ObserveCacheHitRatios()
     {
-        foreach (var (sessionId, ratio) in _cacheRatios.Snapshot())
+        foreach (var snap in _cacheRatios.Snapshot())
         {
-            yield return new Measurement<double>(ratio, new KeyValuePair<string, object?>("session_id", sessionId));
+            yield return new Measurement<double>(
+                snap.Ratio,
+                new KeyValuePair<string, object?>("session_id", snap.SessionId),
+                new KeyValuePair<string, object?>("project", snap.Project),
+                new KeyValuePair<string, object?>("project_name", snap.ProjectName));
         }
     }
 

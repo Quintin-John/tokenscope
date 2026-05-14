@@ -74,8 +74,8 @@ public class TokenScopeMeterProviderBuilderExtensionsTests
             .Build();
 
         using var metrics = new TokenScopeMetrics(new SessionActivityTracker(), new CacheRatioTracker(), TimeProvider.System);
-        metrics.RecordRequest("m", "s", TokenUsage.Empty, Cost.Zero, DateTimeOffset.UtcNow);
-        metrics.RecordRequest("m", "s", TokenUsage.Empty, Cost.Zero, DateTimeOffset.UtcNow);
+        metrics.RecordRequest("m", "s", "test-project-s", "s", TokenUsage.Empty, Cost.Zero, DateTimeOffset.UtcNow);
+        metrics.RecordRequest("m", "s", "test-project-s", "s", TokenUsage.Empty, Cost.Zero, DateTimeOffset.UtcNow);
         provider.ForceFlush();
 
         captured.Should().NotBeEmpty();

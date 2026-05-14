@@ -19,7 +19,7 @@ public class TokenScopeMetricsTests
         var usage = new TokenUsage(Input: 100, Output: 50, CacheRead: 200, CacheWrite5m: 30, CacheWrite1h: 70);
         var cost = new Cost(Input: 0.001m, Output: 0.002m, CacheRead: 0.0003m, CacheWrite5m: 0.0004m, CacheWrite1h: 0.0005m);
 
-        metrics.RecordRequest("claude-opus-4-7", "session-1", usage, cost, Now);
+        metrics.RecordRequest("claude-opus-4-7", "session-1", "test-project-session-1", "session-1", usage, cost, Now);
 
         var inputSample = capture.ByName("tokenscope.tokens.input").Should().ContainSingle().Subject;
         inputSample.Value.Should().Be(100L);
@@ -37,7 +37,7 @@ public class TokenScopeMetricsTests
         using var metrics = NewMetrics();
 
         var usage = new TokenUsage(0, 0, 0, CacheWrite5m: 30, CacheWrite1h: 70);
-        metrics.RecordRequest("m", "s", usage, Cost.Zero, Now);
+        metrics.RecordRequest("m", "s", "test-project-s", "s", usage, Cost.Zero, Now);
 
         var writes = capture.ByName("tokenscope.tokens.cache_write").ToList();
         writes.Should().HaveCount(2);
@@ -55,7 +55,7 @@ public class TokenScopeMetricsTests
         using var metrics = NewMetrics();
 
         var usage = new TokenUsage(0, 0, 0, 0, 0);
-        metrics.RecordRequest("m", "s", usage, Cost.Zero, Now);
+        metrics.RecordRequest("m", "s", "test-project-s", "s", usage, Cost.Zero, Now);
 
         capture.ByName("tokenscope.tokens.input").Should().BeEmpty();
         capture.ByName("tokenscope.tokens.output").Should().BeEmpty();
@@ -74,7 +74,7 @@ public class TokenScopeMetricsTests
         using var metrics = NewMetrics();
 
         var cost = new Cost(0.10m, 0.20m, 0.05m, 0.07m, 0.13m);
-        metrics.RecordRequest("m", "s", new TokenUsage(1, 1, 1, 1, 1), cost, Now);
+        metrics.RecordRequest("m", "s", "test-project-s", "s", new TokenUsage(1, 1, 1, 1, 1), cost, Now);
 
         var costSamples = capture.ByName("tokenscope.cost.usd").ToList();
         costSamples.Should().HaveCount(5);
@@ -92,9 +92,9 @@ public class TokenScopeMetricsTests
         using var capture = new MetricCapture();
         using var metrics = NewMetrics();
 
-        metrics.RecordRequest("m", "s1", TokenUsage.Empty, Cost.Zero, Now);
-        metrics.RecordRequest("m", "s1", TokenUsage.Empty, Cost.Zero, Now);
-        metrics.RecordRequest("m", "s2", TokenUsage.Empty, Cost.Zero, Now);
+        metrics.RecordRequest("m", "s1", "test-project-s1", "s1", TokenUsage.Empty, Cost.Zero, Now);
+        metrics.RecordRequest("m", "s1", "test-project-s1", "s1", TokenUsage.Empty, Cost.Zero, Now);
+        metrics.RecordRequest("m", "s2", "test-project-s2", "s2", TokenUsage.Empty, Cost.Zero, Now);
 
         var samples = capture.ByName("tokenscope.requests.total").ToList();
         samples.Should().HaveCount(3);
@@ -107,8 +107,8 @@ public class TokenScopeMetricsTests
         using var capture = new MetricCapture();
         using var metrics = NewMetrics();
 
-        metrics.RecordRequest("m", "session-alpha", new TokenUsage(Input: 25, Output: 0, CacheRead: 75, CacheWrite5m: 0, CacheWrite1h: 0), Cost.Zero, Now);
-        metrics.RecordRequest("m", "session-beta",  new TokenUsage(Input: 50, Output: 0, CacheRead: 50, CacheWrite5m: 0, CacheWrite1h: 0), Cost.Zero, Now);
+        metrics.RecordRequest("m", "session-alpha", "test-project-session-alpha", "session-alpha", new TokenUsage(Input: 25, Output: 0, CacheRead: 75, CacheWrite5m: 0, CacheWrite1h: 0), Cost.Zero, Now);
+        metrics.RecordRequest("m", "session-beta",  "test-project-session-beta", "session-beta", new TokenUsage(Input: 50, Output: 0, CacheRead: 50, CacheWrite5m: 0, CacheWrite1h: 0), Cost.Zero, Now);
 
         capture.SampleObservables();
 
@@ -126,7 +126,7 @@ public class TokenScopeMetricsTests
         using var metrics = NewMetrics();
 
         // <synthetic> request: 0/0 across the board — ratio undefined.
-        metrics.RecordRequest("m", "synthetic-session", TokenUsage.Empty, Cost.Zero, Now);
+        metrics.RecordRequest("m", "synthetic-session", "test-project-synthetic-session", "synthetic-session", TokenUsage.Empty, Cost.Zero, Now);
 
         capture.SampleObservables();
 
@@ -158,10 +158,10 @@ public class TokenScopeMetricsTests
     public void RecordRequest_NullOrEmptyArgs_Throw()
     {
         using var metrics = NewMetrics();
-        var nullModel = () => metrics.RecordRequest(null!, "s", TokenUsage.Empty, Cost.Zero, Now);
-        var nullSession = () => metrics.RecordRequest("m", null!, TokenUsage.Empty, Cost.Zero, Now);
-        var nullUsage = () => metrics.RecordRequest("m", "s", null!, Cost.Zero, Now);
-        var nullCost = () => metrics.RecordRequest("m", "s", TokenUsage.Empty, null!, Now);
+        var nullModel = () => metrics.RecordRequest(null!, "s", "p", "p", TokenUsage.Empty, Cost.Zero, Now);
+        var nullSession = () => metrics.RecordRequest("m", null!, "p", "p", TokenUsage.Empty, Cost.Zero, Now);
+        var nullUsage = () => metrics.RecordRequest("m", "s", "test-project-s", "s", null!, Cost.Zero, Now);
+        var nullCost = () => metrics.RecordRequest("m", "s", "test-project-s", "s", TokenUsage.Empty, null!, Now);
 
         nullModel.Should().Throw<ArgumentException>();
         nullSession.Should().Throw<ArgumentException>();

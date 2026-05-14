@@ -5,6 +5,26 @@ tokenscope emits eight OpenTelemetry metrics under the meter name
 namespace; tokenscope does **not** emit metrics under the
 `gen_ai.*` namespace (rationale and equivalence table below).
 
+## Common labels (Phase 7 update)
+
+All per-session metrics carry the following labels in addition to any
+metric-specific ones:
+
+| Label | Source | Notes |
+|---|---|---|
+| `model` | `assistant.message.model` from the log | e.g. `claude-opus-4-7` |
+| `session_id` | `sessionId` from the log | full UUID |
+| `project` | encoded form of `cwd` (`/` and ` ` → `-`) | **unique** per host filesystem; same encoding Claude Code itself uses |
+| `project_name` | last path segment of `cwd` | **friendly** display; can collide if two projects share a directory name |
+
+`session_id` and `project` are unique identifiers; `project_name` is
+the friendly display identifier. Dashboards show `project_name`, joins
+and filters use `project`.
+
+Both project labels are sanitized: control characters stripped, ≤ 64
+chars (truncated with `...` ellipsis if longer). Missing `cwd` →
+both labels = `"unknown"`.
+
 ## The eight metrics
 
 ### 1. `tokenscope.tokens.input`
@@ -158,6 +178,35 @@ For tests, use `AddTokenScopeMeter()` without an exporter and wire
 an in-memory exporter or `MeterListener` to capture measurements
 (see `tests/TokenScope.Otel.Tests/Metrics/MetricCapture.cs` for
 the BCL `MeterListener` pattern).
+
+## Estimated savings from caching
+
+The "Saved by caching" stat on the unified `tokenscope` dashboard is
+derived purely from existing metrics. No new instrument is required.
+
+**Formula.** Cache reads cost 0.1× the base input rate (per Anthropic).
+For each cache-read token, the user would have paid 1.0× input rate
+without caching. Savings per token = 0.9× input rate. Expressed in
+terms of the metrics we already emit:
+
+```
+savings_usd = Σ (cache_read_tokens × input_rate × 0.9)
+            = (cost_cache_read_actual ÷ 0.1) − cost_cache_read_actual
+            = 9 × cost_cache_read_actual
+```
+
+So:
+```promql
+sum(tokenscope_cost_usd_total{component="cache_read"}) * 9
+```
+
+This is exact for each Anthropic model in the pricing table: cache reads
+are uniformly priced at 0.1× the model's base input rate, so the 9×
+multiplier applies regardless of model mix.
+
+Read the value as **"what you would have paid if cache hits had been
+billed at full input rate, minus what you actually paid."** It's the
+delta, not the would-have-been total.
 
 ## Dedup invariant
 

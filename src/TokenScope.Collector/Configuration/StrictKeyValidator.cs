@@ -51,6 +51,11 @@ internal static class StrictKeyValidator
                 // noise instead. Typos inside a known section (e.g.
                 // session_logs.scan_recursive) still get caught with their
                 // full dotted path in the error message.
+                //
+                // TODO (Phase 9 polish): revisit if Microsoft.Extensions.Hosting
+                // exposes prefix configuration for its internal env-var provider
+                // in a future .NET version. With that, we could strip the
+                // DOTNET_ provider and re-enable strict root-level validation.
                 if (!string.IsNullOrEmpty(parentPath))
                 {
                     unknown.Add(path);
