@@ -687,7 +687,123 @@ panels:
 4. **Distinct tokenscope metric series count** — proves the OTEL pipeline rewrites our names correctly and Prometheus has indexed them.
 5. **Last scrape duration for the tokenscope job** — sanity check.
 
-This dashboard is not the real product; it ships with Phase 6 so
-"does `docker compose up` produce a working pipeline?" has a one-glance
-answer. Real per-domain dashboards arrive in Phase 7.
+This dashboard was the Phase 6 deliverable. Phase 7 deleted the file
+and folded its panels into the unified `tokenscope.json` as a
+collapsed "Stack health" row.
+
+---
+
+# Phase 7: Unified dashboard
+
+## Single dashboard, seven collapsible rows
+
+CLAUDE.md originally specified four dashboards (Overview, Sessions,
+Cache efficiency, Cost breakdown). Phase 7 consolidates into one
+unified `tokenscope.json` with collapsible rows. Rationale:
+
+1. **One URL to share.** Send one link to the team; everyone sees the
+   same context.
+2. **Cross-section context.** A high-cost session visible in the
+   Sessions row can be scrolled up to see its impact on the headline
+   cost stats without switching pages.
+3. **Reduced cognitive overhead.** The mental model is "tokenscope,"
+   not "tokenscope-overview vs tokenscope-sessions vs ..."
+4. **Easier maintenance.** One JSON file, one provisioning entry, one
+   place to apply colour-palette decisions.
+5. **Performance is fine.** Grafana 12 renders collapsed rows lazily,
+   so a 20+ panel dashboard organised into rows performs the same as
+   four separate dashboards.
+
+Row layout:
+
+| Row | Default | Content |
+|---|---|---|
+| Mode | expanded | Subscription mode banner (from `tokenscope.subscription_mode` resource attribute) |
+| At a glance | expanded | Cost 24h / 7d / 30d, Saved by caching, Active sessions, Cache hit ratio |
+| Cost trends | expanded | Cumulative cost by model (timeseries), Cost share by component (donut) |
+| Sessions | expanded | Recently active sessions table, Top sessions by cost (history) |
+| Cache efficiency | expanded | Cache hit ratio per session, Cache read vs cache write tokens |
+| Cost breakdown detail | collapsed | Cost by model donut, Daily trend with 7-day MA, Token volume by model bar |
+| Stack health | collapsed | UP/DOWN indicators, OTLP receive rate, distinct series, scrape duration |
+
+## Cumulative cost — counter-reset-safe
+
+The Phase 6 dashboard's "cumulative cost" panel queried the raw
+counter, which produces a sawtooth when the OTEL Collector restarts
+(Prometheus's reset detection drops the line to zero).
+
+Phase 7 uses `increase(...[$__interval])` (reset-aware) and applies
+Grafana's **Cumulative Sum** field transformation to produce a
+monotonically non-decreasing line:
+
+```promql
+sum by (model) (increase(tokenscope_cost_usd_total[$__interval]))
+```
+
+Documented in the panel description. **Don't "fix" this back to a raw
+counter query** — it'll regress reset handling.
+
+## Color palette
+
+| Role | Hex | When used |
+|---|---|---|
+| Cost (default) | `#8E8E93` neutral | Default cost stats |
+| Savings | `#39A974` green | "Saved by caching" — higher is universally better |
+| Activity / informational | `#4E92E0` blue | Counts, request totals, active sessions |
+| Status: UP | `#39A974` | Binary health states only |
+| Status: DOWN | `#E5484D` | Binary health states only |
+| Time series | Grafana classic palette | Auto-assigned per series |
+| Pie/donut | Grafana classic palette | Re-used so a model's colour stays stable across panels |
+
+**No threshold coloring on cache hit ratio**, throughput, or any ratio
+that lacks a universal "correct" value. The dashboard shows the
+number; the user judges.
+
+## Theme
+
+Dashboards are designed for **dark theme**. They render on light theme,
+but neutral `#8E8E93` loses contrast on a white background. README
+recommends dark theme. A light-theme variant may ship in a future polish
+phase if requested.
+
+## Project name derivation
+
+The `project` / `project_name` metric labels are derived from each
+event's `cwd` field in the Collector:
+
+```
+cwd = "/Users/q/Documents/RiderProjects/tokenscope"
+  ↓
+project      = "-Users-q-Documents-RiderProjects-tokenscope"   (encoded; lossless)
+project_name = "tokenscope"                                    (friendly; last segment)
+```
+
+`/` and ` ` both become `-`, matching Claude Code's own
+directory-name encoding. The encoded form is unique per host
+filesystem. `project_name` is friendly but may collide between
+projects with the same final directory name (e.g.
+`~/work/tokenscope` and `~/personal/tokenscope`); use `project` to
+disambiguate when needed.
+
+Both labels are sanitized: control characters stripped, ≤ 64 chars
+(truncated with `...` if longer). Missing `cwd` → both labels =
+`"unknown"`.
+
+## Editing dashboards: code, not UI
+
+Grafana's provisioning is read-only for the panel JSON. **Edits in the
+Grafana UI do not persist across container recreation.** For ad-hoc
+exploration the UI is fine — for changes that should survive
+`docker compose down`:
+
+1. Edit the dashboard in the UI as needed.
+2. **Share → Export → Save to file** (or use the JSON Model editor).
+3. Replace `docker/grafana/dashboards/tokenscope.json` with the
+   exported file.
+4. Commit to git.
+
+Provisioning picks up changes within 30 s (the `updateIntervalSeconds`
+in `dashboards.yaml`); reloading the dashboard in the browser after
+committing shows the new state. Also documented in
+`troubleshooting.md`.
 

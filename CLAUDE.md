@@ -102,10 +102,7 @@ tokenscope/
 │       │   └── dashboards/
 │       │       └── dashboards.yaml
 │       └── dashboards/
-│           ├── overview.json
-│           ├── sessions.json
-│           ├── cache-efficiency.json
-│           └── cost-breakdown.json
+│           └── tokenscope.json
 ├── config/
 │   ├── pricing.json
 │   └── tokenscope.example.yaml
@@ -232,11 +229,18 @@ Work in phases. **Stop at every phase boundary and wait for "go" before proceedi
 **Deliverable:** Full stack running end-to-end. Wait for "go."
 
 ### Phase 7: Grafana dashboards
-- Four dashboards as specified
+- One unified dashboard (`docker/grafana/dashboards/tokenscope.json`)
+  organized as collapsible rows. Replaces the original four-dashboard
+  spec; rationale in `docs/architecture.md`.
+- Rows: Mode banner • At a glance • Cost trends • Sessions •
+  Cache efficiency • Cost breakdown detail (collapsed) • Stack health
+  (collapsed)
+- Template variables: `$model`, `$project_name`, `$subscription_mode`
+- Default time range: last 24 hours
 - Tested with real metrics flowing
-- Screenshots in README
+- Screenshots in README captured via the Grafana image renderer
 
-**Deliverable:** Dashboards rendering real data. Wait for "go."
+**Deliverable:** Single tokenscope dashboard rendering real data. Wait for "go."
 
 ### Phase 8: CLI
 - All subcommands implemented

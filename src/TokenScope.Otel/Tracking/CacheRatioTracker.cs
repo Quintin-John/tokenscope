@@ -7,9 +7,16 @@ public sealed class CacheRatioTracker : ICacheRatioSource
     private readonly ConcurrentDictionary<string, Counters> _state
         = new(StringComparer.Ordinal);
 
-    public void Record(string sessionId, long cacheReadTokens, long inputTokens)
+    public void Record(
+        string sessionId,
+        string project,
+        string projectName,
+        long cacheReadTokens,
+        long inputTokens)
     {
         ArgumentException.ThrowIfNullOrEmpty(sessionId);
+        ArgumentNullException.ThrowIfNull(project);
+        ArgumentNullException.ThrowIfNull(projectName);
 
         if (cacheReadTokens < 0 || inputTokens < 0)
         {
@@ -20,13 +27,20 @@ public sealed class CacheRatioTracker : ICacheRatioSource
 
         _state.AddOrUpdate(
             sessionId,
-            new Counters(cacheReadTokens, inputTokens),
-            (_, existing) => new Counters(
-                existing.CacheRead + cacheReadTokens,
-                existing.Input + inputTokens));
+            new Counters(cacheReadTokens, inputTokens, project, projectName),
+            (_, existing) => existing with
+            {
+                CacheRead = existing.CacheRead + cacheReadTokens,
+                Input = existing.Input + inputTokens,
+                // Project labels are updated on every call so a session whose
+                // first event lacked cwd metadata gets the value as soon as
+                // an event provides it.
+                Project = project,
+                ProjectName = projectName,
+            });
     }
 
-    public IEnumerable<(string SessionId, double Ratio)> Snapshot()
+    public IEnumerable<CacheRatioSnapshot> Snapshot()
     {
         foreach (var (sessionId, counters) in _state)
         {
@@ -35,9 +49,17 @@ public sealed class CacheRatioTracker : ICacheRatioSource
             {
                 continue;
             }
-            yield return (sessionId, (double)counters.CacheRead / denominator);
+            yield return new CacheRatioSnapshot(
+                sessionId,
+                counters.Project,
+                counters.ProjectName,
+                (double)counters.CacheRead / denominator);
         }
     }
 
-    private readonly record struct Counters(long CacheRead, long Input);
+    private readonly record struct Counters(
+        long CacheRead,
+        long Input,
+        string Project,
+        string ProjectName);
 }

@@ -10,7 +10,7 @@ public class CacheRatioTrackerTests
     public void Snapshot_AfterRecord_ReturnsRatio()
     {
         var t = new CacheRatioTracker();
-        t.Record("s1", cacheReadTokens: 80, inputTokens: 20);
+        t.Record("s1", "proj-s1", "s1", cacheReadTokens: 80, inputTokens: 20);
 
         var snapshot = t.Snapshot().ToList();
 
@@ -23,7 +23,7 @@ public class CacheRatioTrackerTests
     public void Snapshot_ZeroDenominator_OmitsSession()
     {
         var t = new CacheRatioTracker();
-        t.Record("s1", 0, 0);
+        t.Record("s1", "proj-s1", "s1", 0, 0);
 
         var snapshot = t.Snapshot().ToList();
 
@@ -34,8 +34,8 @@ public class CacheRatioTrackerTests
     public void Record_AccumulatesAcrossCalls()
     {
         var t = new CacheRatioTracker();
-        t.Record("s1", cacheReadTokens: 50, inputTokens: 50);
-        t.Record("s1", cacheReadTokens: 50, inputTokens: 0);
+        t.Record("s1", "proj-s1", "s1", cacheReadTokens: 50, inputTokens: 50);
+        t.Record("s1", "proj-s1", "s1", cacheReadTokens: 50, inputTokens: 0);
 
         var snapshot = t.Snapshot().ToList();
 
@@ -46,8 +46,8 @@ public class CacheRatioTrackerTests
     public void Snapshot_PerSessionDistinct()
     {
         var t = new CacheRatioTracker();
-        t.Record("alpha", cacheReadTokens: 100, inputTokens: 0);
-        t.Record("beta", cacheReadTokens: 0, inputTokens: 100);
+        t.Record("alpha", "proj-alpha", "alpha", cacheReadTokens: 100, inputTokens: 0);
+        t.Record("beta", "proj-beta", "beta", cacheReadTokens: 0, inputTokens: 100);
 
         var snapshot = t.Snapshot().ToDictionary(x => x.SessionId, x => x.Ratio);
 
@@ -59,8 +59,8 @@ public class CacheRatioTrackerTests
     public void Record_NegativeArgs_Throws()
     {
         var t = new CacheRatioTracker();
-        var negRead = () => t.Record("s1", -1, 0);
-        var negInput = () => t.Record("s1", 0, -1);
+        var negRead = () => t.Record("s1", "proj-s1", "s1", -1, 0);
+        var negInput = () => t.Record("s1", "proj-s1", "s1", 0, -1);
 
         negRead.Should().Throw<ArgumentOutOfRangeException>();
         negInput.Should().Throw<ArgumentOutOfRangeException>();
@@ -70,7 +70,7 @@ public class CacheRatioTrackerTests
     public void Record_EmptySessionId_Throws()
     {
         var t = new CacheRatioTracker();
-        var act = () => t.Record("", 1, 1);
+        var act = () => t.Record("", "p", "p", 1, 1);
         act.Should().Throw<ArgumentException>();
     }
 }

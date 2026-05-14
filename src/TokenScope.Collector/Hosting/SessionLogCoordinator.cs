@@ -384,11 +384,15 @@ public sealed class SessionLogCoordinator : BackgroundService
             return; // already counted this requestId in this process
         }
 
+        var (project, projectName) = DeriveProjectLabels(ev.Cwd);
+
         var result = CostCalculator.Calculate(ev.ToRequest(), _pricing);
         switch (result)
         {
             case CostResult.Success s:
-                _metrics.RecordRequest(ev.Model, ev.SessionId, ev.Usage, s.Cost, ev.Timestamp);
+                _metrics.RecordRequest(
+                    ev.Model, ev.SessionId, project, projectName,
+                    ev.Usage, s.Cost, ev.Timestamp);
                 break;
             case CostResult.ModelNotFound mnf:
                 _logger.LogDebug(
@@ -401,6 +405,54 @@ public sealed class SessionLogCoordinator : BackgroundService
                     nre.ModelId, nre.RequestedAt, ev.RequestId);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Derives the two project metric labels from a cwd value:
+    /// <list type="bullet">
+    ///   <item><c>project</c> — Claude Code's directory-name encoding of
+    ///         <paramref name="cwd"/>: '/' and ' ' both become '-'. Lossy but
+    ///         unique per host filesystem.</item>
+    ///   <item><c>project_name</c> — last path segment of <paramref name="cwd"/>.
+    ///         Friendly to display; can collide across cwds.</item>
+    /// </list>
+    /// Both values are sanitized to ASCII, control characters stripped,
+    /// truncated to 64 chars. <c>null</c>/empty cwd → both = "unknown".
+    /// </summary>
+    internal static (string Project, string ProjectName) DeriveProjectLabels(string? cwd)
+    {
+        if (string.IsNullOrWhiteSpace(cwd))
+        {
+            return ("unknown", "unknown");
+        }
+
+        var encoded = Sanitize(cwd.Replace('/', '-').Replace(' ', '-'));
+        var name = Sanitize(Path.GetFileName(cwd.TrimEnd('/', '\\')));
+        if (string.IsNullOrEmpty(name))
+        {
+            name = "unknown";
+        }
+        return (encoded, name);
+    }
+
+    private static string Sanitize(string value)
+    {
+        const int maxLen = 64;
+        var span = value.AsSpan();
+        var sb = new System.Text.StringBuilder(Math.Min(span.Length, maxLen));
+        foreach (var c in span)
+        {
+            if (sb.Length >= maxLen) break;
+            // Strip control characters; keep printable ASCII + Unicode letters/digits/punct.
+            if (!char.IsControl(c)) sb.Append(c);
+        }
+        if (value.Length > maxLen)
+        {
+            // Last 3 chars become ellipsis to signal truncation.
+            sb.Length = maxLen - 3;
+            sb.Append("...");
+        }
+        return sb.ToString();
     }
 
     private void TryFlushState()

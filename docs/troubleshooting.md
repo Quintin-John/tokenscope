@@ -164,6 +164,33 @@ The `.env.example` documents this. Linux and macOS users don't hit this — `${H
 
 The `FileSystemWatcher` works reliably over bind mounts for `pricing.json` specifically — it's a single file. The macOS-bind-mount caveat for `~/.claude/projects` doesn't apply to single-file bind mounts.
 
+## Dashboard edits don't survive `docker compose down`
+
+**Symptom**: I made a dashboard change in the Grafana UI, ran
+`docker compose down && up`, and my change is gone.
+
+**Cause**: Grafana's provisioning files are bind-mounted **read-only**
+into the container. Provisioning re-applies the on-disk JSON every 30
+seconds (the `updateIntervalSeconds` setting in
+`docker/grafana/provisioning/dashboards/dashboards.yaml`). UI edits
+live only in the Grafana-internal database, which is wiped when the
+container is recreated without a persistent volume.
+
+**Fix — for changes you want to keep**:
+
+1. Edit the dashboard in the UI.
+2. Open the dashboard's **Share → Export → Save to file**.
+3. Replace `docker/grafana/dashboards/tokenscope.json` with the
+   exported file.
+4. Commit to git.
+
+The next provisioning cycle (≤ 30s) re-loads your version. The Grafana
+UI's dashboard list shows the dashboard with your changes.
+
+**For ad-hoc exploration**: edits in the UI are fine — they just won't
+be the source of truth. Don't try to make the running Grafana the
+source of truth; the repo's `docker/grafana/dashboards/` is.
+
 ## Resetting the stack
 
 Stop everything and remove data:

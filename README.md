@@ -10,9 +10,12 @@ as metrics.
 
 ## Status
 
-Phase 6 (full Docker stack). All four services run via `docker compose`:
-collector + OTEL Collector + Prometheus + Grafana. See
-[CLAUDE.md](./CLAUDE.md) for the full project plan and build phases.
+Phase 7 (unified dashboard). One Grafana dashboard with collapsible
+rows for Mode banner, At a glance, Cost trends, Sessions, Cache
+efficiency, Cost breakdown, and Stack health. See [CLAUDE.md](./CLAUDE.md)
+for the full project plan and build phases.
+
+![tokenscope dashboard](docs/images/dashboard-full.png)
 
 ## Quick start
 
@@ -31,6 +34,11 @@ That's it — one command starts the whole pipeline:
 |---|---|---|
 | Grafana | <http://localhost:3000> (admin / tokenscope) | Dashboards |
 | _Everything else_ | internal-only | OTLP ingest, Prometheus scrape — not exposed |
+
+The dashboard is at <http://localhost:3000/d/tokenscope/tokenscope>.
+**Designed for Grafana's dark theme** — neutral colours lose contrast on
+light backgrounds. To switch theme: avatar (top-right) → Preferences →
+UI theme → Dark.
 
 The collector reads `${HOME}/.claude/projects/` as a read-only bind mount
 inside its container, parses logs, computes cost via `config/pricing.json`,
