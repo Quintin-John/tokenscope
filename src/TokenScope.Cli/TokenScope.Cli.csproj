@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TokenScope.Cli</RootNamespace>
+    <AssemblyName>tokenscope</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TokenScope.Core\TokenScope.Core.csproj" />
+  </ItemGroup>
+
+</Project>

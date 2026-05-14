@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TokenScope.Collector</RootNamespace>
+    <AssemblyName>TokenScope.Collector</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TokenScope.Core\TokenScope.Core.csproj" />
+    <ProjectReference Include="..\TokenScope.Otel\TokenScope.Otel.csproj" />
+  </ItemGroup>
+
+</Project>
