@@ -26,4 +26,10 @@
     <ProjectReference Include="..\..\src\TokenScope.Core\TokenScope.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="Fixtures\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "source": "test-fixture",
+  "verified_at": "2026-01-01T00:00:00Z",
+  "currency": "USD",
+  "models": [
+    {
+      "id": "claude-opus-4-7",
+      "rates": [
+        {
+          "effective_date": "2026-01-01T00:00:00Z",
+          "input_per_mtok": 5.00,
+          "output_per_mtok": 25.00,
+          "cache_read_per_mtok": 0.50,
+          "cache_write_5m_per_mtok": 6.25,
+          "cache_write_1h_per_mtok": 10.00
+        }
+      ]
+    }
+  ]
+}
