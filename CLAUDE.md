@@ -78,10 +78,6 @@ Generate exactly this structure in Phase 1. Confirm the file list before creatin
 
 ```
 tokenscope/
-├── .github/
-│   └── workflows/
-│       ├── ci.yml
-│       └── release.yml
 ├── src/
 │   ├── TokenScope.Core/
 │   ├── TokenScope.Otel/
@@ -105,25 +101,22 @@ tokenscope/
 ├── config/
 │   ├── pricing.json
 │   └── tokenscope.example.yaml
-├── scripts/
-│   ├── install-windows.ps1
-│   └── install-macos.sh
 ├── docs/
 │   ├── architecture.md
 │   ├── pricing-model.md
 │   ├── metric-reference.md
 │   └── troubleshooting.md
 ├── README.md
+├── CHANGELOG.md
 ├── LICENSE
 ├── .editorconfig
 ├── .gitignore
+├── .env.example
 ├── Directory.Build.props
 ├── Directory.Packages.props
 ├── TokenScope.sln
 └── CLAUDE.md
 ```
-
-Default output is human-readable tables. `--json` flag produces machine-readable output. `--no-color` flag disables ANSI colors.
 
 ### Subscription mode
 
@@ -164,7 +157,11 @@ xUnit + FluentAssertions + NSubstitute. Tests in `tests/` mirror the `src/` layo
 
 Integration tests under `tests/*.Tests/Integration/` should spin up an in-memory `OpenTelemetry.Sdk` instance to verify end-to-end metric emission.
 
-CI must run all tests on both `windows-latest` and `macos-latest` runners.
+**Testing workflow:** `dotnet test` is run **manually** on the developer's
+machine before committing or opening a PR. There is no automated CI gate —
+GitHub Actions is intentionally not used on this project (see operating
+constraint and `.gitignore`). Windows verification is deferred until a
+maintainer has access to a Windows machine.
 
 ---
 
@@ -178,10 +175,11 @@ Work in phases. **Stop at every phase boundary and wait for "go" before proceedi
 - Generate `.gitignore`, `.editorconfig`, `Directory.Build.props`
 - Create solution and empty projects with correct references
 - Stub `Program.cs` files that build but do nothing
-- CI workflow that builds and runs tests on Windows + macOS
 - README skeleton
 
-**Deliverable:** `dotnet build` and `dotnet test` succeed on both OSes with no real tests yet. Commit and push. Wait for "go."
+**Deliverable:** `dotnet build` and `dotnet test` succeed locally on macOS
+with no real tests yet. Commit and push. Wait for "go." No GitHub Actions
+workflow ships — `.github/workflows/` is gitignored.
 
 ### Phase 2: Core domain
 - Domain models as immutable records
@@ -237,7 +235,8 @@ Work in phases. **Stop at every phase boundary and wait for "go" before proceedi
 - Template variables: `$model`, `$project_name`, `$subscription_mode`
 - Default time range: last 24 hours
 - Tested with real metrics flowing
-- Screenshots in README captured via the Grafana image renderer
+- One committed dashboard screenshot in README (one-time artifact, no
+  auto-capture machinery in steady state)
 
 **Deliverable:** Single tokenscope dashboard rendering real data. Wait for "go."
 
@@ -257,12 +256,17 @@ Work in phases. **Stop at every phase boundary and wait for "go" before proceedi
 **Deliverable:** validate-pricing flag with passing tests. Wait for "go."
 
 ### Phase 9: Polish and release
-- Documentation complete
-- Installation scripts (`scripts/install-windows.ps1`, `scripts/install-macos.sh`)
-- Release workflow producing signed binaries
-- README with screenshots, badges, install instructions
-- CHANGELOG.md
-- Tag v0.1.0
+- Documentation complete (architecture, metric-reference, pricing-model,
+  troubleshooting)
+- README with screenshot + getting-started flow (already in place since
+  Phase 8; final review only)
+- CHANGELOG.md with v0.1.0 entry + deviations summary
+- CLAUDE.md cleaned of all CI / GitHub Actions references
+- `scripts/` placeholder removed (no install scripts — `docker compose up`
+  is the install)
+- No release workflow, no signed binaries — release artifact is the git
+  tag `v0.1.0`. Users clone the tag and run `docker compose up`.
+- Tag `v0.1.0` after this phase's PR merges
 
 **Deliverable:** Ready for v0.1.0 release. Repository public-ready.
 

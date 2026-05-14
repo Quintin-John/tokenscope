@@ -71,7 +71,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "count(count by (tokenscope_subscription_mode) (tokenscope_requests_total))",
-          "instant": true
+          "instant": true, "range": false
         }
       ],
       "fieldConfig": {
@@ -114,7 +114,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(increase(tokenscope_cost_usd_total{model=~\"$model\", project_name=~\"$project_name\"}[$__range]))",
-          "instant": true
+          "instant": true, "range": false
         }
       ],
       "fieldConfig": {
@@ -139,7 +139,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(increase(tokenscope_cost_usd_total{model=~\"$model\", project_name=~\"$project_name\"}[7d]))",
-          "instant": true
+          "instant": true, "range": false
         }
       ],
       "fieldConfig": {
@@ -164,7 +164,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(increase(tokenscope_cost_usd_total{model=~\"$model\", project_name=~\"$project_name\"}[30d]))",
-          "instant": true
+          "instant": true, "range": false
         }
       ],
       "fieldConfig": {
@@ -189,7 +189,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(increase(tokenscope_cost_usd_total{component=\"cache_read\", model=~\"$model\", project_name=~\"$project_name\"}[$__range])) * 9",
-          "instant": true
+          "instant": true, "range": false
         }
       ],
       "fieldConfig": {
@@ -214,7 +214,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "tokenscope_sessions_active",
-          "instant": true
+          "instant": true, "range": false
         }
       ],
       "fieldConfig": {
@@ -238,7 +238,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "avg(tokenscope_cache_hit_ratio{project_name=~\"$project_name\"})",
-          "instant": true
+          "instant": true, "range": false
         }
       ],
       "fieldConfig": {
@@ -320,7 +320,7 @@
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum by (component) (increase(tokenscope_cost_usd_total{model=~\"$model\", project_name=~\"$project_name\"}[$__range]))",
           "legendFormat": "{{component}}",
-          "instant": true
+          "instant": true, "range": false
         }
       ],
       "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
@@ -350,7 +350,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "(sum by (session_id, project_name, model) (tokenscope_requests_total{model=~\"$model\", project_name=~\"$project_name\"})) and (sum by (session_id) (increase(tokenscope_requests_total[15m])) > 0)",
-          "instant": true,
+          "instant": true, "range": false,
           "format": "table",
           "legendFormat": "requests"
         },
@@ -358,7 +358,7 @@
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum by (session_id) (tokenscope_cost_usd_total{model=~\"$model\", project_name=~\"$project_name\"})",
-          "instant": true,
+          "instant": true, "range": false,
           "format": "table",
           "legendFormat": "cost"
         }
@@ -402,7 +402,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "topk(20, sum by (session_id, project_name) (tokenscope_cost_usd_total{model=~\"$model\", project_name=~\"$project_name\"}))",
-          "instant": true,
+          "instant": true, "range": false,
           "format": "table"
         }
       ],
@@ -444,7 +444,7 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "topk(20, tokenscope_cache_hit_ratio{project_name=~\"$project_name\"})",
-          "instant": true,
+          "instant": true, "range": false,
           "format": "table"
         }
       ],
@@ -517,7 +517,7 @@
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "expr": "sum by (model) (increase(tokenscope_cost_usd_total{model=~\"$model\", project_name=~\"$project_name\"}[$__range]))",
               "legendFormat": "{{model}}",
-              "instant": true
+              "instant": true, "range": false
             }
           ],
           "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 }, "overrides": [] },
@@ -563,7 +563,7 @@
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "expr": "sum by (model) (increase(tokenscope_tokens_input_total{model=~\"$model\", project_name=~\"$project_name\"}[$__range]) + on(model, session_id, project, project_name) increase(tokenscope_tokens_output_total{model=~\"$model\", project_name=~\"$project_name\"}[$__range]))",
               "legendFormat": "{{model}}",
-              "instant": true
+              "instant": true, "range": false
             }
           ],
           "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
@@ -584,7 +584,7 @@
           "title": "tokenscope scrape",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "gridPos": { "x": 0, "y": 42, "w": 6, "h": 4 },
-          "targets": [{ "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "up{job=\"tokenscope\"}", "instant": true }],
+          "targets": [{ "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "up{job=\"tokenscope\"}", "instant": true, "range": false }],
           "fieldConfig": {
             "defaults": {
               "mappings": [{ "type": "value", "options": { "0": { "color": "red", "text": "DOWN" }, "1": { "color": "green", "text": "UP" } } }],
@@ -600,7 +600,7 @@
           "title": "OTEL Collector self",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "gridPos": { "x": 6, "y": 42, "w": 6, "h": 4 },
-          "targets": [{ "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "up{job=\"otel-collector-internal\"}", "instant": true }],
+          "targets": [{ "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "up{job=\"otel-collector-internal\"}", "instant": true, "range": false }],
           "fieldConfig": {
             "defaults": {
               "mappings": [{ "type": "value", "options": { "0": { "color": "red", "text": "DOWN" }, "1": { "color": "green", "text": "UP" } } }],
@@ -629,7 +629,7 @@
           "title": "Distinct tokenscope series",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "gridPos": { "x": 0, "y": 46, "w": 6, "h": 4 },
-          "targets": [{ "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "count(count by (__name__) ({__name__=~\"tokenscope_.*\"}))", "instant": true }],
+          "targets": [{ "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "count(count by (__name__) ({__name__=~\"tokenscope_.*\"}))", "instant": true, "range": false }],
           "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "#4E92E0" } }, "overrides": [] },
           "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value" }
         },
@@ -639,7 +639,7 @@
           "title": "Last scrape duration",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "gridPos": { "x": 6, "y": 46, "w": 6, "h": 4 },
-          "targets": [{ "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "scrape_duration_seconds{job=\"tokenscope\"}", "instant": true }],
+          "targets": [{ "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "scrape_duration_seconds{job=\"tokenscope\"}", "instant": true, "range": false }],
           "fieldConfig": { "defaults": { "unit": "s", "decimals": 3 }, "overrides": [] },
           "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "center", "textMode": "value" }
         }
