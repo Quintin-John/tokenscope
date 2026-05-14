@@ -21,6 +21,14 @@ public static class Program
 {
     public static int Main(string[] args)
     {
+        // Pre-host flag: --validate-pricing <path>. Runs PricingLoader, prints
+        // results, exits. Skips the hosted-service startup so CI use is cheap.
+        // Exit codes: 0 success, 4 validation failure, 2 usage error.
+        if (TryGetValidatePricingPath(args, out var pricingPath))
+        {
+            return RunValidatePricing(pricingPath);
+        }
+
         try
         {
             var builder = Host.CreateApplicationBuilder(args);
@@ -87,6 +95,69 @@ public static class Program
         }
         var envPath = Environment.GetEnvironmentVariable("TOKENSCOPE_CONFIG");
         return !string.IsNullOrWhiteSpace(envPath) ? envPath : "tokenscope.yaml";
+    }
+
+    /// <summary>
+    /// Parses the <c>--validate-pricing &lt;path&gt;</c> flag. Returns true when
+    /// the flag is present with a non-empty path.
+    /// </summary>
+    internal static bool TryGetValidatePricingPath(string[] args, out string path)
+    {
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--validate-pricing")
+            {
+                if (i + 1 < args.Length && !string.IsNullOrWhiteSpace(args[i + 1]))
+                {
+                    path = args[i + 1];
+                    return true;
+                }
+                Console.Error.WriteLine("--validate-pricing requires a path argument.");
+                Environment.ExitCode = 2;
+                path = "";
+                return false;
+            }
+        }
+        path = "";
+        return false;
+    }
+
+    /// <summary>
+    /// Runs <see cref="PricingLoader.LoadFromFile"/> on the given path and
+    /// reports the result. Exit codes:
+    ///   0  — pricing.json is valid
+    ///   4  — validation failed; errors printed to stderr
+    ///   2  — usage error (file not found, IO error)
+    /// </summary>
+    internal static int RunValidatePricing(string path)
+    {
+        if (!File.Exists(path))
+        {
+            Console.Error.WriteLine($"--validate-pricing: file not found: {path}");
+            return 2;
+        }
+
+        try
+        {
+            var table = PricingLoader.LoadFromFile(path);
+            Console.Out.WriteLine(
+                $"OK  {path} — {table.KnownModelIds.Length} models, schema_version=1");
+            return 0;
+        }
+        catch (PricingValidationException ex)
+        {
+            Console.Error.WriteLine($"FAIL  {path} — {ex.Errors.Length} validation error(s):");
+            foreach (var err in ex.Errors)
+            {
+                Console.Error.WriteLine($"  - {err}");
+            }
+            return 4;
+        }
+        catch (IOException ex)
+        {
+            Console.Error.WriteLine($"--validate-pricing: I/O error reading {path}: {ex.Message}");
+            return 2;
+        }
     }
 
     private static void ConfigureLogging(HostApplicationBuilder builder, ResolvedTokenScopeOptions resolved)

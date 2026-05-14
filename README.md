@@ -1,54 +1,118 @@
 # tokenscope
 
-A local-first observability tool for Claude Code usage and cost tracking.
+A local-first observability tool for **Claude Code** usage and cost tracking.
 
-Parses local Claude Code session logs, computes token usage and costs, exports
-metrics via OpenTelemetry, and provides Grafana dashboards for analysis. No
-prompt content or tool result bodies ever leave the host — only token counts,
-model identifiers, timestamps, cache statistics, and session IDs are exported
-as metrics.
-
-## Status
-
-Phase 7 (unified dashboard). One Grafana dashboard with collapsible
-rows for Mode banner, At a glance, Cost trends, Sessions, Cache
-efficiency, Cost breakdown, and Stack health. See [CLAUDE.md](./CLAUDE.md)
-for the full project plan and build phases.
+tokenscope parses your local Claude Code session logs, computes token
+usage and cost using current Anthropic pricing, and renders everything in
+a single Grafana dashboard — including how much money you saved by using
+prompt caching. **No prompt content, tool result bodies, or file contents
+ever leave the host.** Only token counts, model identifiers, timestamps,
+cache statistics, and session IDs are exported as metrics.
 
 ![tokenscope dashboard](docs/images/dashboard-full.png)
 
 ## Quick start
 
-Prerequisites: Docker Desktop (macOS / Windows) or Docker Engine (Linux).
-Claude Code already installed and used at least once, so
-`~/.claude/projects/` exists with `.jsonl` session files.
+**Prerequisites:**
+- Docker Desktop (macOS / Windows) or Docker Engine (Linux)
+- Claude Code already installed and used at least once so
+  `~/.claude/projects/` exists with `.jsonl` session files
 
 ```sh
-cd docker
+git clone https://github.com/Quintin-John/tokenscope.git
+cd tokenscope/docker
 docker compose up
 ```
 
-That's it — one command starts the whole pipeline:
+That's it. The stack:
 
-| Service | URL | Purpose |
+| Service | URL / port | What it does |
 |---|---|---|
-| Grafana | <http://localhost:3000> (admin / tokenscope) | Dashboards |
-| _Everything else_ | internal-only | OTLP ingest, Prometheus scrape — not exposed |
+| **Grafana** | <http://localhost:3000> (admin / tokenscope) | The dashboard you actually use |
+| Collector | internal-only | Reads `~/.claude/projects/` and emits OTLP |
+| OTEL Collector | internal-only | Receives OTLP, exposes a Prometheus scrape endpoint |
+| Prometheus | internal-only | Scrapes and stores metrics |
 
-The dashboard is at <http://localhost:3000/d/tokenscope/tokenscope>.
-**Designed for Grafana's dark theme** — neutral colours lose contrast on
-light backgrounds. To switch theme: avatar (top-right) → Preferences →
-UI theme → Dark.
+Only Grafana is published to the host. The other services talk to each
+other over an internal Docker network.
 
-The collector reads `${HOME}/.claude/projects/` as a read-only bind mount
-inside its container, parses logs, computes cost via `config/pricing.json`,
-and publishes OTLP to the OTEL Collector over the internal `tokenscope`
-network.
+## What to look at first
 
-See [`docs/architecture.md`](./docs/architecture.md) for the full
-container layout and configuration precedence rules; see
-[`docs/troubleshooting.md`](./docs/troubleshooting.md) when things
-go wrong.
+Open **<http://localhost:3000/d/tokenscope/tokenscope>** (login: `admin` /
+`tokenscope`). The dashboard has seven collapsible rows:
+
+| Row | The question it answers |
+|---|---|
+| **At a glance** | "How much have I spent?" — 24h / 7d / 30d totals plus **Saved by caching** (the headline number) |
+| **Cost trends** | "Where is the spend going over time?" — cumulative cost by model, share by component |
+| **Sessions** | "What's running right now / what cost the most?" — active sessions table and historical top sessions |
+| **Cache efficiency** | "Is my workflow benefiting from caching?" — hit ratio per session, read vs write split |
+| **Cost breakdown detail** | _(collapsed)_ Deeper splits by model, daily trend with 7-day MA |
+| **Stack health** | _(collapsed)_ Scrape status and OTLP throughput — only useful when something's wrong |
+
+**Designed for dark theme.** If panels look washed out, switch via avatar
+(top right) → Preferences → UI theme → Dark.
+
+### The headline insight
+
+The **Saved by caching** stat on the At-a-glance row shows the dollar
+amount you would have paid if cache hits had been billed at full input
+rate. Formula and derivation in
+[`docs/metric-reference.md`](./docs/metric-reference.md#estimated-savings-from-caching).
+On a typical Claude Code workload this number is often **5–10× your
+actual monthly bill** — caching matters.
+
+## Configuration
+
+| File | What it controls |
+|---|---|
+| [`config/tokenscope.example.yaml`](./config/tokenscope.example.yaml) | Copy to `tokenscope.yaml` to override defaults. Path is auto-detected if you don't. |
+| [`config/pricing.json`](./config/pricing.json) | Anthropic per-model rates. **Hot-reloadable** — edit while the stack is running and the collector picks up changes within a second. |
+| [`.env.example`](./.env.example) | Compose-level overrides (Grafana password, polling toggle, Windows WSL2 note) |
+
+Env vars with prefix `TOKENSCOPE_` override `tokenscope.yaml` values at
+runtime. Convention: `TOKENSCOPE_<section>__<key>=value`. See
+[`docs/architecture.md`](./docs/architecture.md#configuration-precedence)
+for the full precedence rules.
+
+## Validating `pricing.json` in CI
+
+Before deploying a pricing config change, gate it through the collector's
+built-in validator:
+
+```sh
+docker compose run --rm tokenscope-collector \
+    --validate-pricing /data/config/pricing.json
+```
+
+Exits `0` on success, `4` on validation failure (errors on stderr), `2`
+on file-not-found. No worker service starts — pure validation,
+CI-friendly. Full details in
+[`docs/troubleshooting.md`](./docs/troubleshooting.md#ci--scripting--validate-pricingjson-before-deploying).
+
+## Common operations
+
+**Stop the stack** (preserve all data):
+```sh
+docker compose down
+```
+
+**Stop and wipe all metric history**:
+```sh
+docker compose down --volumes
+```
+
+**Force a full re-scan** of session logs (forget where the collector left off):
+```sh
+docker compose down
+docker volume rm tokenscope-state
+docker compose up
+```
+
+**Tail the collector's logs**:
+```sh
+docker compose logs -f tokenscope-collector
+```
 
 ## Development build (without Docker)
 
@@ -58,20 +122,16 @@ dotnet build
 dotnet test
 ```
 
-Requires the .NET 8 SDK (pinned via [`global.json`](./global.json)).
-Useful for working on the code; for end-to-end testing of the OTEL
-pipeline, use the docker-compose stack above.
+Requires the .NET 8 SDK (pinned via [`global.json`](./global.json)). The
+.NET workflow is for working on the code itself; for using tokenscope as
+a tool, the Docker stack is the supported path.
 
-## Configuration
+## Troubleshooting
 
-| Where | What |
-|---|---|
-| [`config/tokenscope.example.yaml`](./config/tokenscope.example.yaml) | Collector behaviour: scan settings, OTLP endpoint, subscription mode, logging |
-| [`config/pricing.json`](./config/pricing.json) | Anthropic per-model rates, versioned by `effective_date`. Hot-reloadable. |
-| [`.env.example`](./.env.example) | docker-compose env overrides (Grafana password, polling toggle, etc.) |
-
-Env vars with prefix `TOKENSCOPE_` override YAML values at runtime.
-See [`docs/architecture.md` → "Configuration precedence"](./docs/architecture.md#configuration-precedence).
+See [`docs/troubleshooting.md`](./docs/troubleshooting.md). Common
+issues addressed up front: permission-denied on log reads, dashboard
+shows no data, file-watcher events not firing on macOS, port conflicts,
+Windows WSL2 path resolution, Grafana credentials.
 
 ## License
 

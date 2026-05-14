@@ -191,6 +191,41 @@ UI's dashboard list shows the dashboard with your changes.
 be the source of truth. Don't try to make the running Grafana the
 source of truth; the repo's `docker/grafana/dashboards/` is.
 
+## CI / scripting — validate `pricing.json` before deploying
+
+The collector binary exposes a `--validate-pricing <path>` flag for
+CI pipelines. It runs the same `PricingLoader` the live collector
+uses at startup but **does not** start the worker service or any
+hosted services, so the validation is cheap and noise-free.
+
+Canonical invocation:
+
+```sh
+docker compose run --rm tokenscope-collector --validate-pricing /data/config/pricing.json
+```
+
+Exit codes (stable, scriptable):
+
+| Code | Meaning |
+|---|---|
+| **0** | `pricing.json` is valid — number of models reported on stdout |
+| **2** | Usage error: file not found, I/O error, or flag missing its path argument |
+| **4** | Validation failed — each error listed on **stderr**, one per line |
+
+stdout is reserved for the success summary so downstream commands
+piping output don't get errors mixed in. stderr carries all error
+details. Standard Unix-style separation.
+
+Example CI gate:
+
+```sh
+if ! docker compose run --rm tokenscope-collector \
+        --validate-pricing /data/config/pricing.json; then
+  echo "pricing.json failed validation; refusing to deploy."
+  exit 1
+fi
+```
+
 ## Resetting the stack
 
 Stop everything and remove data:
