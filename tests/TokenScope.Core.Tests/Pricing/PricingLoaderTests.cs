@@ -250,6 +250,59 @@ public class PricingLoaderTests
     }
 
     [Fact]
+    public void LoadFromJson_NonUsdCurrency_Throws()
+    {
+        const string json = """
+            {
+              "schema_version": 1,
+              "currency": "EUR",
+              "models": [{
+                "id": "m",
+                "rates": [{
+                  "effective_date": "2026-01-01T00:00:00Z",
+                  "input_per_mtok": 1,
+                  "output_per_mtok": 1,
+                  "cache_read_per_mtok": 1,
+                  "cache_write_5m_per_mtok": 1,
+                  "cache_write_1h_per_mtok": 1
+                }]
+              }]
+            }
+            """;
+
+        var act = () => PricingLoader.LoadFromJson(json, FixedClock(FixedNow));
+
+        act.Should().Throw<PricingValidationException>()
+            .Which.Errors.Should().Contain(e => e.Contains("currency 'EUR'"));
+    }
+
+    [Fact]
+    public void LoadFromJson_MissingCurrency_TreatedAsUsd()
+    {
+        // No "currency" field — should load successfully.
+        const string json = """
+            {
+              "schema_version": 1,
+              "models": [{
+                "id": "m",
+                "rates": [{
+                  "effective_date": "2026-01-01T00:00:00Z",
+                  "input_per_mtok": 1,
+                  "output_per_mtok": 1,
+                  "cache_read_per_mtok": 1,
+                  "cache_write_5m_per_mtok": 1,
+                  "cache_write_1h_per_mtok": 1
+                }]
+              }]
+            }
+            """;
+
+        var act = () => PricingLoader.LoadFromJson(json, FixedClock(FixedNow));
+
+        act.Should().NotThrow();
+    }
+
+    [Fact]
     public void PricingValidationException_WithEmptyErrors_HasFallbackMessage()
     {
         var ex = new PricingValidationException(System.Collections.Immutable.ImmutableArray<string>.Empty);

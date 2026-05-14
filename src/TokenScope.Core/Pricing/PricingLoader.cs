@@ -7,6 +7,7 @@ namespace TokenScope.Core.Pricing;
 public static class PricingLoader
 {
     public const int SupportedSchemaVersion = 1;
+    public const string SupportedCurrency = "USD";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -62,6 +63,15 @@ public static class PricingLoader
         if (dto.SchemaVersion != SupportedSchemaVersion)
         {
             errors.Add($"schema_version {dto.SchemaVersion} is not supported (expected {SupportedSchemaVersion}).");
+        }
+
+        // Currency is USD-only at v1. Reject anything else loudly rather than silently
+        // calculating "USD" cost from non-USD rates. A null/missing currency is treated
+        // as USD for backward compatibility with configs that pre-date this check.
+        if (dto.Currency is not null
+            && !string.Equals(dto.Currency, SupportedCurrency, StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add($"currency '{dto.Currency}' is not supported (only {SupportedCurrency} is supported in this version).");
         }
 
         if (dto.Models is null || dto.Models.Count == 0)
