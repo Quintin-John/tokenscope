@@ -253,6 +253,12 @@ isolated to the presentation layer.
 - **Timestamps:** `DateTimeOffset` stored as UTC. Display conversion to
   the user's local zone happens at the CLI / Grafana boundary, never in
   the cost engine.
-- **Currency:** USD only at v1. The `currency` field in `pricing.json`
-  is informational; the schema does not yet support multi-currency
-  rates.
+- **Currency:** USD only at v1. The pricing loader **fails fast** if
+  `currency` is set to anything other than `"USD"` (case-insensitive),
+  with the error `currency '<X>' is not supported (only USD is
+  supported in this version).` A null or missing `currency` field is
+  treated as USD for backward compatibility. There is no FX
+  conversion, no exchange-rate lookup, and no multi-currency
+  aggregation anywhere in tokenscope. The OTEL `tokenscope.cost.usd`
+  metric uses `USD` as its unit and is not localized; presentation
+  formatting (`$`, decimal places) is a dashboard concern (Phase 7).
