@@ -53,6 +53,7 @@ public sealed class SessionLogCoordinator : BackgroundService
     private readonly object _processingLock = new();
 
     private FileSystemWatcher? _watcher;
+    private Timer? _pollingTimer;
     private string StatePath => Path.Combine(_options.StatePath, "seen.json");
 
     public SessionLogCoordinator(
@@ -76,7 +77,14 @@ public sealed class SessionLogCoordinator : BackgroundService
 
         EnsureSessionLogsDirectoryHandled();
 
-        StartFileSystemWatcher();
+        if (_options.Options.SessionLogs.UsePolling)
+        {
+            StartPollingTimer();
+        }
+        else
+        {
+            StartFileSystemWatcher();
+        }
 
         if (_options.Options.SessionLogs.InitialScanEnabled)
         {
@@ -97,6 +105,11 @@ public sealed class SessionLogCoordinator : BackgroundService
             _watcher.EnableRaisingEvents = false;
             _watcher.Dispose();
             _watcher = null;
+        }
+        if (_pollingTimer is not null)
+        {
+            await _pollingTimer.DisposeAsync().ConfigureAwait(false);
+            _pollingTimer = null;
         }
         await base.StopAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -162,6 +175,33 @@ public sealed class SessionLogCoordinator : BackgroundService
             _options.SessionLogsPath);
         // Watch the parent directory so the FileSystemWatcher catches subdir creation.
         Directory.CreateDirectory(_options.SessionLogsPath);
+    }
+
+    private void StartPollingTimer()
+    {
+        var interval = TimeSpan.FromSeconds(_options.Options.SessionLogs.PollingIntervalSeconds);
+        _logger.LogInformation(
+            "FileSystemWatcher disabled (use_polling=true). Polling every {Seconds}s.",
+            interval.TotalSeconds);
+
+        _pollingTimer = new Timer(_ => EnqueueAllSessionFiles(),
+            state: null,
+            dueTime: interval,
+            period: interval);
+    }
+
+    private void EnqueueAllSessionFiles()
+    {
+        if (!Directory.Exists(_options.SessionLogsPath))
+        {
+            return;
+        }
+        foreach (var file in Directory.EnumerateFiles(
+                     _options.SessionLogsPath, "*.jsonl", SearchOption.AllDirectories))
+        {
+            // TryWrite is a no-op if the writer is completed (StopAsync).
+            _workQueue.Writer.TryWrite(file);
+        }
     }
 
     private void StartFileSystemWatcher()

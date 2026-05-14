@@ -87,9 +87,13 @@ public sealed class TokenScopeMetrics : IDisposable
             unit: "{tokens}",
             description: "Cache write tokens. ttl attribute distinguishes 5m and 1h TTLs.");
 
+        // Annotation unit "{usd}" (curly braces are the OTEL convention for
+        // annotated/non-UCUM units) prevents the Prometheus exporter from
+        // appending an extra _USD to the metric name. Result in Prometheus:
+        // tokenscope_cost_usd_total — not tokenscope_cost_usd_USD_total.
         _costUsd = _meter.CreateCounter<double>(
             "tokenscope.cost.usd",
-            unit: "USD",
+            unit: "{usd}",
             description: "USD cost per component. component ∈ {input, output, cache_read, cache_write_5m, cache_write_1h}.");
 
         _requestsTotal = _meter.CreateCounter<long>(

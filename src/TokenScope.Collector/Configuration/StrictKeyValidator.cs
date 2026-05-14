@@ -42,9 +42,19 @@ internal static class StrictKeyValidator
 
             if (!expected.Contains(path))
             {
-                unknown.Add(path);
-                // Don't recurse into an unknown subtree — its children would
-                // produce noise. Reporting the parent is enough.
+                // Strict within known sections, lenient at root.
+                // The Host's DOTNET_-prefix env-var provider injects keys like
+                // CLI_TELEMETRY_OPTOUT and RUNNING_IN_CONTAINER at the root of
+                // the IConfiguration tree. We can't strip that provider
+                // without breaking host internals that rely on DOTNET_*
+                // settings, so we treat unknown top-level keys as ambient
+                // noise instead. Typos inside a known section (e.g.
+                // session_logs.scan_recursive) still get caught with their
+                // full dotted path in the error message.
+                if (!string.IsNullOrEmpty(parentPath))
+                {
+                    unknown.Add(path);
+                }
                 continue;
             }
 

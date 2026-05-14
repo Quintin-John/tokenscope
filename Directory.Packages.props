@@ -7,6 +7,10 @@
 
   <ItemGroup Label="Hosting (.NET 8 LTS line)">
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <!-- Pulled in transitively by Hosting; pinned explicitly so CPM's
+         transitive pinning doesn't fail Docker multi-stage builds with a
+         "package not found" error during dotnet publish without restore. -->
+    <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="8.0.2" />
   </ItemGroup>
 
   <ItemGroup Label="Configuration (YAML provider)">

@@ -1,0 +1,17 @@
+apiVersion: 1
+
+# Auto-load every dashboard JSON under /var/lib/grafana/dashboards. The repo
+# bind-mounts docker/grafana/dashboards/ into that path read-only. Editing a
+# provisioned dashboard in the UI requires `allowUiUpdates: true`; we keep it
+# false so the source of truth stays in git.
+providers:
+  - name: tokenscope
+    orgId: 1
+    folder: tokenscope
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

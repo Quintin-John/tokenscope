@@ -69,6 +69,7 @@ appsettings.Development.json
 appsettings.Local.json
 *.local.*
 secrets.json
+.env
 
 # OS / editor cruft
 Thumbs.db

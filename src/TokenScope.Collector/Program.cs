@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Configuration.EnvironmentVariables;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -24,10 +25,30 @@ public static class Program
         {
             var builder = Host.CreateApplicationBuilder(args);
 
+            // Host.CreateApplicationBuilder adds an unprefixed env-var provider
+            // that picks up every ambient env var (HOME, PATH, HOSTNAME, etc.).
+            // In a container those flood the config tree and the strict-key
+            // validator can't tell them apart from typos. Remove it; the
+            // prefix-scoped TOKENSCOPE_ provider we add below is the only env
+            // entry point we want.
+            var ambient = builder.Configuration.Sources
+                .OfType<EnvironmentVariablesConfigurationSource>()
+                .Where(s => string.IsNullOrEmpty(s.Prefix))
+                .ToList();
+            foreach (var src in ambient)
+            {
+                builder.Configuration.Sources.Remove(src);
+            }
+
             var yamlPath = ResolveYamlPath(args);
             builder.Configuration
                 .SetBasePath(Directory.GetCurrentDirectory())
-                .AddYamlFile(yamlPath, optional: false, reloadOnChange: false);
+                .AddYamlFile(yamlPath, optional: false, reloadOnChange: false)
+                // Env vars override YAML. Prefix-scoped so unrelated env vars
+                // can't accidentally clobber config keys. Convention:
+                //   TOKENSCOPE_<section>__<key>[__<subkey>]=value
+                // e.g. TOKENSCOPE_SESSION_LOGS__PATH=/data/claude-logs
+                .AddEnvironmentVariables(prefix: "TOKENSCOPE_");
 
             var resolved = TokenScopeOptionsLoader.LoadFromConfiguration(builder.Configuration);
 
