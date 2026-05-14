@@ -57,6 +57,19 @@ public sealed record SessionLogsOptions
 
     [ConfigurationKeyName("active_session_window_minutes")]
     public int ActiveSessionWindowMinutes { get; init; } = 10;
+
+    /// <summary>
+    /// Fall back to periodic polling instead of <see cref="FileSystemWatcher"/>.
+    /// Required on macOS bind-mounted directories inside Linux containers,
+    /// where the host's gRPC-FUSE filesystem doesn't propagate inotify
+    /// events reliably. Set via env var
+    /// <c>TOKENSCOPE_SESSION_LOGS__USE_POLLING=true</c> on macOS docker setups.
+    /// </summary>
+    [ConfigurationKeyName("use_polling")]
+    public bool UsePolling { get; init; }
+
+    [ConfigurationKeyName("polling_interval_seconds")]
+    public int PollingIntervalSeconds { get; init; } = 5;
 }
 
 public sealed record PricingOptions

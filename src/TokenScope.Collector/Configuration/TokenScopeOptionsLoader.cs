@@ -106,6 +106,11 @@ public static class TokenScopeOptionsLoader
             errors.Add($"session_logs.active_session_window_minutes {options.SessionLogs.ActiveSessionWindowMinutes} must be positive.");
         }
 
+        if (options.SessionLogs.PollingIntervalSeconds <= 0)
+        {
+            errors.Add($"session_logs.polling_interval_seconds {options.SessionLogs.PollingIntervalSeconds} must be positive.");
+        }
+
         if (string.IsNullOrWhiteSpace(options.Pricing.ConfigPath))
         {
             errors.Add("pricing.config_path must not be empty.");

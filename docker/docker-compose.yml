@@ -1,0 +1,118 @@
+# tokenscope full stack — collector + receivers, all in docker compose.
+#
+# Per CLAUDE.md: "Full OpenTelemetry stack via docker-compose" with four
+# services. One command (`docker compose up`) starts the whole pipeline.
+#
+# The collector container reads `~/.claude/projects/` from the host as a
+# read-only bind mount and publishes OTLP to the OTEL Collector over the
+# internal `tokenscope` network. Only Grafana (:3000) is exposed to the host.
+#
+# Cross-platform note: `${HOME}` must resolve to the location of the
+# `.claude/` directory. On Windows Docker Desktop with WSL2, run `docker
+# compose` from a WSL2 shell where `${HOME}` is the WSL2 home. See
+# `.env.example` and `docs/troubleshooting.md`.
+
+services:
+
+  tokenscope-collector:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: tokenscope/collector:0.1.0-dev
+    container_name: tokenscope-collector
+    restart: unless-stopped
+    environment:
+      # YAML defaults are overridden by these env vars at startup.
+      # See docs/architecture.md "Configuration precedence".
+      TOKENSCOPE_SESSION_LOGS__PATH:    /data/claude-logs
+      TOKENSCOPE_STATE__PATH:            /data/state
+      TOKENSCOPE_PRICING__CONFIG_PATH:   /data/config/pricing.json
+      TOKENSCOPE_OTLP__ENDPOINT:         http://otel-collector:4317
+      TOKENSCOPE_OTLP__PROTOCOL:         grpc
+      # Polling fallback: required on macOS bind mounts where inotify
+      # events don't propagate from the host (gRPC FUSE limitation).
+      # Default true here because the common dev environment is macOS.
+      # Linux native users can override to "false" via .env for slightly
+      # better latency.
+      TOKENSCOPE_SESSION_LOGS__USE_POLLING: "${TOKENSCOPE_SESSION_LOGS__USE_POLLING:-true}"
+      TOKENSCOPE_SESSION_LOGS__POLLING_INTERVAL_SECONDS: "${TOKENSCOPE_SESSION_LOGS__POLLING_INTERVAL_SECONDS:-5}"
+    volumes:
+      # Read-only bind mount of the host's Claude Code logs directory.
+      # The collector reads, never writes. The :ro flag is defense in depth.
+      - ${HOME}/.claude/projects:/data/claude-logs:ro
+      # Persistent resume-state. Named volume — survives container restarts
+      # without UID-mapping headaches.
+      - tokenscope-state:/data/state
+      # Hot-reloadable pricing config. Editing the host file triggers the
+      # in-container PricingTableProvider via FileSystemWatcher.
+      - ../config/pricing.json:/data/config/pricing.json:ro
+    depends_on:
+      - otel-collector
+    networks:
+      - tokenscope
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.151.0
+    container_name: tokenscope-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    # No ports published to the host: only the collector container and
+    # Prometheus talk to the OTEL Collector, and both are on the internal
+    # `tokenscope` network. Expose 4317 / 4318 / 8889 here only when
+    # debugging from the host.
+    networks:
+      - tokenscope
+
+  prometheus:
+    image: prom/prometheus:v3.5.3
+    container_name: tokenscope-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - otel-collector
+    networks:
+      - tokenscope
+
+  grafana:
+    image: grafana/grafana:12.4.3
+    container_name: tokenscope-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: "${TOKENSCOPE_GRAFANA_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${TOKENSCOPE_GRAFANA_PASSWORD:-tokenscope}"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # Only port published to the host. Visit http://localhost:3000 .
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - tokenscope
+
+volumes:
+  tokenscope-state:
+    name: tokenscope-state
+  prometheus-data:
+    name: tokenscope-prometheus-data
+  grafana-data:
+    name: tokenscope-grafana-data
+
+networks:
+  tokenscope:
+    name: tokenscope
+    driver: bridge

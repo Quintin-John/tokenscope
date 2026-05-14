@@ -476,3 +476,218 @@ need its own lock.
 
 A second `Ctrl-C` accelerates shutdown via the standard host pattern.
 
+## Configuration precedence
+
+`Program.cs` adds configuration providers in this order:
+
+1. Built-in defaults from `Host.CreateApplicationBuilder` (host environment, no-prefix env vars, command line)
+2. `tokenscope.yaml` via `AddYamlFile`
+3. Env vars with prefix `TOKENSCOPE_` via `AddEnvironmentVariables("TOKENSCOPE_")`
+
+Later providers win. So **`TOKENSCOPE_*` env vars override YAML, which overrides defaults**. The prefix scopes the override to tokenscope keys so unrelated env vars can't accidentally clobber config.
+
+Convention:
+
+```
+TOKENSCOPE_<section>__<key>[__<subkey>]=value
+```
+
+Examples:
+
+| Env var | Sets |
+|---|---|
+| `TOKENSCOPE_OTLP__ENDPOINT=http://otel-collector:4317` | `otlp.endpoint` |
+| `TOKENSCOPE_SESSION_LOGS__PATH=/data/claude-logs` | `session_logs.path` |
+| `TOKENSCOPE_STATE__PATH=/data/state` | `state.path` |
+| `TOKENSCOPE_PRICING__CONFIG_PATH=/data/config/pricing.json` | `pricing.config_path` |
+
+Double underscore is the .NET configuration separator. Keys are case-insensitive on Windows; portable code uses lower-case.
+
+If you're debugging "why isn't my YAML change taking effect?", check for a `TOKENSCOPE_*` env var or command-line `--Section:Key=value` override. The collector logs the resolved paths at startup so the effective configuration is visible.
+
+---
+
+# Phase 6: Docker receiver stack
+
+## Architecture
+
+All four services run in a single `docker compose` stack on an internal network. Only Grafana publishes a port to the host.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ HOST                                                                 │
+│                                                                      │
+│  ~/.claude/projects/      ./config/pricing.json                      │
+│         │ (ro bind mount)        │ (ro bind mount)                   │
+│         │                        │                                   │
+└─────────┼────────────────────────┼───────────────────────────────────┘
+          ▼                        ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ docker compose — network: tokenscope                                 │
+│                                                                      │
+│   tokenscope-collector  ──▶  otel-collector  ──▶  prometheus         │
+│      :reads /data/...         :4317 gRPC          :9090 UI           │
+│      (no published ports)     :4318 HTTP                             │
+│                               :8889 prom export ──┘                  │
+│                               :8888 self-metrics                     │
+│                                                                      │
+│   tokenscope-state (named volume) → /data/state on the collector     │
+│   prometheus-data (named volume) → /prometheus                       │
+│   grafana-data (named volume) → /var/lib/grafana                     │
+│                                                                      │
+│   Only grafana :3000 is published to the host.                       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+One command — `docker compose up` — starts the whole pipeline.
+
+## Volume mount strategy
+
+| Mount target in container | Source on host | Mode | Why |
+|---|---|---|---|
+| `/data/claude-logs` | `${HOME}/.claude/projects` | `ro` (bind) | Read-only by construction. The collector reads logs, never writes back. The mount being read-only is a defense-in-depth guarantee. |
+| `/data/state` | `tokenscope-state` named volume | `rw` | Resume state survives container restarts. Backup-friendly. The collector is the only writer. |
+| `/data/config/pricing.json` | `./config/pricing.json` | `ro` (bind) | Hot-reload by `FileSystemWatcher` from Phase 2 still works over a bind mount (verified during Phase 6 smoke test). |
+
+## `cwd` is an opaque identifier, never a path to resolve
+
+Claude Code session log events include a `cwd` field with the project's absolute path on the host (e.g. `/Users/q/Documents/foo`). Inside a container, that path **does not exist**.
+
+The collector treats `cwd` as opaque metadata — useful for session grouping, dedup keying, and as a metric attribute — but **never calls `File.Open(cwd)` or any other path-resolving API on it**. Grep the codebase for `cwd` and confirm: every use is either property access on `ParsedAssistantEvent`, or string emission to OTEL. No `Path.GetFullPath`, no `Directory.Exists`, no I/O. This design predates containerization (Phase 3 already treated `cwd` as opaque); Phase 6 only required documenting it.
+
+## UID model: fixed non-root, world-readable logs
+
+The container runs as UID 10001, a non-root user owned by the image. The bind-mounted `~/.claude/projects` is read using whatever world-bit (`o+r`) permissions the host filesystem provides — which on macOS and most Linux distributions is the umask default.
+
+This avoids host-UID-mapping gymnastics that don't translate cleanly between macOS Docker Desktop and Windows Docker Desktop / WSL2. The cost is a documented assumption: if a user has tightened permissions on `~/.claude/projects`, they'll see "permission denied" on log reads. The troubleshooting doc covers the fix (`chmod -R o+rX ~/.claude/projects`).
+
+State files inside the container live on a named volume; named volumes are created with container-user ownership on first run, so the write path always works.
+
+## Cross-platform `${HOME}` resolution
+
+`docker-compose.yml` references `${HOME}/.claude/projects` for the logs bind mount.
+
+- **macOS Docker Desktop**: `${HOME}` resolves to the user's home (`/Users/q`). Native bind-mount semantics via gRPC FUSE.
+- **Linux**: same as macOS, native bind-mount.
+- **Windows Docker Desktop with WSL2**: `${HOME}` must resolve to the **WSL2 user's home** (`/home/q`), not the Windows user profile (`C:\Users\q`). Run `docker compose` from within a WSL2 shell, not from PowerShell. If running from PowerShell, set `HOME` explicitly to the WSL path. The `.env.example` documents this.
+
+## FileSystemWatcher on macOS bind mounts
+
+`FileSystemWatcher` in a Linux container uses `inotify`. On a macOS bind-mounted directory (Docker Desktop emulates the host filesystem via gRPC FUSE), `inotify` events may not fire reliably across all FUSE drivers.
+
+Phase 6 smoke-test result determined the configuration of this fallback. See **Phase 6 deviations** in the PR for the verified behavior; the `session_logs.use_polling: true|false` configuration flag is available if `inotify` proves unreliable on macOS. Linux native and Windows WSL2 typically don't need polling — `inotify` works directly on those.
+
+## Image pin selection (Phase 6)
+
+The receiver stack pins three images. Selection criteria:
+
+| Image | Pinned tag | Rationale |
+|---|---|---|
+| `mcr.microsoft.com/dotnet/sdk` (build stage) | `8.0.421-bookworm-slim` | Current 8.0.x SDK, Debian-based. Compatible with `global.json` 8.0.100 `latestFeature`. |
+| `mcr.microsoft.com/dotnet/runtime` (runtime stage) | `8.0.27-bookworm-slim` | Current 8.0.x runtime, Debian-based. Image size ~80 MB. **Alpine deferred to Phase 9** — `musl` libc adds an unnecessary risk class for v1. |
+| `otel/opentelemetry-collector-contrib` | `0.151.0` | 2-week-old release at pin time. OTEL Collector ships every ~2 weeks; pinning the immediately-prior release rather than HEAD trades 14 days of bleeding-edge for production hardening. |
+| `prom/prometheus` | `v3.5.3` | **Prometheus v3.5 is the LTS line**, matching tokenscope's overall "stable, predictable" stance (cf. .NET 8 LTS, Microsoft.Extensions.Hosting 8.0.1). |
+| `grafana/grafana` | `12.4.3` | Last release on the 12.x line. Grafana 13 is safe for tokenscope's specific use case but introduces a **unified storage migration** on first start that is one-way. See `troubleshooting.md` for the upgrade path. |
+
+**Combined effect:** the entire stack pins to "mature, settled" versions rather than mixing one bleeding-edge component. Dashboard development in Phase 7 lands against a stable base.
+
+## Pipeline shape
+
+```
+OTLP gRPC/HTTP receivers (4317/4318)
+        │
+        ▼
+   batch processor              ← smooths bursty ingest for cumulative scrape view
+        │
+        ▼
+attributes/from_resource        ← copies tokenscope.subscription_mode to a label
+        │
+        ▼
+   prometheus exporter (8889)   ← Prometheus scrapes here
+```
+
+Prometheus also scrapes the OTEL Collector's **own** internal self-metrics on port 8888 (under job name `otel-collector-internal`), so the stack-health dashboard can show pipeline health independent of tokenscope data flow.
+
+## Metric naming translation
+
+OTEL → Prometheus name rewrites happen at the OTEL Collector's prometheus exporter:
+
+| OTEL name | Prometheus series |
+|---|---|
+| `tokenscope.tokens.input` (Counter) | `tokenscope_tokens_input_total` |
+| `tokenscope.cost.usd` (Counter) | `tokenscope_cost_usd_total` |
+| `tokenscope.cache.hit_ratio` (Gauge) | `tokenscope_cache_hit_ratio` |
+| `tokenscope.sessions.active` (Gauge) | `tokenscope_sessions_active` |
+
+Rules: dots → underscores, monotonic counters get a `_total` suffix, gauges keep their name. Attribute keys (`model`, `session_id`, `component`, `ttl`) translate to Prometheus labels of the same name.
+
+## Phase 6 stack-health dashboard
+
+Provisioned at `docker/grafana/dashboards/stack-health.json`. Five panels covering scrape state of both Prometheus jobs, OTLP receive rate, distinct `tokenscope_*` series count, and last-scrape duration. Not the real product — ships with Phase 6 so "does `docker compose up` produce a working pipeline?" has a one-glance answer. Real per-domain dashboards arrive in Phase 7.
+
+## Image pin selection (Phase 6)
+
+The receiver stack pins three images. Selection criteria:
+
+| Image | Pinned tag | Rationale |
+|---|---|---|
+| `otel/opentelemetry-collector-contrib` | `0.151.0` | 2-week-old release at pin time. OTEL Collector ships every ~2 weeks; pinning the immediately-prior release rather than HEAD trades 14 days of bleeding-edge for production hardening. |
+| `prom/prometheus` | `v3.5.3` | **Prometheus v3.5 is the LTS line**, matching tokenscope's overall "stable, predictable" stance (cf. .NET 8 LTS, Microsoft.Extensions.Hosting 8.0.1). v3.11.x rolling-stable is the alternative for users who want the absolute latest. |
+| `grafana/grafana` | `12.4.3` | Last release on the 12.x line. Grafana 13 is safe for tokenscope's specific use case (no breaking changes to provisioning file format or dashboard JSON v1 — verified) but introduces a **unified storage migration** on first start that is one-way: rollback to v12 requires a volume restore. Starting on v12 lets users opt into v13 as a deliberate later upgrade rather than committing the whole user base to the new storage format on first run. See `troubleshooting.md` for the upgrade path. |
+
+**Combined effect:** the entire receiver stack pins to "mature, settled"
+versions rather than mixing one bleeding-edge component. This makes
+dashboard development in Phase 7 simpler — any oddity is a tokenscope
+issue, not a "is this version-specific behavior?" issue.
+
+## Pipeline shape
+
+```
+OTLP gRPC/HTTP receivers (4317/4318)
+        │
+        ▼
+   batch processor              ← smooths bursty ingest for cumulative scrape view
+        │
+        ▼
+attributes/from_resource        ← copies tokenscope.subscription_mode to a label
+        │
+        ▼
+   prometheus exporter (8889)   ← what Prometheus scrapes
+```
+
+Prometheus also scrapes the OTEL Collector's **own** internal
+self-metrics on port 8888 (under job name `otel-collector-internal`),
+so the stack-health dashboard can show pipeline health independent of
+tokenscope data flow.
+
+## Metric naming translation
+
+OTEL → Prometheus name rewrites happen at the OTEL Collector's
+prometheus exporter:
+
+| OTEL name | Prometheus series |
+|---|---|
+| `tokenscope.tokens.input` (Counter) | `tokenscope_tokens_input_total` |
+| `tokenscope.cost.usd` (Counter) | `tokenscope_cost_usd_total` |
+| `tokenscope.cache.hit_ratio` (Gauge) | `tokenscope_cache_hit_ratio` |
+| `tokenscope.sessions.active` (Gauge) | `tokenscope_sessions_active` |
+
+Rules: dots → underscores, monotonic counters get a `_total` suffix,
+gauges keep their name. Attribute keys (`model`, `session_id`,
+`component`, `ttl`) translate to Prometheus labels of the same name.
+
+## Phase 6 stack-health dashboard
+
+Provisioned at `docker/grafana/dashboards/stack-health.json`. Five
+panels:
+
+1. **`up{job="tokenscope"}`** — Prometheus scrape state for the OTLP-to-Prometheus exporter.
+2. **`up{job="otel-collector-internal"}`** — Prometheus scrape state for the OTEL Collector's self-metrics.
+3. **OTLP metric points received (rate / s)** — `rate(otelcol_receiver_accepted_metric_points_total[1m])` and the `_refused_` companion. Non-zero accepted with zero refused = pipeline healthy.
+4. **Distinct tokenscope metric series count** — proves the OTEL pipeline rewrites our names correctly and Prometheus has indexed them.
+5. **Last scrape duration for the tokenscope job** — sanity check.
+
+This dashboard is not the real product; it ships with Phase 6 so
+"does `docker compose up` produce a working pipeline?" has a one-glance
+answer. Real per-domain dashboards arrive in Phase 7.
+

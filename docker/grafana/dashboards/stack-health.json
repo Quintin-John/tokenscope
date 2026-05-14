@@ -1,0 +1,499 @@
+{
+  "uid": "tokenscope-stack-health",
+  "title": "tokenscope — overview",
+  "tags": ["tokenscope", "phase-6", "overview"],
+  "schemaVersion": 39,
+  "version": 2,
+  "editable": true,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "refresh": "15s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "At a glance",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total cost (USD)",
+      "description": "Cumulative USD across all sessions and models. From tokenscope_cost_usd_total.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 1, "w": 6, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(tokenscope_cost_usd_total)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "color": { "mode": "fixed", "fixedColor": "green" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "API requests",
+      "description": "Unique API requests counted (post-dedup by sessionId+requestId).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 6, "y": 1, "w": 6, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(tokenscope_requests_total)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Active sessions",
+      "description": "Sessions with activity in the last 10 min.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 1, "w": 6, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "tokenscope_sessions_active",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "gray", "value": null },
+              { "color": "blue", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Cache hit ratio (avg)",
+      "description": "Average cache_read / (cache_read + input) across all sessions reporting it.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 18, "y": 1, "w": 6, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "avg(tokenscope_cache_hit_ratio)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.3 },
+              { "color": "green", "value": 0.6 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Cost & usage",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 1 }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Cumulative cost by model",
+      "description": "Running total USD per model. Stacked so the top of the band is the grand total.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 7, "w": 14, "h": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (model) (tokenscope_cost_usd_total)",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"], "showLegend": true }
+      }
+    },
+    {
+      "id": 6,
+      "type": "piechart",
+      "title": "Cost share by component",
+      "description": "Where the money goes: input / output / cache_read / cache_write_5m / cache_write_1h.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 14, "y": 7, "w": 10, "h": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (component) (tokenscope_cost_usd_total)",
+          "legendFormat": "{{component}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "options": {
+        "pieType": "donut",
+        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"], "showLegend": true },
+        "displayLabels": ["percent"]
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Top 10 sessions by total cost",
+      "description": "Sessions ranked by total USD spent across all components.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "topk(10, sum by (session_id) (tokenscope_cost_usd_total))",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "displayName", "value": "Total cost (USD)" },
+              { "id": "unit", "value": "currencyUSD" },
+              { "id": "decimals", "value": 4 },
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+              { "id": "color", "value": { "mode": "continuous-GrYlRd" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "session_id" },
+            "properties": [
+              { "id": "displayName", "value": "Session" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "footer": { "show": false }
+      },
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true } } }
+      ]
+    },
+    {
+      "id": 250,
+      "type": "row",
+      "title": "Token throughput",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 25, "w": 24, "h": 1 }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Token throughput (tokens / s)",
+      "description": "Rate of tokens billed by component, all models combined.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(tokenscope_tokens_input_total[5m]))",
+          "legendFormat": "input"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(tokenscope_tokens_output_total[5m]))",
+          "legendFormat": "output"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(tokenscope_tokens_cache_read_total[5m]))",
+          "legendFormat": "cache_read"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(tokenscope_tokens_cache_write_total[5m]))",
+          "legendFormat": "cache_write"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"], "showLegend": true }
+      }
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Stack health",
+      "collapsed": true,
+      "gridPos": { "x": 0, "y": 35, "w": 24, "h": 1 },
+      "panels": [
+        {
+          "id": 9,
+          "type": "stat",
+          "title": "tokenscope scrape",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 0, "y": 36, "w": 6, "h": 4 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "up{job=\"tokenscope\"}",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": { "color": "red", "text": "DOWN" },
+                    "1": { "color": "green", "text": "UP" }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }]
+              }
+            },
+            "overrides": []
+          },
+          "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value" }
+        },
+        {
+          "id": 10,
+          "type": "stat",
+          "title": "OTEL Collector self-metrics",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 6, "y": 36, "w": 6, "h": 4 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "up{job=\"otel-collector-internal\"}",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": { "color": "red", "text": "DOWN" },
+                    "1": { "color": "green", "text": "UP" }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }]
+              }
+            },
+            "overrides": []
+          },
+          "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value" }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "OTLP metric points / s (received vs refused)",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 12, "y": 36, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(otelcol_receiver_accepted_metric_points_total{receiver=\"otlp\"}[1m]))",
+              "legendFormat": "accepted/s"
+            },
+            {
+              "refId": "B",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum(rate(otelcol_receiver_refused_metric_points_total{receiver=\"otlp\"}[1m]))",
+              "legendFormat": "refused/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10, "showPoints": "never" }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": { "mode": "multi", "sort": "desc" },
+            "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }
+          }
+        },
+        {
+          "id": 12,
+          "type": "stat",
+          "title": "Distinct tokenscope_* series",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 0, "y": 40, "w": 6, "h": 4 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "count(count by (__name__) ({__name__=~\"tokenscope_.*\"}))",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "thresholds" },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }]
+              }
+            },
+            "overrides": []
+          },
+          "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value" }
+        },
+        {
+          "id": 13,
+          "type": "stat",
+          "title": "Last scrape duration",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "x": 6, "y": 40, "w": 6, "h": 4 },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "scrape_duration_seconds{job=\"tokenscope\"}",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "s", "decimals": 3 },
+            "overrides": []
+          },
+          "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "center", "textMode": "value" }
+        }
+      ]
+    }
+  ]
+}

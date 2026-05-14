@@ -72,8 +72,13 @@ public class TokenScopeOptionsLoaderTests : IDisposable
     }
 
     [Fact]
-    public void UnknownTopLevelKey_Rejected()
+    public void UnknownTopLevelKey_TolerantAsAmbientEnvVar()
     {
+        // Top-level unknowns are tolerated because the Host's DOTNET_-prefix
+        // env-var provider injects unrelated keys (CLI_TELEMETRY_OPTOUT,
+        // RUNNING_IN_CONTAINER, etc.) at the root of the IConfiguration tree.
+        // Typos inside known sections (see UnknownKey_Rejected_WithFullPath)
+        // still get caught.
         var config = BuildConfig("""
             schema_version: 1
             uknown_top_level: 42
@@ -81,8 +86,7 @@ public class TokenScopeOptionsLoaderTests : IDisposable
 
         var act = () => TokenScopeOptionsLoader.LoadFromConfiguration(config, homeOverride: _tempDir);
 
-        act.Should().Throw<TokenScopeOptionsValidationException>()
-            .Which.Errors.Should().Contain(e => e.Contains("'uknown_top_level'"));
+        act.Should().NotThrow();
     }
 
     [Fact]
@@ -187,6 +191,50 @@ public class TokenScopeOptionsLoaderTests : IDisposable
         var act = () => TokenScopeOptionsLoader.LoadFromConfiguration(config, homeOverride: _tempDir);
 
         act.Should().NotThrow();
+    }
+
+    [Fact]
+    public void UsePolling_DefaultsToFalse()
+    {
+        // The collector defaults to inotify-based FileSystemWatcher. Docker
+        // Compose overrides this to true for the macOS bind-mount case.
+        var config = BuildConfig("schema_version: 1");
+
+        var resolved = TokenScopeOptionsLoader.LoadFromConfiguration(config, homeOverride: _tempDir);
+
+        resolved.Options.SessionLogs.UsePolling.Should().BeFalse();
+        resolved.Options.SessionLogs.PollingIntervalSeconds.Should().Be(5);
+    }
+
+    [Fact]
+    public void UsePolling_BindsFromConfig()
+    {
+        var config = BuildConfig("""
+            schema_version: 1
+            session_logs:
+              use_polling: true
+              polling_interval_seconds: 2
+            """);
+
+        var resolved = TokenScopeOptionsLoader.LoadFromConfiguration(config, homeOverride: _tempDir);
+
+        resolved.Options.SessionLogs.UsePolling.Should().BeTrue();
+        resolved.Options.SessionLogs.PollingIntervalSeconds.Should().Be(2);
+    }
+
+    [Fact]
+    public void PollingIntervalSeconds_NonPositive_Rejected()
+    {
+        var config = BuildConfig("""
+            schema_version: 1
+            session_logs:
+              polling_interval_seconds: 0
+            """);
+
+        var act = () => TokenScopeOptionsLoader.LoadFromConfiguration(config, homeOverride: _tempDir);
+
+        act.Should().Throw<TokenScopeOptionsValidationException>()
+            .Which.Errors.Should().Contain(e => e.Contains("polling_interval_seconds"));
     }
 
     [Fact]

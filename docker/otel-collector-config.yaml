@@ -1,0 +1,64 @@
+# OTEL Collector (contrib distribution) configuration for the tokenscope
+# receiver stack. The pipeline is intentionally minimal:
+#
+#     otlp (gRPC 4317, HTTP 4318) → batch → prometheus (8889)
+#
+# Why batch is between otlp and prometheus: the OTLP receiver yields one batch
+# per export call from the client, but Prometheus scrapes pull cumulative
+# state. Batch processor smooths bursty ingest so the prometheus exporter's
+# scrape view is stable.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    # Defaults: 8 KiB / 200ms. Suitable for tokenscope's low-volume,
+    # event-driven workload.
+    send_batch_size: 1024
+    timeout: 1s
+
+  # Surface the tokenscope.subscription_mode resource attribute on every
+  # metric data point so downstream Grafana panels can filter by it.
+  attributes/from_resource:
+    actions:
+      - key: tokenscope_subscription_mode
+        from_attribute: tokenscope.subscription_mode
+        action: insert
+
+exporters:
+  # Prometheus scrapes this endpoint. Resource-to-target_info conversion ON
+  # so service.name etc. appear as a target_info series.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+    # Add a constant label so dashboards know which collector this is
+    # (only one for now, but keeps the door open for fan-out).
+    const_labels:
+      tokenscope_pipeline: receiver
+
+service:
+  telemetry:
+    logs:
+      level: info
+    # The collector exposes its own metrics on port 8888 via the readers
+    # config (the v0.123+ replacement for service.telemetry.metrics.address).
+    # Prometheus scrapes this endpoint as a separate job.
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [attributes/from_resource, batch]
+      exporters: [prometheus]
