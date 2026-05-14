@@ -85,8 +85,7 @@ tokenscope/
 ├── src/
 │   ├── TokenScope.Core/
 │   ├── TokenScope.Otel/
-│   ├── TokenScope.Collector/
-│   └── TokenScope.Cli/
+│   └── TokenScope.Collector/
 ├── tests/
 │   ├── TokenScope.Core.Tests/
 │   ├── TokenScope.Otel.Tests/
@@ -242,13 +241,20 @@ Work in phases. **Stop at every phase boundary and wait for "go" before proceedi
 
 **Deliverable:** Single tokenscope dashboard rendering real data. Wait for "go."
 
-### Phase 8: CLI
-- All subcommands implemented
-- Help text, error handling, exit codes
-- Tests
-- README usage section
+### Phase 8: --validate-pricing flag (no CLI)
+- A CLI project was originally specified, then dropped after review
+  concluded that status / cost / sessions / cache-efficiency would
+  duplicate the dashboard. The only real non-dashboard use case is
+  pre-deploy validation of `pricing.json` in CI scripts.
+- Phase 8 collapses to a single `--validate-pricing <path>` flag on
+  the existing `TokenScope.Collector` binary:
+  - Validates without starting any hosted services.
+  - Exits 0 on success, 4 on `PricingValidationException` (errors to stderr).
+  - Used in CI via `docker compose run --rm tokenscope-collector --validate-pricing /data/config/pricing.json`.
+- `TokenScope.Cli` and `TokenScope.Cli.Tests` projects were deleted
+  (would have been dead weight otherwise).
 
-**Deliverable:** Working CLI binary. Wait for "go."
+**Deliverable:** validate-pricing flag with passing tests. Wait for "go."
 
 ### Phase 9: Polish and release
 - Documentation complete
