@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>TokenScope.Otel</RootNamespace>
+    <AssemblyName>TokenScope.Otel</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TokenScope.Core\TokenScope.Core.csproj" />
+  </ItemGroup>
+
+</Project>
