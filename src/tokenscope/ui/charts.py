@@ -16,9 +16,12 @@ import plotly.graph_objects as go
 
 from tokenscope.analytics import (
     cost_share_by_model,
+    daily_cache_hit_ratio,
     daily_cost_by_model,
+    daily_dollars_saved,
     daily_token_mix,
     rolling_cost_average,
+    token_flow_sankey_data,
 )
 from tokenscope.models import BlockEntry, DailyEntry, DailyReport, SessionEntry
 
@@ -134,6 +137,73 @@ def burn_gauge(block: BlockEntry) -> go.Figure | None:
         )
     )
     fig.update_layout(margin=dict(l=10, r=10, t=40, b=10), height=320)
+    return fig
+
+
+def cache_hit_ratio_line(daily_report: DailyReport) -> go.Figure | None:
+    """Per-day cache hit ratio line chart (y-axis 0–100%)."""
+    series = daily_cache_hit_ratio(daily_report)
+    if not series:
+        return None
+    df = pd.DataFrame(series, columns=["date", "ratio"])
+    fig = px.line(
+        df,
+        x="date",
+        y="ratio",
+        labels={"date": "Date", "ratio": "Cache hit ratio"},
+    )
+    fig.update_traces(mode="lines+markers")
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=30, b=10),
+        yaxis=dict(tickformat=".0%", range=[0, 1]),
+    )
+    return fig
+
+
+def dollars_saved_bar(daily_report: DailyReport) -> go.Figure | None:
+    """Stacked bar of estimated $ saved per day, coloured by model family."""
+    rows = daily_dollars_saved(daily_report)
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    # Collapse same-day-same-family rows so the bars are one band per family.
+    grouped = df.groupby(["date", "family"], as_index=False)["dollars_saved"].sum()
+    fig = px.bar(
+        grouped,
+        x="date",
+        y="dollars_saved",
+        color="family",
+        labels={"date": "Date", "dollars_saved": "Estimated $ saved", "family": ""},
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=30, b=10),
+        yaxis_tickprefix="$",
+        barmode="stack",
+        legend_title_text="",
+    )
+    return fig
+
+
+def token_flow_sankey(daily_report: DailyReport) -> go.Figure | None:
+    """Sankey: token-kind → model family. Family labels carry the family's cost."""
+    data_ = token_flow_sankey_data(daily_report)
+    if not data_["values"]:
+        return None
+    fig = go.Figure(
+        go.Sankey(
+            node=dict(
+                label=data_["labels"],
+                pad=18,
+                thickness=18,
+            ),
+            link=dict(
+                source=data_["sources"],
+                target=data_["targets"],
+                value=data_["values"],
+            ),
+        )
+    )
+    fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=520)
     return fig
 
 

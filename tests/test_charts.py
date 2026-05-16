@@ -23,10 +23,13 @@ from tokenscope.models import (
 )
 from tokenscope.ui.charts import (
     burn_gauge,
+    cache_hit_ratio_line,
+    dollars_saved_bar,
     donut_cost_by_model,
     rolling_average_line,
     session_token_mix,
     stacked_area_cost_by_family,
+    token_flow_sankey,
     token_mix_bar,
 )
 
@@ -234,3 +237,63 @@ def test_burn_gauge_no_burn_rate_returns_none() -> None:
         projection=None,
     )
     assert burn_gauge(block) is None
+
+
+# ---------- cache_hit_ratio_line ----------
+
+
+def test_cache_hit_ratio_line_returns_figure() -> None:
+    report = _report(
+        [
+            _entry("2026-05-15", cost=1.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=2.0, model="claude-opus-4-7"),
+        ]
+    )
+    fig = cache_hit_ratio_line(report)
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == 1
+    # 2 points, ratio in [0,1].
+    assert len(fig.data[0].x) == 2
+    assert all(0.0 <= r <= 1.0 for r in fig.data[0].y)
+
+
+def test_cache_hit_ratio_line_empty_returns_none() -> None:
+    assert cache_hit_ratio_line(_report([])) is None
+
+
+# ---------- dollars_saved_bar ----------
+
+
+def test_dollars_saved_bar_returns_figure_with_family_traces() -> None:
+    report = _report(
+        [
+            _entry("2026-05-15", cost=1.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=1.0, model="claude-haiku-4-5-20251001"),
+        ]
+    )
+    fig = dollars_saved_bar(report)
+    assert isinstance(fig, go.Figure)
+    families = {t.name for t in fig.data}
+    assert families == {"opus", "haiku"}
+
+
+def test_dollars_saved_bar_empty_returns_none() -> None:
+    assert dollars_saved_bar(_report([])) is None
+
+
+# ---------- token_flow_sankey ----------
+
+
+def test_token_flow_sankey_returns_figure() -> None:
+    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
+    fig = token_flow_sankey(report)
+    assert isinstance(fig, go.Figure)
+    # Single Sankey trace.
+    assert len(fig.data) == 1
+    trace = fig.data[0]
+    # 4 token kinds + 1 family = 5 nodes.
+    assert len(trace.node.label) == 5
+
+
+def test_token_flow_sankey_empty_returns_none() -> None:
+    assert token_flow_sankey(_report([])) is None
