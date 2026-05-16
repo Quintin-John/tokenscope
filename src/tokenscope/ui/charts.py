@@ -208,7 +208,15 @@ def token_flow_sankey(daily_report: DailyReport) -> go.Figure | None:
 
 
 def token_mix_bar(daily_report: DailyReport) -> go.Figure | None:
-    """Stacked bar: per-day input / output / cache_create / cache_read tokens."""
+    """Per-day token-mix bar chart with cache_read as the back layer.
+
+    cache_read is normally orders of magnitude larger than input / output /
+    cache_create — stacking them flattened the small categories into an
+    invisible sliver. Switch to barmode="overlay" and order categories
+    largest-first so cache_read paints to the back and the smaller kinds
+    render on top (with the same opacity, so they read cleanly against
+    their parent bar).
+    """
     rows = daily_token_mix(daily_report)
     if not rows:
         return None
@@ -218,12 +226,15 @@ def token_mix_bar(daily_report: DailyReport) -> go.Figure | None:
         x="date",
         y="tokens",
         color="kind",
-        category_orders={"kind": ["input", "output", "cache_create", "cache_read"]},
+        # Largest-typical first → drawn first → ends up at the back of the
+        # overlay z-order. Smaller categories layer on top and stay visible.
+        category_orders={"kind": ["cache_read", "cache_create", "output", "input"]},
         labels={"date": "Date", "tokens": "Tokens", "kind": ""},
     )
+    fig.update_traces(opacity=0.75)
     fig.update_layout(
         margin=dict(l=10, r=10, t=30, b=10),
         legend_title_text="",
-        barmode="stack",
+        barmode="overlay",
     )
     return fig
