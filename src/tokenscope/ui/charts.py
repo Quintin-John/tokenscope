@@ -208,14 +208,19 @@ def token_flow_sankey(daily_report: DailyReport) -> go.Figure | None:
 
 
 def token_mix_bar(daily_report: DailyReport) -> go.Figure | None:
-    """Per-day token-mix bar chart with cache_read as the back layer.
+    """Per-day token-mix bar chart.
 
-    cache_read is normally orders of magnitude larger than input / output /
-    cache_create — stacking them flattened the small categories into an
-    invisible sliver. Switch to barmode="overlay" and order categories
-    largest-first so cache_read paints to the back and the smaller kinds
-    render on top (with the same opacity, so they read cleanly against
-    their parent bar).
+    cache_read is typically 100–100,000× larger than input / output /
+    cache_create. Two combined fixes keep every kind readable:
+
+    1. **barmode="overlay"** with categories ordered largest-typical-first
+       so cache_read paints to the back and the smaller kinds layer on top.
+       Bars share a 0.75 opacity so neither side fully occludes the other.
+    2. **log y-axis** (`yaxis_type="log"`). On a linear axis, an input bar
+       of ~1k tokens next to a cache_read bar of ~100M is a single pixel —
+       overlay z-order doesn't help when the value itself is invisible.
+       Log scale turns those into bars of substantially different but
+       comparable heights.
     """
     rows = daily_token_mix(daily_report)
     if not rows:
@@ -226,8 +231,8 @@ def token_mix_bar(daily_report: DailyReport) -> go.Figure | None:
         x="date",
         y="tokens",
         color="kind",
-        # Largest-typical first → drawn first → ends up at the back of the
-        # overlay z-order. Smaller categories layer on top and stay visible.
+        # Largest-typical first → drawn first → at the back of the overlay
+        # z-order. Smaller kinds render on top and stay visible.
         category_orders={"kind": ["cache_read", "cache_create", "output", "input"]},
         labels={"date": "Date", "tokens": "Tokens", "kind": ""},
     )
@@ -236,5 +241,6 @@ def token_mix_bar(daily_report: DailyReport) -> go.Figure | None:
         margin=dict(l=10, r=10, t=30, b=10),
         legend_title_text="",
         barmode="overlay",
+        yaxis_type="log",
     )
     return fig
