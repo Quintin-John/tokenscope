@@ -16,10 +16,19 @@ def test_submodules_import() -> None:
         ccusage,
         data,
         models,
+        navigation,
         plans,
         query,
     )
-    from tokenscope.ui import charts, overview, sidebar  # noqa: F401
+    from tokenscope.ui import (  # noqa: F401
+        block,
+        breadcrumbs,
+        charts,
+        day,
+        overview,
+        session,
+        sidebar,
+    )
 
 
 def test_app_public_surface() -> None:
@@ -97,8 +106,30 @@ def test_analytics_public_surface() -> None:
         "dollars_saved",
         "top_n_by_cost",
         "model_family",
+        "mtd_cost",
+        "today_cost",
+        "aggregate_cache_hit_ratio",
+        "active_block_burn",
+        "daily_cost_by_model",
+        "daily_token_mix",
+        "find_daily_entry",
+        "sessions_on_day",
+        "blocks_on_day",
+        "find_session",
+        "find_block",
+        "cost_share_by_model",
+        "filter_daily_by_models",
+        "available_models",
     ):
         assert callable(getattr(analytics, name)), name
+
+
+def test_navigation_public_surface() -> None:
+    from tokenscope.navigation import Navigation
+
+    nav = Navigation()
+    assert nav.view == "overview"
+    assert Navigation.from_params({"view": "day", "day": "2026-05-16"}).day == "2026-05-16"
 
 
 def test_models_public_surface() -> None:
