@@ -18,13 +18,16 @@ def test_submodules_import() -> None:
         models,
         navigation,
         plans,
+        pricing,
         query,
     )
     from tokenscope.ui import (  # noqa: F401
         block,
         breadcrumbs,
+        cache,
         charts,
         day,
+        models as models_ui,
         overview,
         session,
         sidebar,
@@ -120,6 +123,9 @@ def test_analytics_public_surface() -> None:
         "cost_share_by_model",
         "filter_daily_by_models",
         "available_models",
+        "daily_cache_hit_ratio",
+        "daily_dollars_saved",
+        "token_flow_sankey_data",
     ):
         assert callable(getattr(analytics, name)), name
 

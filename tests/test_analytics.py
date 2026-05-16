@@ -20,7 +20,9 @@ from tokenscope.analytics import (
     blocks_on_day,
     cache_hit_ratio,
     cost_share_by_model,
+    daily_cache_hit_ratio,
     daily_cost_by_model,
+    daily_dollars_saved,
     daily_token_mix,
     dollars_saved,
     filter_daily_by_models,
@@ -32,6 +34,7 @@ from tokenscope.analytics import (
     rolling_cost_average,
     sessions_on_day,
     today_cost,
+    token_flow_sankey_data,
     top_n_by_cost,
 )
 from tokenscope.models import (
@@ -732,3 +735,173 @@ def test_available_models_unique_sorted() -> None:
 
 def test_available_models_empty_report() -> None:
     assert available_models(_report([])) == []
+
+
+# ---------- daily_cache_hit_ratio ----------
+
+
+def test_daily_cache_hit_ratio_per_day_in_order() -> None:
+    report = _report(
+        [
+            _entry(
+                "2026-05-15",
+                input_tokens=10,
+                cache_creation_tokens=10,
+                cache_read_tokens=80,
+            ),
+            _entry(
+                "2026-05-13",
+                input_tokens=100,
+                cache_creation_tokens=0,
+                cache_read_tokens=0,
+            ),
+        ]
+    )
+    series = daily_cache_hit_ratio(report)
+    # Sorted ascending by date.
+    assert [d for d, _ in series] == ["2026-05-13", "2026-05-15"]
+    assert series[0][1] == 0.0
+    assert series[1][1] == pytest.approx(0.8)
+
+
+def test_daily_cache_hit_ratio_empty_report() -> None:
+    assert daily_cache_hit_ratio(_report([])) == []
+
+
+# ---------- daily_dollars_saved ----------
+
+
+def test_daily_dollars_saved_uses_family_pricing() -> None:
+    # 1M cache-read on opus-4-7 ($15/MTok) and 1M on haiku-4-5 ($1/MTok).
+    opus_b = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=0,
+        outputTokens=0,
+        cacheCreationTokens=0,
+        cacheReadTokens=1_000_000,
+        cost=5.0,
+    )
+    haiku_b = ModelBreakdown(
+        modelName="claude-haiku-4-5-20251001",
+        inputTokens=0,
+        outputTokens=0,
+        cacheCreationTokens=0,
+        cacheReadTokens=1_000_000,
+        cost=0.1,
+    )
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                total_cost=5.1,
+                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+                model_breakdowns=[opus_b, haiku_b],
+                cache_read_tokens=2_000_000,
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation_tokens=0,
+            )
+        ]
+    )
+    rows = daily_dollars_saved(report)
+    assert len(rows) == 2
+    by_family = {row["family"]: row["dollars_saved"] for row in rows}
+    assert by_family["opus"] == pytest.approx(15.0)
+    assert by_family["haiku"] == pytest.approx(1.0)
+    assert all(row["date"] == "2026-05-16" for row in rows)
+
+
+def test_daily_dollars_saved_empty_report() -> None:
+    assert daily_dollars_saved(_report([])) == []
+
+
+# ---------- token_flow_sankey_data ----------
+
+
+def test_token_flow_sankey_data_two_families() -> None:
+    opus_b = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=10,
+        outputTokens=20,
+        cacheCreationTokens=30,
+        cacheReadTokens=40,
+        cost=5.0,
+    )
+    haiku_b = ModelBreakdown(
+        modelName="claude-haiku-4-5",
+        inputTokens=1,
+        outputTokens=2,
+        cacheCreationTokens=3,
+        cacheReadTokens=4,
+        cost=0.5,
+    )
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                models=["claude-opus-4-7", "claude-haiku-4-5"],
+                model_breakdowns=[opus_b, haiku_b],
+                total_cost=5.5,
+            )
+        ]
+    )
+    data_ = token_flow_sankey_data(report)
+    # 4 kinds + 2 families = 6 labels.
+    assert len(data_["labels"]) == 6
+    assert data_["labels"][:4] == ["input", "output", "cache_create", "cache_read"]
+    # Family labels carry cost. Sorted alphabetically (haiku before opus).
+    assert data_["labels"][4].startswith("haiku ($")
+    assert "$0.50" in data_["labels"][4]
+    assert data_["labels"][5].startswith("opus ($")
+    assert "$5.00" in data_["labels"][5]
+    # 4 kinds × 2 families = 8 nonzero links.
+    assert len(data_["sources"]) == 8
+    assert all(s in range(4) for s in data_["sources"])
+    assert all(t in (4, 5) for t in data_["targets"])
+    # Total link value equals total tokens across both models.
+    expected_total_tokens = (
+        opus_b.input_tokens
+        + opus_b.output_tokens
+        + opus_b.cache_creation_tokens
+        + opus_b.cache_read_tokens
+        + haiku_b.input_tokens
+        + haiku_b.output_tokens
+        + haiku_b.cache_creation_tokens
+        + haiku_b.cache_read_tokens
+    )
+    assert sum(data_["values"]) == expected_total_tokens
+
+
+def test_token_flow_sankey_data_skips_zero_links() -> None:
+    """Kind→family links with zero tokens are omitted to keep the diagram clean."""
+    only_input = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=100,
+        outputTokens=0,
+        cacheCreationTokens=0,
+        cacheReadTokens=0,
+        cost=1.0,
+    )
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                model_breakdowns=[only_input],
+                total_cost=1.0,
+                input_tokens=100,
+                output_tokens=0,
+                cache_creation_tokens=0,
+                cache_read_tokens=0,
+            )
+        ]
+    )
+    data_ = token_flow_sankey_data(report)
+    # Only the input→opus link survives.
+    assert data_["values"] == [100]
+    assert data_["sources"] == [0]  # "input" kind index
+    assert data_["targets"] == [4]  # first family node
+
+
+def test_token_flow_sankey_data_empty_report() -> None:
+    data_ = token_flow_sankey_data(_report([]))
+    assert data_ == {"labels": [], "sources": [], "targets": [], "values": []}

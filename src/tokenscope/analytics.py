@@ -329,6 +329,97 @@ def daily_token_mix(daily_report: DailyReport) -> list[dict]:
     return rows
 
 
+def daily_cache_hit_ratio(daily_report: DailyReport) -> list[tuple[str, float]]:
+    """Per-day cache hit ratio, in ascending date order.
+
+    Returns `[(date, ratio), ...]` where ratio uses the same
+    `cache_read / (input + cache_create + cache_read)` formula as
+    `cache_hit_ratio` but applied per-day. Empty input → empty list.
+    """
+    entries = sorted(daily_report.daily, key=lambda e: e.date)
+    return [(e.date, cache_hit_ratio(e)) for e in entries]
+
+
+def daily_dollars_saved(daily_report: DailyReport) -> list[dict]:
+    """Per-day, per-model rows of `dollars_saved` for the cache view.
+
+    Each row is `{date, model, family, dollars_saved}`. Cost is computed
+    from `tokenscope.pricing.input_price_per_mtok(model)` — i.e. the
+    cache-read tokens valued at uncached input rates. Empty report →
+    empty list.
+    """
+    # Local import to avoid an analytics → pricing → analytics cycle at import time.
+    from tokenscope.pricing import input_price_per_mtok
+
+    rows: list[dict] = []
+    for entry in daily_report.daily:
+        for breakdown in entry.model_breakdowns:
+            price = input_price_per_mtok(breakdown.model_name)
+            saved = breakdown.cache_read_tokens / 1_000_000 * price
+            rows.append(
+                {
+                    "date": entry.date,
+                    "model": breakdown.model_name,
+                    "family": model_family(breakdown.model_name),
+                    "dollars_saved": saved,
+                }
+            )
+    return rows
+
+
+def token_flow_sankey_data(daily_report: DailyReport) -> dict:
+    """Build Sankey-compatible nodes + links for the models view.
+
+    Flow: token-kind (input/output/cache_create/cache_read) → model family.
+    Family nodes are labelled with the family's aggregate cost so the
+    "→ cost" direction PLAN.md §3.2 calls for is conveyed in the node
+    label rather than as a separate (mis-scaled) layer.
+
+    Returns a dict shaped for `go.Sankey`:
+        {labels: [str], sources: [int], targets: [int], values: [int]}
+
+    Empty report → all-empty lists (caller short-circuits).
+    """
+    KINDS = ("input", "output", "cache_create", "cache_read")
+    tokens_by_kind_family: dict[tuple[str, str], int] = {}
+    cost_by_family: dict[str, float] = {}
+
+    for entry in daily_report.daily:
+        for b in entry.model_breakdowns:
+            family = model_family(b.model_name)
+            cost_by_family[family] = cost_by_family.get(family, 0.0) + b.cost
+            counts = {
+                "input": b.input_tokens,
+                "output": b.output_tokens,
+                "cache_create": b.cache_creation_tokens,
+                "cache_read": b.cache_read_tokens,
+            }
+            for kind, n in counts.items():
+                key = (kind, family)
+                tokens_by_kind_family[key] = tokens_by_kind_family.get(key, 0) + n
+
+    families = sorted(cost_by_family.keys())
+    if not families:
+        return {"labels": [], "sources": [], "targets": [], "values": []}
+
+    labels = list(KINDS) + [
+        f"{fam} (${cost_by_family[fam]:,.2f})" for fam in families
+    ]
+    family_idx = {fam: len(KINDS) + i for i, fam in enumerate(families)}
+
+    sources: list[int] = []
+    targets: list[int] = []
+    values: list[int] = []
+    for kind_idx, kind in enumerate(KINDS):
+        for fam in families:
+            v = tokens_by_kind_family.get((kind, fam), 0)
+            if v > 0:
+                sources.append(kind_idx)
+                targets.append(family_idx[fam])
+                values.append(v)
+    return {"labels": labels, "sources": sources, "targets": targets, "values": values}
+
+
 def model_family(model_name: str) -> str:
     """Strip date/version suffixes from a model identifier, keep the family.
 

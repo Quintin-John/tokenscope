@@ -145,3 +145,27 @@ def test_trail_truncates_long_identifiers() -> None:
     trail = Navigation(view="session", day="2026-05-16", session=long_id).trail()
     assert trail[-1][0].endswith("…")
     assert len(trail[-1][0]) <= 24
+
+
+# ---------- cache + models views ----------
+
+
+def test_cache_view_parses() -> None:
+    nav = Navigation.from_params({"view": "cache"})
+    assert nav.view == "cache"
+
+
+def test_models_view_parses() -> None:
+    nav = Navigation.from_params({"view": "models"})
+    assert nav.view == "models"
+
+
+def test_cache_view_trail_is_root_only() -> None:
+    # Cache is a top-level view, so it doesn't accumulate drill crumbs.
+    assert Navigation(view="cache").trail() == [("Overview", Navigation(view="overview"))]
+
+
+def test_top_level_views_constant() -> None:
+    from tokenscope.navigation import TOP_LEVEL_VIEWS
+
+    assert TOP_LEVEL_VIEWS == ("overview", "cache", "models")
