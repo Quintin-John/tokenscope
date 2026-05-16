@@ -10,7 +10,16 @@ def test_package_imports() -> None:
 
 
 def test_submodules_import() -> None:
-    from tokenscope import analytics, app, ccusage, data, models, query  # noqa: F401
+    from tokenscope import (  # noqa: F401
+        analytics,
+        app,
+        ccusage,
+        data,
+        models,
+        plans,
+        query,
+    )
+    from tokenscope.ui import charts, overview, sidebar  # noqa: F401
 
 
 def test_app_public_surface() -> None:
@@ -56,10 +65,27 @@ def test_data_layer_public_surface() -> None:
 def test_query_public_surface() -> None:
     from tokenscope.query import Query
 
-    q = Query(since="20260401", until="20260501", project="demo")
-    assert q.to_args() == ["--since", "20260401", "--until", "20260501", "--project", "demo"]
+    q = Query(since="20260401", until="20260501", project="demo", offline=True)
+    assert q.to_args() == [
+        "--since",
+        "20260401",
+        "--until",
+        "20260501",
+        "--project",
+        "demo",
+        "--offline",
+    ]
     # Frozen → hashable so @st.cache_data can key on it.
-    assert hash(q) == hash(Query(since="20260401", until="20260501", project="demo"))
+    assert hash(q) == hash(
+        Query(since="20260401", until="20260501", project="demo", offline=True)
+    )
+
+
+def test_query_offline_default_false() -> None:
+    from tokenscope.query import Query
+
+    assert Query().to_args() == []
+    assert Query(offline=False).to_args() == []
 
 
 def test_analytics_public_surface() -> None:

@@ -15,6 +15,7 @@ class Query:
     since: str | None = None
     until: str | None = None
     project: str | None = None
+    offline: bool = False
 
     def to_args(self) -> list[str]:
         """Render the query as a ccusage argv slice (no command name)."""
@@ -25,4 +26,6 @@ class Query:
             args += ["--until", self.until]
         if self.project:
             args += ["--project", self.project]
+        if self.offline:
+            args.append("--offline")
         return args

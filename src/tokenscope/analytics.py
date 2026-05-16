@@ -12,9 +12,10 @@ figures.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Iterable, Protocol
 
-from tokenscope.models import DailyReport
+from tokenscope.models import BlocksReport, DailyReport
 
 
 class _HasCacheTokens(Protocol):
@@ -110,6 +111,83 @@ def _cost_of(entry: object) -> float:
         if value is not None:
             return float(value)
     return 0.0
+
+
+def mtd_cost(daily_report: DailyReport, today: date) -> float:
+    """Sum of `total_cost` for entries in the same calendar month as `today`.
+
+    Month boundary is taken from `today`'s year+month, so "MTD" follows the
+    sidebar's selected today rather than the system clock — keeps the
+    function pure.
+    """
+    prefix = today.strftime("%Y-%m")
+    return sum(e.total_cost for e in daily_report.daily if e.date.startswith(prefix))
+
+
+def today_cost(daily_report: DailyReport, today: date) -> float:
+    """Total cost recorded for `today`, or 0.0 if the report has no entry."""
+    today_iso = today.isoformat()
+    for entry in daily_report.daily:
+        if entry.date == today_iso:
+            return entry.total_cost
+    return 0.0
+
+
+def aggregate_cache_hit_ratio(daily_report: DailyReport) -> float:
+    """Cache hit ratio summed across every entry in the report.
+
+    Computed on totals (not as a mean of per-entry ratios) so days with
+    different volumes are weighted correctly.
+    """
+    total_input = sum(e.input_tokens for e in daily_report.daily)
+    total_create = sum(e.cache_creation_tokens for e in daily_report.daily)
+    total_read = sum(e.cache_read_tokens for e in daily_report.daily)
+    denom = total_input + total_create + total_read
+    if denom == 0:
+        return 0.0
+    return total_read / denom
+
+
+def active_block_burn(blocks_report: BlocksReport) -> float | None:
+    """Cost-per-hour of the currently-active block, or None if there isn't one."""
+    for block in blocks_report.blocks:
+        if block.is_active and block.burn_rate is not None:
+            return block.burn_rate.cost_per_hour
+    return None
+
+
+def daily_cost_by_model(daily_report: DailyReport) -> list[dict]:
+    """Long-form rows for the stacked-area chart.
+
+    One row per (day × model) with columns: date, model, family, cost.
+    The UI layer can group/colour by either `model` or `family` depending
+    on legend density.
+    """
+    return [
+        {
+            "date": entry.date,
+            "model": breakdown.model_name,
+            "family": model_family(breakdown.model_name),
+            "cost": breakdown.cost,
+        }
+        for entry in daily_report.daily
+        for breakdown in entry.model_breakdowns
+    ]
+
+
+def daily_token_mix(daily_report: DailyReport) -> list[dict]:
+    """Long-form rows for the daily token-mix stacked bar.
+
+    One row per (day × token-kind). `kind` is one of: input, output,
+    cache_create, cache_read — the four buckets ccusage reports.
+    """
+    rows: list[dict] = []
+    for entry in daily_report.daily:
+        rows.append({"date": entry.date, "kind": "input", "tokens": entry.input_tokens})
+        rows.append({"date": entry.date, "kind": "output", "tokens": entry.output_tokens})
+        rows.append({"date": entry.date, "kind": "cache_create", "tokens": entry.cache_creation_tokens})
+        rows.append({"date": entry.date, "kind": "cache_read", "tokens": entry.cache_read_tokens})
+    return rows
 
 
 def model_family(model_name: str) -> str:
