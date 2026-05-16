@@ -3,6 +3,9 @@
 ccusage is pinned in the sibling `package.json` and installed via `npm ci`
 into `node_modules/.bin/ccusage`. This module shells out to that binary with
 strict argument-list invocation (never `shell=True`, never via `npx`).
+
+This module is intentionally Streamlit-free. The caching layer that wraps
+these functions with `@st.cache_data(ttl=30)` lives in `tokenscope.data`.
 """
 
 from __future__ import annotations
@@ -15,11 +18,15 @@ from typing import Any
 
 from tokenscope.models import (
     BlocksReport,
+    DailyByProjectReport,
     DailyReport,
+    MonthlyByProjectReport,
     MonthlyReport,
     SessionReport,
+    WeeklyByProjectReport,
     WeeklyReport,
 )
+from tokenscope.query import Query
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CCUSAGE_BIN = REPO_ROOT / "node_modules" / ".bin" / "ccusage"
@@ -72,36 +79,47 @@ def get_ccusage_version() -> str:
     return result.stdout.strip()
 
 
-def _date_args(since: str | None, until: str | None) -> list[str]:
-    args: list[str] = []
-    if since:
-        args += ["--since", since]
-    if until:
-        args += ["--until", until]
-    return args
+def _q(query: Query | None) -> list[str]:
+    return query.to_args() if query is not None else []
 
 
-def daily(since: str | None = None, until: str | None = None) -> DailyReport:
-    return DailyReport.model_validate(_run_json(["daily", *_date_args(since, until)]))
+def daily(query: Query | None = None) -> DailyReport:
+    return DailyReport.model_validate(_run_json(["daily", *_q(query)]))
 
 
-def weekly(since: str | None = None, until: str | None = None) -> WeeklyReport:
-    return WeeklyReport.model_validate(_run_json(["weekly", *_date_args(since, until)]))
+def weekly(query: Query | None = None) -> WeeklyReport:
+    return WeeklyReport.model_validate(_run_json(["weekly", *_q(query)]))
 
 
-def monthly(since: str | None = None, until: str | None = None) -> MonthlyReport:
-    return MonthlyReport.model_validate(_run_json(["monthly", *_date_args(since, until)]))
+def monthly(query: Query | None = None) -> MonthlyReport:
+    return MonthlyReport.model_validate(_run_json(["monthly", *_q(query)]))
 
 
-def session(project: str | None = None) -> SessionReport:
-    args: list[str] = []
-    if project:
-        args += ["--project", project]
-    return SessionReport.model_validate(_run_json(["session", *args]))
+def session(query: Query | None = None) -> SessionReport:
+    return SessionReport.model_validate(_run_json(["session", *_q(query)]))
 
 
-def blocks(active: bool = False) -> BlocksReport:
+def blocks(active: bool = False, query: Query | None = None) -> BlocksReport:
     args: list[str] = []
     if active:
         args.append("--active")
+    args += _q(query)
     return BlocksReport.model_validate(_run_json(["blocks", *args]))
+
+
+def daily_by_project(query: Query | None = None) -> DailyByProjectReport:
+    return DailyByProjectReport.model_validate(
+        _run_json(["daily", "--instances", *_q(query)])
+    )
+
+
+def weekly_by_project(query: Query | None = None) -> WeeklyByProjectReport:
+    return WeeklyByProjectReport.model_validate(
+        _run_json(["weekly", "--instances", *_q(query)])
+    )
+
+
+def monthly_by_project(query: Query | None = None) -> MonthlyByProjectReport:
+    return MonthlyByProjectReport.model_validate(
+        _run_json(["monthly", "--instances", *_q(query)])
+    )
