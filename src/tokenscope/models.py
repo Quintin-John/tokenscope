@@ -130,6 +130,11 @@ class BlockEntry(_BaseShape):
 
 class BlocksReport(_BaseShape):
     blocks: list[BlockEntry]
+    # ccusage adds `message` to a `blocks --active` response when no active
+    # block exists in the queried range (e.g. range entirely in the past).
+    # Optional everywhere else; `extra="forbid"` stays on so other schema
+    # drift still trips loudly.
+    message: str | None = None
 
 
 class DailyByProjectReport(_BaseShape):
