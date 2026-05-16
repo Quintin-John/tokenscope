@@ -46,7 +46,14 @@ def _check_installed() -> Path:
 
 
 def _run_json(args: list[str]) -> dict[str, Any]:
-    """Run ccusage with the given args and parse stdout as JSON."""
+    """Run ccusage with the given args and parse stdout as JSON.
+
+    On JSON decode failure, the wrapped CcusageError includes the
+    invoked argv, a snippet of stdout, and stderr — so a user-facing
+    "ccusage failed" message points at the real cause (ccusage printing
+    a non-JSON usage/error message to stdout, for example) instead of
+    just the Python-side parse error.
+    """
     binary = _check_installed()
     cmd = [str(binary), *args, "--json"]
     try:
@@ -63,7 +70,12 @@ def _run_json(args: list[str]) -> dict[str, Any]:
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise CcusageError(f"ccusage produced invalid JSON: {exc}") from exc
+        raise CcusageError(
+            f"ccusage produced invalid JSON: {exc}\n"
+            f"argv: {args}\n"
+            f"stdout (first 300 chars): {result.stdout[:300]!r}\n"
+            f"stderr (first 300 chars): {result.stderr[:300]!r}"
+        ) from exc
 
 
 @lru_cache(maxsize=1)

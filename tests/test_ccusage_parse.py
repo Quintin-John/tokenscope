@@ -85,6 +85,16 @@ def test_session_parses() -> None:
     assert s.last_activity
 
 
+def test_daily_with_project_filter_parses() -> None:
+    """Regression: `ccusage daily --project=<id>` adds a `project` field per
+    entry. We allow it as optional rather than tripping extra="forbid"."""
+    report = DailyReport.model_validate(_load("daily_with_project.json"))
+    assert report.daily
+    for entry in report.daily:
+        assert entry.project  # populated when --project is used
+        assert entry.project.startswith("-")  # ccusage's slugged-path ids
+
+
 def test_daily_by_project_parses() -> None:
     report = DailyByProjectReport.model_validate(_load("daily_by_project.json"))
     assert report.projects

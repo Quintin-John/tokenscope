@@ -1,0 +1,35 @@
+{
+  "daily": [
+    {
+      "date": "2026-04-29",
+      "inputTokens": 400,
+      "outputTokens": 164025,
+      "cacheCreationTokens": 794402,
+      "cacheReadTokens": 38120816,
+      "totalTokens": 39079643,
+      "totalCost": 28.128045500000002,
+      "modelsUsed": [
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 400,
+          "outputTokens": 164025,
+          "cacheCreationTokens": 794402,
+          "cacheReadTokens": 38120816,
+          "cost": 28.128045500000002
+        }
+      ],
+      "project": "-Users-quintin-johnsmith-Documents-JavaCode-IT-Artifact"
+    }
+  ],
+  "totals": {
+    "inputTokens": 400,
+    "outputTokens": 164025,
+    "cacheCreationTokens": 794402,
+    "cacheReadTokens": 38120816,
+    "totalCost": 28.128045500000002,
+    "totalTokens": 39079643
+  }
+}

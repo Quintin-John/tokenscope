@@ -53,6 +53,10 @@ class Totals(_BaseShape):
 
 class DailyEntry(_PeriodEntryBase):
     date: str
+    # ccusage adds a `project` field per entry only when invoked with
+    # `--project=<id>`. Optional everywhere else; we keep extra="forbid"
+    # elsewhere to catch unannounced ccusage schema drift.
+    project: str | None = None
 
 
 class DailyReport(_BaseShape):
