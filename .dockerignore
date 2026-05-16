@@ -1,0 +1,41 @@
+# Keep the build context small. Anything listed here is invisible to
+# the docker daemon — speeds up `docker build` and prevents secrets /
+# build artefacts from sneaking into image layers.
+
+# Host-resolved environments and lockfile output
+.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Version control + GitHub
+.git/
+.gitignore
+.github/
+
+# Project-local Claude Code config + memory
+.claude/
+
+# Tests + docs aren't needed inside the runtime image
+tests/
+scripts/
+PLAN.md
+README.md
