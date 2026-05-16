@@ -1,0 +1,105 @@
+"""Active-block live view: burn gauge + projection, auto-refreshing every 30s.
+
+Phase 6 deliverable per PLAN.md §6:
+    "Auto-refresh `--active` block every 30s (`st.fragment(run_every="30s")`),
+     burn gauge + projection."
+
+Implementation notes:
+- The refreshing panel is a `@st.fragment(run_every=30)`. Only the panel
+  re-runs on the timer — the page selector, sidebar, and breadcrumbs are
+  not affected.
+- The live ccusage call bypasses `tokenscope.data` (which is wrapped in
+  `@st.cache_data(ttl=30)`). Compounding two 30s windows would give the
+  user a snapshot up to a minute stale, which defeats "live". The
+  fragment is the only refresh cadence.
+- The sidebar's date/project/model filters don't apply to "right now";
+  the only sidebar control we honour is `offline`, so an offline-pinned
+  session keeps using cached pricing in the live view too.
+"""
+
+from __future__ import annotations
+
+import streamlit as st
+
+from tokenscope import ccusage
+from tokenscope.ccusage import CcusageError
+from tokenscope.navigation import Navigation
+from tokenscope.query import Query
+from tokenscope.ui.charts import burn_gauge
+from tokenscope.ui.sidebar import SidebarState
+
+
+REFRESH_SECONDS = 30
+
+
+def render(state: SidebarState, nav: Navigation) -> None:
+    if (banner := state.plan.banner_text()) is not None:
+        st.info(banner)
+
+    st.subheader("Active billing block (live)")
+    st.caption(
+        f"Auto-refreshes every {REFRESH_SECONDS}s. Ignores the date / project / "
+        "model filters — this view is a real-time snapshot of the current "
+        "5-hour billing window."
+    )
+
+    _live_panel(offline=state.query.offline)
+
+
+@st.fragment(run_every=REFRESH_SECONDS)
+def _live_panel(offline: bool) -> None:
+    """The actual live panel. Args must be hashable so Streamlit can key the
+    fragment; a single bool is fine."""
+    try:
+        report = ccusage.blocks(active=True, query=Query(offline=offline))
+    except CcusageError as exc:
+        st.error(f"ccusage failed:\n\n```\n{exc}\n```")
+        return
+
+    active = next((b for b in report.blocks if b.is_active), None)
+    if active is None:
+        st.info(
+            "No active billing block right now. Start a Claude Code session "
+            "to see the live burn gauge."
+        )
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Cost so far", f"${active.cost_usd:,.2f}")
+    if active.burn_rate is not None:
+        c2.metric("$/hr", f"${active.burn_rate.cost_per_hour:,.2f}")
+        c3.metric(
+            "Tokens / min",
+            f"{active.burn_rate.tokens_per_minute:,.0f}",
+            help="Indicator-weighted tokens per minute, from ccusage's burnRate.",
+        )
+    else:
+        c2.metric("$/hr", "—")
+        c3.metric("Tokens / min", "—")
+    if active.projection is not None:
+        c4.metric(
+            "Projected total",
+            f"${active.projection.total_cost:,.2f}",
+            delta=f"{active.projection.remaining_minutes} min left",
+            delta_color="off",
+            help="Cost projected to the end of this 5-hour window at the current burn rate.",
+        )
+    else:
+        c4.metric("Projected total", "—")
+
+    st.caption(
+        f"Window {active.start_time} → {active.end_time} (UTC). "
+        f"Models: {', '.join(active.models) or '—'}."
+    )
+
+    gauge = burn_gauge(active)
+    if gauge is not None:
+        st.plotly_chart(gauge, width="stretch")
+
+    if active.projection is not None:
+        with st.expander("Projection detail"):
+            p = active.projection
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Projected total cost", f"${p.total_cost:,.2f}")
+            c2.metric("Projected total tokens", f"{p.total_tokens:,}")
+            c3.metric("Minutes remaining", str(p.remaining_minutes))

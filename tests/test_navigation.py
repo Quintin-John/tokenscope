@@ -168,4 +168,13 @@ def test_cache_view_trail_is_root_only() -> None:
 def test_top_level_views_constant() -> None:
     from tokenscope.navigation import TOP_LEVEL_VIEWS
 
-    assert TOP_LEVEL_VIEWS == ("overview", "cache", "models")
+    assert TOP_LEVEL_VIEWS == ("overview", "live", "cache", "models")
+
+
+def test_live_view_parses() -> None:
+    nav = Navigation.from_params({"view": "live"})
+    assert nav.view == "live"
+
+
+def test_live_view_trail_is_root_only() -> None:
+    assert Navigation(view="live").trail() == [("Overview", Navigation(view="overview"))]

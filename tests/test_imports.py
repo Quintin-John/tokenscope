@@ -27,6 +27,7 @@ def test_submodules_import() -> None:
         cache,
         charts,
         day,
+        live,
         models as models_ui,
         overview,
         session,
