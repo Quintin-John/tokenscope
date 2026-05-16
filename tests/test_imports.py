@@ -136,6 +136,8 @@ def test_analytics_public_surface() -> None:
         "daily_cache_hit_ratio",
         "daily_dollars_saved",
         "token_flow_sankey_data",
+        "window_cost",
+        "last_day_cost",
     ):
         assert callable(getattr(analytics, name)), name
 

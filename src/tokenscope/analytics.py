@@ -120,6 +120,24 @@ def _cost_of(entry: object) -> float:
     return 0.0
 
 
+def window_cost(daily_report: DailyReport) -> float:
+    """Total `total_cost` across every entry in the report (the selected window)."""
+    return sum(e.total_cost for e in daily_report.daily)
+
+
+def last_day_cost(daily_report: DailyReport) -> tuple[str, float] | None:
+    """`(date, total_cost)` for the most recent entry in the window.
+
+    Returns None when the report is empty. Independent of system "today" —
+    when the user picks a window that ends in the past, this still surfaces
+    a meaningful "most-recent day" KPI.
+    """
+    if not daily_report.daily:
+        return None
+    latest = max(daily_report.daily, key=lambda e: e.date)
+    return latest.date, latest.total_cost
+
+
 def mtd_cost(daily_report: DailyReport, today: date) -> float:
     """Sum of `total_cost` for entries in the same calendar month as `today`.
 

@@ -18,8 +18,8 @@ from tokenscope.analytics import (
     aggregate_cache_hit_ratio,
     available_models,
     filter_daily_by_models,
-    mtd_cost,
-    today_cost,
+    last_day_cost,
+    window_cost,
 )
 from tokenscope.ccusage import CcusageError
 from tokenscope.navigation import Navigation
@@ -99,14 +99,25 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
 
 
 def _render_kpis(daily_report, blocks_report, today: date) -> None:
-    mtd = mtd_cost(daily_report, today)
-    today_v = today_cost(daily_report, today)
+    window_total = window_cost(daily_report)
+    last_day = last_day_cost(daily_report)
     burn = active_block_burn(blocks_report) if blocks_report is not None else None
     cache_ratio = aggregate_cache_hit_ratio(daily_report)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("MTD cost", f"${mtd:,.2f}")
-    c2.metric("Today", f"${today_v:,.2f}")
+    c1.metric(
+        "Window cost",
+        f"${window_total:,.2f}",
+        help="Sum of total_cost across every day in the selected date range.",
+    )
+    if last_day is not None:
+        c2.metric(
+            f"Last day ({last_day[0]})",
+            f"${last_day[1]:,.2f}",
+            help="Cost on the most recent day with data inside the window.",
+        )
+    else:
+        c2.metric("Last day", "—")
     c3.metric(
         "Active block $/hr",
         f"${burn:,.2f}" if burn is not None else "—",
