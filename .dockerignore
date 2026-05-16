@@ -34,8 +34,10 @@ Thumbs.db
 # Project-local Claude Code config + memory
 .claude/
 
-# Tests + docs aren't needed inside the runtime image
+# Tests + scripts + plan aren't needed inside the runtime image
 tests/
 scripts/
 PLAN.md
-README.md
+# README.md is intentionally NOT ignored — pyproject.toml's
+# readme = "README.md" makes hatchling/uv read the file during
+# `uv sync`, so it has to be in the build context.

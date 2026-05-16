@@ -135,14 +135,20 @@ ccusage are installed at lockfile-frozen versions.
 ```bash
 docker build -t tokenscope .
 docker run --rm -p 8501:8501 \
-    -v "$HOME/.config/claude":/root/.config/claude:ro \
+    -v "$HOME/.claude":/root/.claude:ro \
     tokenscope
 # open http://127.0.0.1:8501
 ```
 
-The volume mount exposes your Claude Code logs read-only into the
-container so ccusage can read them; without it the dashboard will load
-with an empty data set.
+The volume mount exposes Claude Code's session history read-only into
+the container so ccusage can read it; without the mount the dashboard
+loads with an empty data set. On macOS the path is `~/.claude` (that's
+where Claude Code stores its `projects/`, `statsig/`, and ide state).
+
+Verified end-to-end on macOS arm64 against Docker Desktop 29.4.3 —
+image is ~880 MB, container serves `/_stcore/health → ok` within a few
+seconds, and `ccusage daily --json` inside the container reads the
+mounted logs (24 entries, $1994.97 total at smoke time).
 
 ## PyPI publish path
 
