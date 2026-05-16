@@ -22,6 +22,7 @@ from tokenscope.navigation import TOP_LEVEL_VIEWS, Navigation, ViewName
 from tokenscope.ui import block as block_view
 from tokenscope.ui import cache as cache_view
 from tokenscope.ui import day as day_view
+from tokenscope.ui import live as live_view
 from tokenscope.ui import models as models_view
 from tokenscope.ui import overview, sidebar
 from tokenscope.ui import session as session_view
@@ -29,6 +30,7 @@ from tokenscope.ui import session as session_view
 
 _VIEW_LABELS: dict[ViewName, str] = {
     "overview": "Overview",
+    "live": "Live",
     "cache": "Cache",
     "models": "Models",
 }
@@ -56,6 +58,8 @@ def render() -> None:
         cache_view.render(state, nav)
     elif nav.view == "models":
         models_view.render(state, nav)
+    elif nav.view == "live":
+        live_view.render(state, nav)
     else:
         overview.render(state, nav)
 

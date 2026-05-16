@@ -15,7 +15,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Mapping
 
-ViewName = Literal["overview", "day", "session", "block", "cache", "models"]
+ViewName = Literal[
+    "overview", "day", "session", "block", "cache", "models", "live"
+]
 VALID_VIEWS: tuple[ViewName, ...] = (
     "overview",
     "day",
@@ -23,8 +25,9 @@ VALID_VIEWS: tuple[ViewName, ...] = (
     "block",
     "cache",
     "models",
+    "live",
 )
-TOP_LEVEL_VIEWS: tuple[ViewName, ...] = ("overview", "cache", "models")
+TOP_LEVEL_VIEWS: tuple[ViewName, ...] = ("overview", "live", "cache", "models")
 
 
 @dataclass(frozen=True, slots=True)
