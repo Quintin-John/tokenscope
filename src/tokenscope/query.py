@@ -18,14 +18,21 @@ class Query:
     offline: bool = False
 
     def to_args(self) -> list[str]:
-        """Render the query as a ccusage argv slice (no command name)."""
+        """Render the query as a ccusage argv slice (no command name).
+
+        Uses the `--key=value` joined form rather than two separate argv
+        entries. ccusage's CLI parser treats a value beginning with `-`
+        as the next flag when args are space-separated, which breaks
+        every project id (they're slugified absolute paths like
+        `-Users-quintin-…`). The joined form is unambiguous.
+        """
         args: list[str] = []
         if self.since:
-            args += ["--since", self.since]
+            args.append(f"--since={self.since}")
         if self.until:
-            args += ["--until", self.until]
+            args.append(f"--until={self.until}")
         if self.project:
-            args += ["--project", self.project]
+            args.append(f"--project={self.project}")
         if self.offline:
             args.append("--offline")
         return args

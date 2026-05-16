@@ -79,18 +79,28 @@ def test_query_public_surface() -> None:
 
     q = Query(since="20260401", until="20260501", project="demo", offline=True)
     assert q.to_args() == [
-        "--since",
-        "20260401",
-        "--until",
-        "20260501",
-        "--project",
-        "demo",
+        "--since=20260401",
+        "--until=20260501",
+        "--project=demo",
         "--offline",
     ]
     # Frozen → hashable so @st.cache_data can key on it.
     assert hash(q) == hash(
         Query(since="20260401", until="20260501", project="demo", offline=True)
     )
+
+
+def test_query_project_with_leading_dash() -> None:
+    """Regression: ccusage's parser treats a space-separated project value
+    starting with `-` as the next flag, so we emit --project=<value>."""
+    from tokenscope.query import Query
+
+    project_id = "-Users-quintin-johnsmith-Documents-JavaCode-IT-Artifact"
+    args = Query(project=project_id).to_args()
+    # The project must be a single argv entry so ccusage's parser can't
+    # mistake it for another flag.
+    assert args == [f"--project={project_id}"]
+    assert all(not (a.startswith("-") and " " in a) for a in args)
 
 
 def test_query_offline_default_false() -> None:
@@ -126,6 +136,8 @@ def test_analytics_public_surface() -> None:
         "daily_cache_hit_ratio",
         "daily_dollars_saved",
         "token_flow_sankey_data",
+        "window_cost",
+        "last_day_cost",
     ):
         assert callable(getattr(analytics, name)), name
 

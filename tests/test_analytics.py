@@ -29,6 +29,7 @@ from tokenscope.analytics import (
     find_block,
     find_daily_entry,
     find_session,
+    last_day_cost,
     model_family,
     mtd_cost,
     rolling_cost_average,
@@ -36,6 +37,7 @@ from tokenscope.analytics import (
     today_cost,
     token_flow_sankey_data,
     top_n_by_cost,
+    window_cost,
 )
 from tokenscope.models import (
     BlockEntry,
@@ -438,6 +440,55 @@ def test_today_cost_no_entry_for_today() -> None:
 
 def test_today_cost_empty_report() -> None:
     assert today_cost(_report([]), today=date(2026, 5, 16)) == 0.0
+
+
+# ---------- window_cost ----------
+
+
+def test_window_cost_sums_across_window() -> None:
+    """Regression for the 'KPIs should reflect the picked range' fix."""
+    report = _report(
+        [
+            _entry("2026-04-01", total_cost=10.0),
+            _entry("2026-05-01", total_cost=1.0),
+            _entry("2026-05-16", total_cost=2.5),
+        ]
+    )
+    assert window_cost(report) == pytest.approx(13.5)
+
+
+def test_window_cost_empty_report() -> None:
+    assert window_cost(_report([])) == 0.0
+
+
+# ---------- last_day_cost ----------
+
+
+def test_last_day_cost_picks_max_date() -> None:
+    report = _report(
+        [
+            _entry("2026-05-14", total_cost=70.11),
+            _entry("2026-05-16", total_cost=39.63),
+            _entry("2026-05-12", total_cost=35.88),
+        ]
+    )
+    result = last_day_cost(report)
+    assert result == ("2026-05-16", pytest.approx(39.63))
+
+
+def test_last_day_cost_empty_report() -> None:
+    assert last_day_cost(_report([])) is None
+
+
+def test_last_day_cost_does_not_depend_on_system_today() -> None:
+    """Window may end in the past — KPI should still pick the latest in-window day."""
+    report = _report(
+        [
+            _entry("2025-12-30", total_cost=1.0),
+            _entry("2025-12-31", total_cost=2.0),
+        ]
+    )
+    assert last_day_cost(report) == ("2025-12-31", pytest.approx(2.0))
 
 
 # ---------- aggregate_cache_hit_ratio ----------
