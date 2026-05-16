@@ -117,6 +117,20 @@ def test_token_mix_bar_has_four_kinds() -> None:
     assert kinds == {"input", "output", "cache_create", "cache_read"}
 
 
+def test_token_mix_bar_overlay_with_largest_at_back() -> None:
+    """Regression: cache_read normally dwarfs the other kinds. Overlay mode
+    with cache_read drawn first keeps the smaller kinds visible on top."""
+    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
+    fig = token_mix_bar(report)
+    assert fig.layout.barmode == "overlay"
+    # First trace is rendered at the back; assert it's cache_read.
+    assert fig.data[0].name == "cache_read"
+    # All traces use a transparency so the smaller bars don't fully occlude
+    # whatever the user might see behind them.
+    for trace in fig.data:
+        assert trace.opacity is not None and trace.opacity < 1.0
+
+
 def test_token_mix_bar_empty_returns_none() -> None:
     assert token_mix_bar(_report([])) is None
 
