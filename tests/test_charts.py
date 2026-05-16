@@ -133,6 +133,17 @@ def test_token_mix_bar_overlay_log_scale() -> None:
     assert fig.layout.yaxis.type == "log"
 
 
+def test_token_mix_bar_hovertemplate_shows_absolute_tokens() -> None:
+    """Log scale hides the linear truth — hover keeps the raw count one
+    mouse-move away."""
+    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
+    fig = token_mix_bar(report)
+    for trace in fig.data:
+        assert trace.hovertemplate is not None
+        assert "tokens" in trace.hovertemplate.lower()
+        assert "%{y" in trace.hovertemplate  # raw y-value, not log10
+
+
 def test_token_mix_bar_empty_returns_none() -> None:
     assert token_mix_bar(_report([])) is None
 

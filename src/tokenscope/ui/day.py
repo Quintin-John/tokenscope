@@ -18,11 +18,14 @@ from tokenscope.ui.sidebar import SidebarState
 
 
 def render(state: SidebarState, nav: Navigation) -> None:
+    # Render the breadcrumb FIRST so even an incomplete URL
+    # (`?view=day` with no `day` param) shows a back affordance.
+    breadcrumbs.render(nav)
     if not nav.day:
-        st.warning("No day selected.")
+        st.warning("No day selected. Click a day in the Overview charts or "
+                   "use the breadcrumb above to go back.")
         return
 
-    breadcrumbs.render(nav)
     st.subheader(f"Day detail — {nav.day}")
 
     try:
@@ -35,7 +38,12 @@ def render(state: SidebarState, nav: Navigation) -> None:
 
     entry = find_daily_entry(daily_report, nav.day)
     if entry is None:
-        st.caption(f"No usage recorded on {nav.day}.")
+        st.info(
+            f"No usage recorded on `{nav.day}` in the current window. "
+            "If you meant a different day, widen the **Date range** in the "
+            "sidebar — the day must be inside the window for ccusage to "
+            "include it. Use the breadcrumb above to go back to Overview."
+        )
         return
 
     c1, c2, c3 = st.columns(3)
@@ -74,20 +82,24 @@ def render(state: SidebarState, nav: Navigation) -> None:
 
 
 def _session_row(session, nav: Navigation) -> None:
-    cols = st.columns([5, 2, 2, 1])
+    cols = st.columns([5, 2, 2, 2])
     cols[0].markdown(f"`{session.session_id}`")
     cols[1].markdown(f"${session.total_cost:,.2f}")
     cols[2].markdown(f"{session.total_tokens:,} tok")
-    if cols[3].button("Open", key=f"open-session-{session.session_id}", type="tertiary"):
+    if cols[3].button(
+        "Open session", key=f"open-session-{session.session_id}", type="secondary"
+    ):
         _go(nav.to_session(session.session_id))
 
 
 def _block_row(block, nav: Navigation) -> None:
-    cols = st.columns([5, 2, 2, 1])
+    cols = st.columns([5, 2, 2, 2])
     cols[0].markdown(f"`{block.id}`" + (" — **active**" if block.is_active else ""))
     cols[1].markdown(f"${block.cost_usd:,.2f}")
     cols[2].markdown(f"{block.total_tokens:,} tok")
-    if cols[3].button("Open", key=f"open-block-{block.id}", type="tertiary"):
+    if cols[3].button(
+        "Open block", key=f"open-block-{block.id}", type="secondary"
+    ):
         _go(nav.to_block(block.id))
 
 

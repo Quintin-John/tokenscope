@@ -14,11 +14,11 @@ from tokenscope.ui.sidebar import SidebarState
 
 
 def render(state: SidebarState, nav: Navigation) -> None:
+    breadcrumbs.render(nav)
     if not nav.session:
-        st.warning("No session selected.")
+        st.warning("No session selected. Use the breadcrumb above to go back.")
         return
 
-    breadcrumbs.render(nav)
     st.subheader("Session detail")
     st.caption(f"`{nav.session}`")
 

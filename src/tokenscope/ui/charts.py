@@ -236,7 +236,13 @@ def token_mix_bar(daily_report: DailyReport) -> go.Figure | None:
         category_orders={"kind": ["cache_read", "cache_create", "output", "input"]},
         labels={"date": "Date", "tokens": "Tokens", "kind": ""},
     )
-    fig.update_traces(opacity=0.75)
+    # Hover shows the absolute token count even though the y-axis is log.
+    # Log scale makes magnitudes comparable visually; hover keeps the truth
+    # one mouse-move away.
+    fig.update_traces(
+        opacity=0.75,
+        hovertemplate="<b>%{fullData.name}</b><br>%{x}<br>%{y:,.0f} tokens<extra></extra>",
+    )
     fig.update_layout(
         margin=dict(l=10, r=10, t=30, b=10),
         legend_title_text="",

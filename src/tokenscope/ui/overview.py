@@ -58,7 +58,10 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
     st.divider()
 
     if not daily_report.daily:
-        st.caption("No usage in the selected window.")
+        st.info(
+            "No usage in the selected window. Try widening the **Date range** "
+            "in the sidebar, or clearing the **Project** filter if one is set."
+        )
         return
 
     st.subheader("Daily cost by model family")

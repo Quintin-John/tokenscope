@@ -43,10 +43,11 @@ def render() -> None:
     nav = Navigation.from_params(dict(st.query_params))
     state = sidebar.render()
 
-    # Top-level page selector. Drill views (day/session/block) hide it in
-    # favour of their breadcrumb trail.
-    if nav.view in TOP_LEVEL_VIEWS:
-        nav = _render_page_selector(nav)
+    # Page selector is rendered on EVERY view (was previously hidden on
+    # drill views, which trapped users — see slice 11). Drill views just
+    # have no highlight; the user can always click out to a top-level
+    # view in one tap.
+    nav = _render_page_selector(nav)
 
     if nav.view == "day":
         day_view.render(state, nav)
@@ -73,17 +74,24 @@ def render() -> None:
 
 
 def _render_page_selector(nav: Navigation) -> Navigation:
+    """Render the top-level page selector. Always visible — on drill views
+    (day/session/block) the selector has no current selection, so picking
+    any option routes out cleanly.
+    """
     label_to_view = {v: k for k, v in _VIEW_LABELS.items()}
     options = [_VIEW_LABELS[v] for v in TOP_LEVEL_VIEWS]
-    current_label = _VIEW_LABELS[nav.view]  # safe: caller checked TOP_LEVEL_VIEWS
+    index = options.index(_VIEW_LABELS[nav.view]) if nav.view in TOP_LEVEL_VIEWS else None
     chosen_label = st.radio(
         "Page",
         options=options,
-        index=options.index(current_label),
+        index=index,
         horizontal=True,
         label_visibility="collapsed",
         key="top-page-selector",
     )
+    if chosen_label is None:
+        # User hasn't picked anything yet (drill view, fresh render). No-op.
+        return nav
     chosen_view: ViewName = label_to_view[chosen_label]
     if chosen_view != nav.view:
         st.query_params.clear()

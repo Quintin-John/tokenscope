@@ -34,7 +34,10 @@ def render(state: SidebarState, nav: Navigation) -> None:
         daily_report = filter_daily_by_models(daily_report, chosen)
 
     if not daily_report.daily:
-        st.caption("No usage in the selected window.")
+        st.info(
+            "No usage in the selected window. Try widening the **Date range** "
+            "in the sidebar, or clearing the **Project** filter if one is set."
+        )
         return
 
     st.subheader("Token flow: kind → model family")
