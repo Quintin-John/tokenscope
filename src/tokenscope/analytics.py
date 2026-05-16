@@ -15,7 +15,14 @@ from __future__ import annotations
 from datetime import date
 from typing import Iterable, Protocol
 
-from tokenscope.models import BlocksReport, DailyReport
+from tokenscope.models import (
+    BlockEntry,
+    BlocksReport,
+    DailyEntry,
+    DailyReport,
+    SessionEntry,
+    SessionReport,
+)
 
 
 class _HasCacheTokens(Protocol):
@@ -173,6 +180,138 @@ def daily_cost_by_model(daily_report: DailyReport) -> list[dict]:
         for entry in daily_report.daily
         for breakdown in entry.model_breakdowns
     ]
+
+
+def find_daily_entry(daily_report: DailyReport, day: str) -> DailyEntry | None:
+    """Return the entry for `day` (YYYY-MM-DD), or None if absent."""
+    for entry in daily_report.daily:
+        if entry.date == day:
+            return entry
+    return None
+
+
+def sessions_on_day(session_report: SessionReport, day: str) -> list[SessionEntry]:
+    """Sessions whose `lastActivity` equals `day` (YYYY-MM-DD).
+
+    ccusage records `lastActivity` per-session, not per-message, so this
+    catches sessions that were most recently touched on the given day —
+    it will not catch a session whose activity spanned the day but ended
+    later. Good enough for the drill-down's "sessions on this day" panel.
+    """
+    return [s for s in session_report.sessions if s.last_activity == day]
+
+
+def blocks_on_day(blocks_report: BlocksReport, day: str) -> list[BlockEntry]:
+    """Non-gap blocks whose `startTime` falls on `day` (YYYY-MM-DD, UTC).
+
+    `startTime` is ISO 8601 with a `Z` suffix, so prefix comparison works
+    against `YYYY-MM-DD`. Gap blocks are filtered out — they don't carry
+    real usage and would clutter the table.
+    """
+    return [
+        b
+        for b in blocks_report.blocks
+        if not b.is_gap and b.start_time.startswith(day)
+    ]
+
+
+def find_session(session_report: SessionReport, session_id: str) -> SessionEntry | None:
+    for s in session_report.sessions:
+        if s.session_id == session_id:
+            return s
+    return None
+
+
+def find_block(blocks_report: BlocksReport, block_id: str) -> BlockEntry | None:
+    for b in blocks_report.blocks:
+        if b.id == block_id:
+            return b
+    return None
+
+
+def cost_share_by_model(entry: DailyEntry | SessionEntry) -> list[dict]:
+    """Donut data for a single entry's model breakdown.
+
+    Returns `[{model, family, cost}]`. Used by day-detail and session-detail
+    views. Empty list when the entry has no breakdowns (defensive — every
+    entry ccusage emits has at least one).
+    """
+    return [
+        {
+            "model": b.model_name,
+            "family": model_family(b.model_name),
+            "cost": b.cost,
+        }
+        for b in entry.model_breakdowns
+    ]
+
+
+def filter_daily_by_models(
+    daily_report: DailyReport, selected: Iterable[str]
+) -> DailyReport:
+    """Return a *new* DailyReport with breakdowns restricted to `selected`.
+
+    Per-entry token/cost totals are recomputed from the filtered breakdowns
+    so the KPI cards and charts stay internally consistent. Top-level
+    `totals` is recomputed across the surviving entries. Entries with no
+    surviving breakdowns are dropped.
+
+    `selected` of None or empty means "keep everything" (sensible default
+    for "no filter applied"). To pass an empty selection through, the
+    caller should special-case it before reaching here.
+    """
+    keep = set(selected) if selected else None
+    if not keep:
+        return daily_report
+    new_entries: list[DailyEntry] = []
+    for entry in daily_report.daily:
+        kept = [b for b in entry.model_breakdowns if b.model_name in keep]
+        if not kept:
+            continue
+        new_entries.append(
+            DailyEntry(
+                date=entry.date,
+                inputTokens=sum(b.input_tokens for b in kept),
+                outputTokens=sum(b.output_tokens for b in kept),
+                cacheCreationTokens=sum(b.cache_creation_tokens for b in kept),
+                cacheReadTokens=sum(b.cache_read_tokens for b in kept),
+                totalTokens=sum(
+                    b.input_tokens
+                    + b.output_tokens
+                    + b.cache_creation_tokens
+                    + b.cache_read_tokens
+                    for b in kept
+                ),
+                totalCost=sum(b.cost for b in kept),
+                modelsUsed=[b.model_name for b in kept],
+                modelBreakdowns=kept,
+            )
+        )
+    return DailyReport(
+        daily=new_entries,
+        totals=_totals_from_entries(new_entries),
+    )
+
+
+def available_models(daily_report: DailyReport) -> list[str]:
+    """Sorted unique model names that appear anywhere in the report."""
+    seen: set[str] = set()
+    for entry in daily_report.daily:
+        seen.update(entry.models_used)
+    return sorted(seen)
+
+
+def _totals_from_entries(entries: list[DailyEntry]):
+    from tokenscope.models import Totals  # local import to avoid module-load cost
+
+    return Totals(
+        inputTokens=sum(e.input_tokens for e in entries),
+        outputTokens=sum(e.output_tokens for e in entries),
+        cacheCreationTokens=sum(e.cache_creation_tokens for e in entries),
+        cacheReadTokens=sum(e.cache_read_tokens for e in entries),
+        totalTokens=sum(e.total_tokens for e in entries),
+        totalCost=sum(e.total_cost for e in entries),
+    )
 
 
 def daily_token_mix(daily_report: DailyReport) -> list[dict]:

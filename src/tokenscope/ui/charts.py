@@ -15,11 +15,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from tokenscope.analytics import (
+    cost_share_by_model,
     daily_cost_by_model,
     daily_token_mix,
     rolling_cost_average,
 )
-from tokenscope.models import DailyReport
+from tokenscope.models import BlockEntry, DailyEntry, DailyReport, SessionEntry
 
 
 def stacked_area_cost_by_family(daily_report: DailyReport) -> go.Figure | None:
@@ -62,6 +63,77 @@ def rolling_average_line(daily_report: DailyReport, window_days: int = 7) -> go.
         margin=dict(l=10, r=10, t=30, b=10),
         yaxis_tickprefix="$",
     )
+    return fig
+
+
+def donut_cost_by_model(entry: DailyEntry | SessionEntry) -> go.Figure | None:
+    """Donut: cost share by model for a single day or session.
+
+    Returns None when the entry has no model breakdowns (defensive — every
+    entry ccusage emits has at least one in practice).
+    """
+    rows = cost_share_by_model(entry)
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    fig = px.pie(
+        df,
+        values="cost",
+        names="model",
+        hole=0.55,
+    )
+    fig.update_traces(textposition="inside", textinfo="percent+label")
+    fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), showlegend=True)
+    return fig
+
+
+def session_token_mix(entry: SessionEntry) -> go.Figure:
+    """Stacked bar of input / output / cache_create / cache_read for one session."""
+    rows = [
+        {"kind": "input", "tokens": entry.input_tokens},
+        {"kind": "output", "tokens": entry.output_tokens},
+        {"kind": "cache_create", "tokens": entry.cache_creation_tokens},
+        {"kind": "cache_read", "tokens": entry.cache_read_tokens},
+    ]
+    df = pd.DataFrame(rows)
+    fig = px.bar(
+        df,
+        x="kind",
+        y="tokens",
+        color="kind",
+        category_orders={"kind": ["input", "output", "cache_create", "cache_read"]},
+        labels={"kind": "", "tokens": "Tokens"},
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=30, b=10),
+        showlegend=False,
+    )
+    return fig
+
+
+def burn_gauge(block: BlockEntry) -> go.Figure | None:
+    """Burn-rate gauge: actual cost-per-hour, with projected end-of-window cost as a delta.
+
+    Returns None when the block has no burn rate (gap block or finished block).
+    """
+    if block.burn_rate is None:
+        return None
+    projected = block.projection.total_cost if block.projection else None
+    delta = {"reference": projected, "valueformat": "$,.2f"} if projected else None
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number" + ("+delta" if delta else ""),
+            value=block.burn_rate.cost_per_hour,
+            number={"prefix": "$", "valueformat": ",.2f", "suffix": "/hr"},
+            delta=delta,
+            gauge={
+                "axis": {"tickprefix": "$"},
+                "bar": {"color": "#1f77b4"},
+            },
+            title={"text": "Burn rate"},
+        )
+    )
+    fig.update_layout(margin=dict(l=10, r=10, t=40, b=10), height=320)
     return fig
 
 

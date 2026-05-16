@@ -16,13 +16,21 @@ import pytest
 from tokenscope.analytics import (
     active_block_burn,
     aggregate_cache_hit_ratio,
+    available_models,
+    blocks_on_day,
     cache_hit_ratio,
+    cost_share_by_model,
     daily_cost_by_model,
     daily_token_mix,
     dollars_saved,
+    filter_daily_by_models,
+    find_block,
+    find_daily_entry,
+    find_session,
     model_family,
     mtd_cost,
     rolling_cost_average,
+    sessions_on_day,
     today_cost,
     top_n_by_cost,
 )
@@ -34,6 +42,8 @@ from tokenscope.models import (
     DailyEntry,
     DailyReport,
     ModelBreakdown,
+    SessionEntry,
+    SessionReport,
     Totals,
 )
 
@@ -77,17 +87,21 @@ def _entry(
 
 def _block(
     *,
+    block_id: str = "2026-05-16T13:00:00.000Z",
+    start_time: str = "2026-05-16T13:00:00.000Z",
+    end_time: str = "2026-05-16T18:00:00.000Z",
     is_active: bool = True,
+    is_gap: bool = False,
     cost_per_hour: float | None = 5.0,
     cost_usd: float = 1.0,
 ) -> BlockEntry:
     return BlockEntry(
-        id="2026-05-16T13:00:00.000Z",
-        startTime="2026-05-16T13:00:00.000Z",
-        endTime="2026-05-16T18:00:00.000Z",
+        id=block_id,
+        startTime=start_time,
+        endTime=end_time,
         actualEndTime=None,
         isActive=is_active,
-        isGap=False,
+        isGap=is_gap,
         entries=1,
         tokenCounts=BlockTokenCounts(
             inputTokens=10,
@@ -537,3 +551,184 @@ def test_daily_token_mix_emits_four_rows_per_day() -> None:
 
 def test_daily_token_mix_empty_report() -> None:
     assert daily_token_mix(_report([])) == []
+
+
+# ---------- find_daily_entry ----------
+
+
+def test_find_daily_entry_hit() -> None:
+    report = _report([_entry("2026-05-15"), _entry("2026-05-16", total_cost=9.0)])
+    e = find_daily_entry(report, "2026-05-16")
+    assert e is not None and e.total_cost == 9.0
+
+
+def test_find_daily_entry_miss() -> None:
+    assert find_daily_entry(_report([_entry("2026-05-15")]), "2026-05-16") is None
+
+
+# ---------- sessions_on_day / find_session ----------
+
+
+def _session(session_id: str, last_activity: str, *, cost: float = 1.0) -> SessionEntry:
+    return SessionEntry(
+        sessionId=session_id,
+        inputTokens=10,
+        outputTokens=20,
+        cacheCreationTokens=30,
+        cacheReadTokens=40,
+        totalTokens=100,
+        totalCost=cost,
+        modelsUsed=["claude-opus-4-7"],
+        modelBreakdowns=[_breakdown("claude-opus-4-7", cost=cost)],
+        lastActivity=last_activity,
+        projectPath="-Users-q-proj",
+    )
+
+
+def _session_report(sessions: list[SessionEntry]) -> SessionReport:
+    return SessionReport(
+        sessions=sessions,
+        totals=Totals(
+            inputTokens=sum(s.input_tokens for s in sessions),
+            outputTokens=sum(s.output_tokens for s in sessions),
+            cacheCreationTokens=sum(s.cache_creation_tokens for s in sessions),
+            cacheReadTokens=sum(s.cache_read_tokens for s in sessions),
+            totalTokens=sum(s.total_tokens for s in sessions),
+            totalCost=sum(s.total_cost for s in sessions),
+        ),
+    )
+
+
+def test_sessions_on_day_filters_by_last_activity() -> None:
+    rep = _session_report(
+        [
+            _session("a", "2026-05-15"),
+            _session("b", "2026-05-16"),
+            _session("c", "2026-05-16"),
+        ]
+    )
+    matched = sessions_on_day(rep, "2026-05-16")
+    assert [s.session_id for s in matched] == ["b", "c"]
+
+
+def test_sessions_on_day_empty() -> None:
+    assert sessions_on_day(_session_report([]), "2026-05-16") == []
+
+
+def test_find_session_hit_and_miss() -> None:
+    rep = _session_report([_session("a", "2026-05-16", cost=4.0)])
+    assert find_session(rep, "a").total_cost == 4.0
+    assert find_session(rep, "missing") is None
+
+
+# ---------- blocks_on_day / find_block ----------
+
+
+def test_blocks_on_day_filters_by_start_time_prefix() -> None:
+    rep = BlocksReport(
+        blocks=[
+            _block(block_id="b1", start_time="2026-05-16T13:00:00.000Z", is_active=False),
+            _block(block_id="b2", start_time="2026-05-15T13:00:00.000Z", is_active=False),
+        ]
+    )
+    matched = blocks_on_day(rep, "2026-05-16")
+    assert [b.id for b in matched] == ["b1"]
+
+
+def test_blocks_on_day_excludes_gap_blocks() -> None:
+    gap = _block(block_id="gap-1", start_time="2026-05-16T08:00:00.000Z", is_gap=True)
+    assert blocks_on_day(BlocksReport(blocks=[gap]), "2026-05-16") == []
+
+
+def test_find_block_hit_and_miss() -> None:
+    b = _block(is_active=True, cost_per_hour=8.83)
+    rep = BlocksReport(blocks=[b])
+    assert find_block(rep, b.id) is b
+    assert find_block(rep, "nope") is None
+
+
+# ---------- cost_share_by_model ----------
+
+
+def test_cost_share_by_model_for_daily_entry() -> None:
+    breakdowns = [
+        _breakdown("claude-opus-4-7", cost=10.0),
+        _breakdown("claude-haiku-4-5-20251001", cost=1.0),
+    ]
+    entry = _entry(
+        "2026-05-16",
+        total_cost=11.0,
+        models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+        model_breakdowns=breakdowns,
+    )
+    rows = cost_share_by_model(entry)
+    assert rows == [
+        {"model": "claude-opus-4-7", "family": "opus", "cost": 10.0},
+        {"model": "claude-haiku-4-5-20251001", "family": "haiku", "cost": 1.0},
+    ]
+
+
+# ---------- filter_daily_by_models ----------
+
+
+def test_filter_daily_by_models_recomputes_totals() -> None:
+    breakdowns = [
+        _breakdown("claude-opus-4-7", cost=10.0),
+        _breakdown("claude-haiku-4-5-20251001", cost=1.0),
+    ]
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                total_cost=11.0,
+                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+                model_breakdowns=breakdowns,
+            )
+        ]
+    )
+    filtered = filter_daily_by_models(report, ["claude-opus-4-7"])
+    assert len(filtered.daily) == 1
+    only = filtered.daily[0]
+    assert only.total_cost == pytest.approx(10.0)
+    assert [b.model_name for b in only.model_breakdowns] == ["claude-opus-4-7"]
+    # Top-level totals also re-summed.
+    assert filtered.totals.total_cost == pytest.approx(10.0)
+
+
+def test_filter_daily_by_models_drops_entries_with_no_match() -> None:
+    breakdowns = [_breakdown("claude-opus-4-7", cost=10.0)]
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                total_cost=10.0,
+                models=["claude-opus-4-7"],
+                model_breakdowns=breakdowns,
+            )
+        ]
+    )
+    filtered = filter_daily_by_models(report, ["claude-haiku-4-5-20251001"])
+    assert filtered.daily == []
+
+
+def test_filter_daily_by_models_empty_selection_is_passthrough() -> None:
+    report = _report([_entry("2026-05-16", total_cost=5.0)])
+    assert filter_daily_by_models(report, []) is report
+    assert filter_daily_by_models(report, None) is report  # type: ignore[arg-type]
+
+
+# ---------- available_models ----------
+
+
+def test_available_models_unique_sorted() -> None:
+    report = _report(
+        [
+            _entry("2026-05-15", models=["claude-opus-4-7", "claude-haiku-4-5"]),
+            _entry("2026-05-16", models=["claude-opus-4-7"]),
+        ]
+    )
+    assert available_models(report) == ["claude-haiku-4-5", "claude-opus-4-7"]
+
+
+def test_available_models_empty_report() -> None:
+    assert available_models(_report([])) == []

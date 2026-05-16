@@ -1,9 +1,12 @@
-"""Sidebar controls for the overview view (Phase 3).
+"""Sidebar controls.
 
-Three controls today: date range, offline toggle, plan selector. Phase 4
-will add model + project filters and (per PLAN §3.3) mirror state into
-`st.query_params`. The sidebar returns an immutable `SidebarState` so the
-main pane can be a pure consumer.
+Phase 4 additions over Phase 3:
+- Project selectbox, populated from `daily_by_project`'s keys.
+- Model multi-select, populated from `models_used` across the date range.
+
+Both filter dropdowns are populated from a cached discovery query that
+ignores the model/project filters themselves — so the option lists stay
+stable as the user toggles filters within the same date range.
 """
 
 from __future__ import annotations
@@ -13,17 +16,22 @@ from datetime import date, timedelta
 
 import streamlit as st
 
-from tokenscope.plans import PLANS, Plan, get_plan, plan_names
+from tokenscope import data
+from tokenscope.analytics import available_models
+from tokenscope.ccusage import CcusageError
+from tokenscope.plans import Plan, get_plan, plan_names
 from tokenscope.query import Query
 
 
 DEFAULT_RANGE_DAYS = 30
+ALL_PROJECTS = "All projects"
 
 
 @dataclass(frozen=True, slots=True)
 class SidebarState:
     query: Query
     plan: Plan
+    selected_models: tuple[str, ...]
 
 
 def _to_ccusage_date(d: date | None) -> str | None:
@@ -31,11 +39,6 @@ def _to_ccusage_date(d: date | None) -> str | None:
 
 
 def render(today: date | None = None) -> SidebarState:
-    """Render the sidebar and return the resulting state.
-
-    `today` defaults to `date.today()`; injectable for tests / reproducible
-    screenshots.
-    """
     today = today or date.today()
     default_start = today - timedelta(days=DEFAULT_RANGE_DAYS - 1)
 
@@ -50,7 +53,6 @@ def render(today: date | None = None) -> SidebarState:
         if isinstance(range_value, tuple) and len(range_value) == 2:
             since_date, until_date = range_value
         else:
-            # st.date_input returns a single date until the user picks the second one.
             single = range_value if isinstance(range_value, date) else default_start
             since_date, until_date = single, single
 
@@ -60,11 +62,49 @@ def render(today: date | None = None) -> SidebarState:
             help="Pass --offline to ccusage so pricing comes from its cached data.",
         )
 
+        # Discovery query: same date range + offline, no model/project filter.
+        # Cached via @st.cache_data, so reopening the page within 30s is free.
+        discovery_query = Query(
+            since=_to_ccusage_date(since_date),
+            until=_to_ccusage_date(until_date),
+            offline=offline,
+        )
+
+        model_options: list[str] = []
+        project_options: list[str] = []
+        try:
+            discovery_daily = data.daily(discovery_query)
+            model_options = available_models(discovery_daily)
+        except CcusageError:
+            pass
+        try:
+            discovery_proj = data.daily_by_project(discovery_query)
+            project_options = sorted(discovery_proj.projects.keys())
+        except CcusageError:
+            pass
+
+        project_choice = st.selectbox(
+            "Project",
+            options=[ALL_PROJECTS, *project_options],
+            index=0,
+            help="Filters via ccusage's -p flag. Choose 'All projects' to disable.",
+        )
+        project_value: str | None = (
+            None if project_choice == ALL_PROJECTS else project_choice
+        )
+
+        selected_models = st.multiselect(
+            "Models",
+            options=model_options,
+            default=model_options,
+            help="Post-fetch filter on the model breakdowns within each entry.",
+        )
+
         st.markdown("### Plan")
         plan_name = st.selectbox(
             "Subscription",
             options=plan_names(),
-            index=0,  # Enterprise default
+            index=0,
             help="Pure labelling — does not change any cost numbers.",
         )
 
@@ -72,10 +112,12 @@ def render(today: date | None = None) -> SidebarState:
         query=Query(
             since=_to_ccusage_date(since_date),
             until=_to_ccusage_date(until_date),
+            project=project_value,
             offline=offline,
         ),
         plan=get_plan(plan_name),
+        selected_models=tuple(selected_models),
     )
 
 
-__all__ = ["SidebarState", "render", "PLANS"]
+__all__ = ["SidebarState", "render", "ALL_PROJECTS"]

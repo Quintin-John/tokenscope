@@ -18,15 +18,28 @@ from pathlib import Path
 import streamlit as st
 
 from tokenscope.ccusage import CcusageError, get_ccusage_version
+from tokenscope.navigation import Navigation
+from tokenscope.ui import block as block_view
+from tokenscope.ui import day as day_view
 from tokenscope.ui import overview, sidebar
+from tokenscope.ui import session as session_view
 
 
 def render() -> None:
     st.set_page_config(page_title="tokenscope", layout="wide")
     st.title("tokenscope")
 
+    nav = Navigation.from_params(dict(st.query_params))
     state = sidebar.render()
-    overview.render(state)
+
+    if nav.view == "day":
+        day_view.render(state, nav)
+    elif nav.view == "session":
+        session_view.render(state, nav)
+    elif nav.view == "block":
+        block_view.render(state, nav)
+    else:
+        overview.render(state, nav)
 
     with st.sidebar:
         st.divider()
