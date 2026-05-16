@@ -126,3 +126,20 @@ class BlockEntry(_BaseShape):
 
 class BlocksReport(_BaseShape):
     blocks: list[BlockEntry]
+
+
+class DailyByProjectReport(_BaseShape):
+    """Shape returned by `ccusage daily --instances --json`."""
+
+    projects: dict[str, list[DailyEntry]]
+    totals: Totals
+
+
+class WeeklyByProjectReport(_BaseShape):
+    projects: dict[str, list[WeeklyEntry]]
+    totals: Totals
+
+
+class MonthlyByProjectReport(_BaseShape):
+    projects: dict[str, list[MonthlyEntry]]
+    totals: Totals

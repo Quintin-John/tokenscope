@@ -13,6 +13,7 @@ import pytest
 
 from tokenscope.models import (
     BlocksReport,
+    DailyByProjectReport,
     DailyReport,
     MonthlyReport,
     SessionReport,
@@ -82,6 +83,22 @@ def test_session_parses() -> None:
     s = report.sessions[0]
     assert s.session_id
     assert s.last_activity
+
+
+def test_daily_by_project_parses() -> None:
+    report = DailyByProjectReport.model_validate(_load("daily_by_project.json"))
+    assert report.projects
+    # At least one project has entries.
+    for project_id, entries in report.projects.items():
+        assert project_id
+        for entry in entries:
+            assert entry.date
+            assert entry.total_cost >= 0
+    # Top-level totals match the sum across all projects' entries.
+    summed = sum(
+        e.total_cost for entries in report.projects.values() for e in entries
+    )
+    assert summed == pytest.approx(report.totals.total_cost, rel=1e-6)
 
 
 def test_blocks_parses() -> None:
