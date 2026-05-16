@@ -111,6 +111,15 @@ def test_daily_by_project_parses() -> None:
     assert summed == pytest.approx(report.totals.total_cost, rel=1e-6)
 
 
+def test_blocks_no_active_parses() -> None:
+    """Regression: `ccusage blocks --active --since/--until` for a past-only
+    window returns `{"blocks": [], "message": "No active block"}`. The model
+    must accept the message field rather than tripping extra="forbid"."""
+    report = BlocksReport.model_validate(_load("blocks_no_active.json"))
+    assert report.blocks == []
+    assert report.message == "No active block"
+
+
 def test_blocks_parses() -> None:
     report = BlocksReport.model_validate(_load("blocks.json"))
     assert len(report.blocks) > 0
