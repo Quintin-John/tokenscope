@@ -1,0 +1,10 @@
+[client]
+# Hide the "Deploy" button (and the "Stop" button) while keeping the
+# hamburger menu so the user still has Settings / Print / About.
+# "viewer" is the right level: it drops the deploy-and-stop toolbar but
+# leaves the kebab menu intact.
+toolbarMode = "viewer"
+
+[browser]
+# Belt-and-braces against ever leaking telemetry from a local-only dashboard.
+gatherUsageStats = false
