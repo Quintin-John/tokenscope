@@ -1,0 +1,321 @@
+{
+  "sessions": [
+    {
+      "sessionId": "-Users-quintin-johnsmith-Documents-RiderProjects-tokenscope",
+      "inputTokens": 959,
+      "outputTokens": 686180,
+      "cacheCreationTokens": 1008303,
+      "cacheReadTokens": 394094985,
+      "totalTokens": 395790427,
+      "totalCost": 220.50868125000017,
+      "lastActivity": "2026-05-16",
+      "modelsUsed": [
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 959,
+          "outputTokens": 686180,
+          "cacheCreationTokens": 1008303,
+          "cacheReadTokens": 394094985,
+          "cost": 220.50868125000017
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "-Users-quintin-johnsmith-Documents-RiderProjects-tokenscope--claude-worktrees-optimistic-morse-caaf76",
+      "inputTokens": 110,
+      "outputTokens": 106294,
+      "cacheCreationTokens": 277639,
+      "cacheReadTokens": 4749147,
+      "totalTokens": 5133190,
+      "totalCost": 6.7677172500000005,
+      "lastActivity": "2026-05-16",
+      "modelsUsed": [
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 110,
+          "outputTokens": 106294,
+          "cacheCreationTokens": 277639,
+          "cacheReadTokens": 4749147,
+          "cost": 6.7677172500000005
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "-Users-quintin-johnsmith",
+      "inputTokens": 82,
+      "outputTokens": 8522,
+      "cacheCreationTokens": 86358,
+      "cacheReadTokens": 1689526,
+      "totalTokens": 1784488,
+      "totalCost": 1.5979605,
+      "lastActivity": "2026-05-12",
+      "modelsUsed": [
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 82,
+          "outputTokens": 8522,
+          "cacheCreationTokens": 86358,
+          "cacheReadTokens": 1689526,
+          "cost": 1.5979605
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "-Users-quintin-johnsmith-claude-cache-demo",
+      "inputTokens": 21,
+      "outputTokens": 8769,
+      "cacheCreationTokens": 24150,
+      "cacheReadTokens": 133582,
+      "totalTokens": 166522,
+      "totalCost": 0.4370585,
+      "lastActivity": "2026-05-12",
+      "modelsUsed": [
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 21,
+          "outputTokens": 8769,
+          "cacheCreationTokens": 24150,
+          "cacheReadTokens": 133582,
+          "cost": 0.4370585
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "-Users-quintin-johnsmith-baremetal-audit",
+      "inputTokens": 350,
+      "outputTokens": 184043,
+      "cacheCreationTokens": 462832,
+      "cacheReadTokens": 55777580,
+      "totalTokens": 56424805,
+      "totalCost": 35.384315000000015,
+      "lastActivity": "2026-05-12",
+      "modelsUsed": [
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 350,
+          "outputTokens": 184043,
+          "cacheCreationTokens": 462832,
+          "cacheReadTokens": 55777580,
+          "cost": 35.384315000000015
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "-Users-quintin-johnsmith-Downloads-mini-ollama-ui",
+      "inputTokens": 5519,
+      "outputTokens": 3532850,
+      "cacheCreationTokens": 8735791,
+      "cacheReadTokens": 1294745881,
+      "totalTokens": 1307020041,
+      "totalCost": 790.1230972499983,
+      "lastActivity": "2026-04-29",
+      "modelsUsed": [
+        "claude-opus-4-7",
+        "claude-sonnet-4-6"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 5516,
+          "outputTokens": 3532837,
+          "cacheCreationTokens": 8657831,
+          "cacheReadTokens": 1294734151,
+          "cost": 789.8270242499983
+        },
+        {
+          "modelName": "claude-sonnet-4-6",
+          "inputTokens": 3,
+          "outputTokens": 13,
+          "cacheCreationTokens": 77960,
+          "cacheReadTokens": 11730,
+          "cost": 0.296073
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "-Users-quintin-johnsmith-Documents-JavaCode-IT-Artifact",
+      "inputTokens": 400,
+      "outputTokens": 164025,
+      "cacheCreationTokens": 794402,
+      "cacheReadTokens": 38120816,
+      "totalTokens": 39079643,
+      "totalCost": 28.128045500000002,
+      "lastActivity": "2026-04-29",
+      "modelsUsed": [
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 400,
+          "outputTokens": 164025,
+          "cacheCreationTokens": 794402,
+          "cacheReadTokens": 38120816,
+          "cost": 28.128045500000002
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "-Volumes-SSK-Drive--Smith-K-Chp17ProgramChllg-java",
+      "inputTokens": 537,
+      "outputTokens": 307515,
+      "cacheCreationTokens": 420660,
+      "cacheReadTokens": 25244094,
+      "totalTokens": 25972806,
+      "totalCost": 22.941731999999988,
+      "lastActivity": "2026-04-21",
+      "modelsUsed": [
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 537,
+          "outputTokens": 307515,
+          "cacheCreationTokens": 420660,
+          "cacheReadTokens": 25244094,
+          "cost": 22.941731999999988
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "-Volumes-SSK-Drive--ManageLiterature",
+      "inputTokens": 536,
+      "outputTokens": 588879,
+      "cacheCreationTokens": 4160615,
+      "cacheReadTokens": 45729998,
+      "totalTokens": 50480028,
+      "totalCost": 63.593497750000004,
+      "lastActivity": "2026-04-20",
+      "modelsUsed": [
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 536,
+          "outputTokens": 588879,
+          "cacheCreationTokens": 4160615,
+          "cacheReadTokens": 45729998,
+          "cost": 63.593497750000004
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "-Users-quintin-johnsmith-Documents-RiderProjects-WorldForge",
+      "inputTokens": 8532,
+      "outputTokens": 1106958,
+      "cacheCreationTokens": 21846913,
+      "cacheReadTokens": 1303553734,
+      "totalTokens": 1326516137,
+      "totalCost": 764.9525679500006,
+      "lastActivity": "2026-04-16",
+      "modelsUsed": [
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-opus-4-7"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-opus-4-6",
+          "inputTokens": 4182,
+          "outputTokens": 811921,
+          "cacheCreationTokens": 16993269,
+          "cacheReadTokens": 1121045761,
+          "cost": 687.0497467499995
+        },
+        {
+          "modelName": "claude-sonnet-4-6",
+          "inputTokens": 4292,
+          "outputTokens": 285954,
+          "cacheCreationTokens": 4739657,
+          "cacheReadTokens": 181834244,
+          "cost": 76.62617295000008
+        },
+        {
+          "modelName": "claude-opus-4-7",
+          "inputTokens": 58,
+          "outputTokens": 9083,
+          "cacheCreationTokens": 113987,
+          "cacheReadTokens": 673729,
+          "cost": 1.27664825
+        }
+      ],
+      "projectPath": "Unknown Project"
+    },
+    {
+      "sessionId": "subagents",
+      "inputTokens": 32602,
+      "outputTokens": 85242,
+      "cacheCreationTokens": 68348,
+      "cacheReadTokens": 4416569,
+      "totalTokens": 4602761,
+      "totalCost": 3.1787242999999994,
+      "lastActivity": "2026-04-05",
+      "modelsUsed": [
+        "claude-opus-4-6",
+        "claude-haiku-4-5-20251001",
+        "claude-sonnet-4-6"
+      ],
+      "modelBreakdowns": [
+        {
+          "modelName": "claude-sonnet-4-6",
+          "inputTokens": 30053,
+          "outputTokens": 82214,
+          "cacheCreationTokens": 47566,
+          "cacheReadTokens": 2838305,
+          "cost": 2.353233
+        },
+        {
+          "modelName": "claude-opus-4-6",
+          "inputTokens": 2526,
+          "outputTokens": 15,
+          "cacheCreationTokens": 308,
+          "cacheReadTokens": 1530136,
+          "cost": 0.779998
+        },
+        {
+          "modelName": "claude-haiku-4-5-20251001",
+          "inputTokens": 23,
+          "outputTokens": 3013,
+          "cacheCreationTokens": 20474,
+          "cacheReadTokens": 48128,
+          "cost": 0.04549330000000001
+        }
+      ],
+      "projectPath": "-Users-quintin-johnsmith-Documents-RiderProjects-WorldForge/0b9d5f93-2936-4e0f-b915-4f3ed34bbafc"
+    }
+  ],
+  "totals": {
+    "inputTokens": 49648,
+    "outputTokens": 6779277,
+    "cacheCreationTokens": 37886011,
+    "cacheReadTokens": 3168255912,
+    "totalCost": 1937.6133972499995,
+    "totalTokens": 3212970848
+  }
+}

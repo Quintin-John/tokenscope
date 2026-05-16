@@ -1,0 +1,12 @@
+{
+  "name": "tokenscope-ccusage-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pins ccusage as a runtime dependency for the tokenscope-viz Python dashboard. Resolved via `npm ci`; consumed via `node_modules/.bin/ccusage`. Never via npx.",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ccusage": "18.0.11"
+  }
+}

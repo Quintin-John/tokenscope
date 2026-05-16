@@ -1,90 +1,35 @@
-## Standard .NET .gitignore (dotnet new gitignore equivalent, trimmed)
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
 
-# Build results
-[Dd]ebug/
-[Dd]ebugPublic/
-[Rr]elease/
-[Rr]eleases/
-x64/
-x86/
-[Ww][Ii][Nn]32/
-[Aa][Rr][Mm]/
-[Aa][Rr][Mm]64/
-bld/
-[Bb]in/
-[Oo]bj/
-[Ll]og/
-[Ll]ogs/
+# Node
+node_modules/
 
-# NuGet
-*.nupkg
-*.snupkg
-**/[Pp]ackages/*
-!**/[Pp]ackages/build/
-*.nuget.props
-*.nuget.targets
-
-# User-specific files
-*.rsuser
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
-*.userprefs
-
-# Visual Studio
-.vs/
+# IDE
+.idea/
 .vscode/
 *.swp
-*~
+*.swo
 
-# JetBrains Rider
-.idea/
-*.DotSettings.user
-
-# Claude Code local session files
-.claude/
-
-# GitHub Actions workflows are intentionally not used on this project.
-# Keep this gitignore guard so workflow files cannot be added accidentally.
-.github/workflows/
-
-# macOS
+# OS
 .DS_Store
-
-# Test/coverage results
-[Tt]est[Rr]esult*/
-[Bb]uild[Ll]og.*
-*.VisualState.xml
-TestResult.xml
-nunit-*.xml
-coverage*.json
-coverage*.xml
-coverage*.info
-*.coverage
-*.coveragexml
-
-# Local config / secrets
-appsettings.Development.json
-appsettings.Local.json
-*.local.*
-secrets.json
-.env
-
-# OS / editor cruft
 Thumbs.db
-ehthumbs.db
-*.lnk
 
-# Publish output
-publish/
-artifacts/
-out/
+# Local-only Claude settings
+.claude/settings.local.json
 
-# Docker volumes
-docker/grafana-data/
-docker/prometheus-data/
-
-# tokenscope-specific local data
-runs/
-*.log
+# Lockfiles are INTENTIONALLY committed (uv.lock, package-lock.json) per the
+# supply-chain policy in PLAN.md §1. Do not add them here.

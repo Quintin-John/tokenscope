@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-
-  <PropertyGroup>
-    <RootNamespace>TokenScope.Core</RootNamespace>
-    <AssemblyName>TokenScope.Core</AssemblyName>
-    <IsPackable>false</IsPackable>
-  </PropertyGroup>
-
-</Project>
