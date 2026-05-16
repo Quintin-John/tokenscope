@@ -9,17 +9,28 @@ will get caught immediately.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 import pytest
 
 from tokenscope.analytics import (
+    active_block_burn,
+    aggregate_cache_hit_ratio,
     cache_hit_ratio,
+    daily_cost_by_model,
+    daily_token_mix,
     dollars_saved,
     model_family,
+    mtd_cost,
     rolling_cost_average,
+    today_cost,
     top_n_by_cost,
 )
 from tokenscope.models import (
+    BlockEntry,
+    BlocksReport,
+    BlockTokenCounts,
+    BurnRate,
     DailyEntry,
     DailyReport,
     ModelBreakdown,
@@ -47,8 +58,10 @@ def _entry(
     cache_read_tokens: int = 400,
     total_cost: float = 1.0,
     models: list[str] | None = None,
+    model_breakdowns: list[ModelBreakdown] | None = None,
 ) -> DailyEntry:
     used = models or ["claude-opus-4-7"]
+    breakdowns = model_breakdowns if model_breakdowns is not None else [_breakdown(used[0], cost=total_cost)]
     return DailyEntry(
         date=date,
         inputTokens=input_tokens,
@@ -58,7 +71,41 @@ def _entry(
         totalTokens=input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens,
         totalCost=total_cost,
         modelsUsed=used,
-        modelBreakdowns=[_breakdown(used[0], cost=total_cost)],
+        modelBreakdowns=breakdowns,
+    )
+
+
+def _block(
+    *,
+    is_active: bool = True,
+    cost_per_hour: float | None = 5.0,
+    cost_usd: float = 1.0,
+) -> BlockEntry:
+    return BlockEntry(
+        id="2026-05-16T13:00:00.000Z",
+        startTime="2026-05-16T13:00:00.000Z",
+        endTime="2026-05-16T18:00:00.000Z",
+        actualEndTime=None,
+        isActive=is_active,
+        isGap=False,
+        entries=1,
+        tokenCounts=BlockTokenCounts(
+            inputTokens=10,
+            outputTokens=20,
+            cacheCreationInputTokens=30,
+            cacheReadInputTokens=40,
+        ),
+        totalTokens=100,
+        costUSD=cost_usd,
+        models=["claude-opus-4-7"],
+        burnRate=BurnRate(
+            tokensPerMinute=1.0,
+            tokensPerMinuteForIndicator=1.0,
+            costPerHour=cost_per_hour,
+        )
+        if cost_per_hour is not None
+        else None,
+        projection=None,
     )
 
 
@@ -325,3 +372,168 @@ def test_top_n_by_cost_empty_iterable() -> None:
 )
 def test_model_family(name: str, expected: str) -> None:
     assert model_family(name) == expected
+
+
+# ---------- mtd_cost ----------
+
+
+def test_mtd_cost_sums_current_month_only() -> None:
+    report = _report(
+        [
+            _entry("2026-04-28", total_cost=10.0),
+            _entry("2026-04-30", total_cost=5.0),
+            _entry("2026-05-01", total_cost=1.0),
+            _entry("2026-05-15", total_cost=2.5),
+            _entry("2026-06-01", total_cost=99.0),
+        ]
+    )
+    assert mtd_cost(report, today=date(2026, 5, 16)) == pytest.approx(3.5)
+
+
+def test_mtd_cost_no_entries_in_month() -> None:
+    report = _report([_entry("2026-04-01", total_cost=10.0)])
+    assert mtd_cost(report, today=date(2026, 5, 16)) == 0.0
+
+
+def test_mtd_cost_empty_report() -> None:
+    report = _report([])
+    assert mtd_cost(report, today=date(2026, 5, 16)) == 0.0
+
+
+# ---------- today_cost ----------
+
+
+def test_today_cost_match() -> None:
+    report = _report(
+        [
+            _entry("2026-05-15", total_cost=1.0),
+            _entry("2026-05-16", total_cost=2.5),
+            _entry("2026-05-17", total_cost=3.0),
+        ]
+    )
+    assert today_cost(report, today=date(2026, 5, 16)) == pytest.approx(2.5)
+
+
+def test_today_cost_no_entry_for_today() -> None:
+    report = _report([_entry("2026-05-15", total_cost=1.0)])
+    assert today_cost(report, today=date(2026, 5, 16)) == 0.0
+
+
+def test_today_cost_empty_report() -> None:
+    assert today_cost(_report([]), today=date(2026, 5, 16)) == 0.0
+
+
+# ---------- aggregate_cache_hit_ratio ----------
+
+
+def test_aggregate_cache_hit_ratio_typical() -> None:
+    report = _report(
+        [
+            _entry("2026-05-15", input_tokens=10, cache_creation_tokens=10, cache_read_tokens=80),
+            _entry("2026-05-16", input_tokens=20, cache_creation_tokens=0, cache_read_tokens=80),
+        ]
+    )
+    # (80 + 80) / (10+10+80 + 20+0+80) = 160 / 200 = 0.8
+    assert aggregate_cache_hit_ratio(report) == pytest.approx(0.8)
+
+
+def test_aggregate_cache_hit_ratio_weighted_by_volume() -> None:
+    """A 100%-cache big day should dominate a 0%-cache small day."""
+    report = _report(
+        [
+            _entry("2026-05-15", input_tokens=1, cache_creation_tokens=0, cache_read_tokens=0),
+            _entry("2026-05-16", input_tokens=0, cache_creation_tokens=0, cache_read_tokens=1_000_000),
+        ]
+    )
+    ratio = aggregate_cache_hit_ratio(report)
+    assert ratio > 0.999  # heavy second day pulls it up
+
+
+def test_aggregate_cache_hit_ratio_zero_tokens() -> None:
+    report = _report(
+        [_entry("2026-05-16", input_tokens=0, cache_creation_tokens=0, cache_read_tokens=0, output_tokens=0)]
+    )
+    assert aggregate_cache_hit_ratio(report) == 0.0
+
+
+def test_aggregate_cache_hit_ratio_empty_report() -> None:
+    assert aggregate_cache_hit_ratio(_report([])) == 0.0
+
+
+# ---------- active_block_burn ----------
+
+
+def test_active_block_burn_returns_cost_per_hour() -> None:
+    report = BlocksReport(blocks=[_block(is_active=True, cost_per_hour=8.83)])
+    assert active_block_burn(report) == pytest.approx(8.83)
+
+
+def test_active_block_burn_no_active_block() -> None:
+    report = BlocksReport(blocks=[_block(is_active=False, cost_per_hour=8.83)])
+    assert active_block_burn(report) is None
+
+
+def test_active_block_burn_active_with_no_burn_rate() -> None:
+    report = BlocksReport(blocks=[_block(is_active=True, cost_per_hour=None)])
+    assert active_block_burn(report) is None
+
+
+def test_active_block_burn_empty_blocks() -> None:
+    assert active_block_burn(BlocksReport(blocks=[])) is None
+
+
+# ---------- daily_cost_by_model ----------
+
+
+def test_daily_cost_by_model_flattens_entries() -> None:
+    breakdowns = [
+        _breakdown("claude-opus-4-7", cost=10.0),
+        _breakdown("claude-haiku-4-5-20251001", cost=1.0),
+    ]
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                total_cost=11.0,
+                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+                model_breakdowns=breakdowns,
+            )
+        ]
+    )
+    rows = daily_cost_by_model(report)
+    assert rows == [
+        {"date": "2026-05-16", "model": "claude-opus-4-7", "family": "opus", "cost": 10.0},
+        {"date": "2026-05-16", "model": "claude-haiku-4-5-20251001", "family": "haiku", "cost": 1.0},
+    ]
+
+
+def test_daily_cost_by_model_empty_report() -> None:
+    assert daily_cost_by_model(_report([])) == []
+
+
+# ---------- daily_token_mix ----------
+
+
+def test_daily_token_mix_emits_four_rows_per_day() -> None:
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                input_tokens=1,
+                output_tokens=2,
+                cache_creation_tokens=3,
+                cache_read_tokens=4,
+            )
+        ]
+    )
+    rows = daily_token_mix(report)
+    assert rows == [
+        {"date": "2026-05-16", "kind": "input", "tokens": 1},
+        {"date": "2026-05-16", "kind": "output", "tokens": 2},
+        {"date": "2026-05-16", "kind": "cache_create", "tokens": 3},
+        {"date": "2026-05-16", "kind": "cache_read", "tokens": 4},
+    ]
+
+
+def test_daily_token_mix_empty_report() -> None:
+    assert daily_token_mix(_report([])) == []

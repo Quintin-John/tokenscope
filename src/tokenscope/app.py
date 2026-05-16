@@ -18,20 +18,23 @@ from pathlib import Path
 import streamlit as st
 
 from tokenscope.ccusage import CcusageError, get_ccusage_version
+from tokenscope.ui import overview, sidebar
 
 
 def render() -> None:
-    """Render the phase-1 dashboard shell. Real charts come in later phases."""
     st.set_page_config(page_title="tokenscope", layout="wide")
     st.title("tokenscope")
-    st.caption("Phase 1 scaffolding — no charts yet. See PLAN.md.")
 
-    try:
-        version = get_ccusage_version()
-    except CcusageError as exc:
-        st.error(f"ccusage bridge unavailable:\n\n```\n{exc}\n```")
-        return
-    st.success(f"ccusage bridge OK — version `{version}`")
+    state = sidebar.render()
+    overview.render(state)
+
+    with st.sidebar:
+        st.divider()
+        try:
+            version = get_ccusage_version()
+            st.caption(f"ccusage `{version}`")
+        except CcusageError as exc:
+            st.error(f"ccusage bridge unavailable:\n\n```\n{exc}\n```")
 
 
 def main() -> None:
