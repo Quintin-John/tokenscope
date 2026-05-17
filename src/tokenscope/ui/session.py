@@ -1,15 +1,27 @@
-"""Session-detail view: KPIs, cost-by-model donut, token-mix bar."""
+"""Session-detail view: KPIs, cost-by-model donut, token-mix bar.
+
+Slice 17 adds the blocks-on-this-day timeline — the last PLAN.md §3.1
+drill ("Sessions on that day → Blocks within session") that was sitting
+unbuilt since slice 4. ccusage doesn't link sessions and blocks by ID;
+the timeline uses temporal proximity (blocks that started on the
+session's lastActivity date) as the honest available heuristic. The
+caption flags that approximation so the user isn't misled.
+"""
 
 from __future__ import annotations
 
 import streamlit as st
 
 from tokenscope import data
-from tokenscope.analytics import find_session
+from tokenscope.analytics import blocks_for_session, find_session
 from tokenscope.ccusage import CcusageError
 from tokenscope.navigation import Navigation
 from tokenscope.ui import breadcrumbs
-from tokenscope.ui.charts import donut_cost_by_model, session_token_mix
+from tokenscope.ui.charts import (
+    donut_cost_by_model,
+    session_blocks_timeline,
+    session_token_mix,
+)
 from tokenscope.ui.sidebar import SidebarState
 
 
@@ -53,3 +65,65 @@ def render(state: SidebarState, nav: Navigation) -> None:
     with right:
         st.markdown("**Token mix**")
         st.plotly_chart(session_token_mix(entry), width="stretch")
+
+    st.divider()
+    _render_blocks_timeline(state, nav, entry)
+
+
+def _render_blocks_timeline(state: SidebarState, nav: Navigation, entry) -> None:
+    """Blocks-within-session timeline (PLAN.md §3.1 last drill)."""
+    st.markdown("**Blocks on this day**")
+    st.caption(
+        "5-hour billing windows whose start time falls on this session's "
+        f"last-activity date ({entry.last_activity}). ccusage doesn't link "
+        "sessions to blocks directly, so this is a same-day proximity match — "
+        "click a block to drill into its detail."
+    )
+
+    try:
+        blocks_report = data.blocks(active=False, query=state.query)
+    except CcusageError as exc:
+        st.error(f"ccusage failed:\n\n```\n{exc}\n```")
+        return
+
+    blocks = blocks_for_session(blocks_report, entry, tz=state.query.tz)
+    if not blocks:
+        st.info(
+            "No 5-hour billing blocks started on this day in the current "
+            "window. Widen the **Date range** in the sidebar if you want "
+            "the day's blocks to be visible."
+        )
+        return
+
+    fig = session_blocks_timeline(blocks, tz=state.query.tz)
+    if fig is None:
+        return
+    event = st.plotly_chart(
+        fig,
+        width="stretch",
+        key="session-blocks-timeline",
+        on_select="rerun",
+        selection_mode=("points",),
+    )
+    _handle_block_click(event, nav)
+
+
+def _handle_block_click(event, nav: Navigation) -> None:
+    """Click on a timeline bar → drill into that block."""
+    if not event:
+        return
+    selection = getattr(event, "selection", None)
+    if not selection:
+        return
+    points = getattr(selection, "points", None) or []
+    if not points:
+        return
+    # px.timeline exposes the y-axis category (block id) on the clicked point.
+    raw = points[0].get("y") or points[0].get("label")
+    if not raw:
+        return
+    target = nav.to_block(str(raw))
+    st.query_params.clear()
+    for k, v in target.to_params().items():
+        st.query_params[k] = v
+    st.rerun()

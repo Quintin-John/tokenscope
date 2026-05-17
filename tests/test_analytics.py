@@ -17,6 +17,7 @@ from tokenscope.analytics import (
     active_block_burn,
     aggregate_cache_hit_ratio,
     available_models,
+    blocks_for_session,
     blocks_on_day,
     cache_hit_ratio,
     cost_by_kind,
@@ -1433,3 +1434,59 @@ def test_cost_by_kind_returns_none_when_rates_unavailable(monkeypatch) -> None:
         [_entry("2026-05-16", model_breakdowns=[b], input_tokens=1_000_000, total_cost=5.0)]
     )
     assert cost_by_kind(report) is None
+
+
+# ---------- blocks_for_session (Slice 17) ----------
+
+
+def test_blocks_for_session_matches_last_activity_day() -> None:
+    """Slice 17: same-day proximity heuristic — blocks that started on
+    the session's last-activity date show up; others don't."""
+    sess = _session("sess-a", "2026-05-16")
+    rep = BlocksReport(
+        blocks=[
+            _block(block_id="b-on-day", start_time="2026-05-16T13:00:00.000Z"),
+            _block(block_id="b-prev-day", start_time="2026-05-15T13:00:00.000Z"),
+            _block(block_id="b-next-day", start_time="2026-05-17T13:00:00.000Z"),
+        ]
+    )
+    matched = blocks_for_session(rep, sess)
+    assert [b.id for b in matched] == ["b-on-day"]
+
+
+def test_blocks_for_session_respects_tz() -> None:
+    """When the user is in a westerly tz, a UTC-late-night block flips
+    to the previous local day."""
+    sess = _session("sess-a", "2026-05-16")
+    rep = BlocksReport(
+        blocks=[
+            # 02:00 UTC on May 17 is May 16 19:00 in Los Angeles.
+            _block(block_id="b-late-utc", start_time="2026-05-17T02:00:00.000Z"),
+        ]
+    )
+    matched = blocks_for_session(rep, sess, tz="America/Los_Angeles")
+    assert [b.id for b in matched] == ["b-late-utc"]
+
+
+def test_blocks_for_session_empty_when_no_match() -> None:
+    sess = _session("sess-a", "2026-05-16")
+    rep = BlocksReport(
+        blocks=[_block(block_id="b1", start_time="2026-05-15T13:00:00.000Z")]
+    )
+    assert blocks_for_session(rep, sess) == []
+
+
+def test_blocks_for_session_excludes_gap_blocks() -> None:
+    sess = _session("sess-a", "2026-05-16")
+    rep = BlocksReport(
+        blocks=[
+            _block(block_id="b-real", start_time="2026-05-16T13:00:00.000Z"),
+            _block(
+                block_id="b-gap",
+                start_time="2026-05-16T18:00:00.000Z",
+                is_gap=True,
+            ),
+        ]
+    )
+    matched = blocks_for_session(rep, sess)
+    assert [b.id for b in matched] == ["b-real"]

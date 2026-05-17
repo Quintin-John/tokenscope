@@ -26,6 +26,7 @@ from tokenscope.ui.charts import (
     cache_hit_ratio_line,
     donut_cost_by_model,
     rolling_average_line,
+    session_blocks_timeline,
     session_token_mix,
     single_family_token_bar,
     stacked_area_cost_by_family,
@@ -327,3 +328,52 @@ def test_single_family_token_bar_returns_horizontal_log_bar() -> None:
 
 def test_single_family_token_bar_empty_returns_none() -> None:
     assert single_family_token_bar(_report([])) is None
+
+
+# ---------- session_blocks_timeline (slice 17) ----------
+
+
+def _block(*, block_id: str, start: str, end: str, is_active: bool = False) -> BlockEntry:
+    return BlockEntry(
+        id=block_id,
+        startTime=start,
+        endTime=end,
+        actualEndTime=None,
+        isActive=is_active,
+        isGap=False,
+        entries=1,
+        tokenCounts=BlockTokenCounts(
+            inputTokens=10, outputTokens=20,
+            cacheCreationInputTokens=30, cacheReadInputTokens=40,
+        ),
+        totalTokens=100,
+        costUSD=1.0,
+        models=["claude-opus-4-7"],
+        burnRate=None,
+        projection=None,
+    )
+
+
+def test_session_blocks_timeline_renders_with_blocks() -> None:
+    blocks = [
+        _block(block_id="b-1", start="2026-05-16T13:00:00.000Z", end="2026-05-16T18:00:00.000Z"),
+        _block(block_id="b-2", start="2026-05-16T19:00:00.000Z", end="2026-05-17T00:00:00.000Z", is_active=True),
+    ]
+    fig = session_blocks_timeline(blocks)
+    assert isinstance(fig, go.Figure)
+    # px.timeline emits one trace per colour category (Active/Completed).
+    trace_names = {t.name for t in fig.data}
+    assert "Active" in trace_names and "Completed" in trace_names
+
+
+def test_session_blocks_timeline_empty_returns_none() -> None:
+    assert session_blocks_timeline([]) is None
+
+
+def test_session_blocks_timeline_tz_label() -> None:
+    blocks = [
+        _block(block_id="b-1", start="2026-05-16T13:00:00.000Z", end="2026-05-16T18:00:00.000Z"),
+    ]
+    fig = session_blocks_timeline(blocks, tz="America/Los_Angeles")
+    # The x-axis title shows the user's zone so they're not guessing UTC.
+    assert "Los_Angeles" in (fig.layout.xaxis.title.text or "")

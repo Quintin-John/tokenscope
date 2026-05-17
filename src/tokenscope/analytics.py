@@ -689,6 +689,29 @@ def typical_burn_rate(blocks_report: BlocksReport) -> float | None:
     return float(median(rates))
 
 
+def blocks_for_session(
+    blocks_report: BlocksReport,
+    session: SessionEntry,
+    tz: str | None = None,
+) -> list[BlockEntry]:
+    """Non-gap blocks whose local-zone start-of-day matches the session's
+    ``lastActivity`` date.
+
+    Closes the last unbuilt PLAN.md §3.1 drill ("Blocks within session").
+    ccusage doesn't expose a join key between sessions and 5-hour billing
+    blocks — sessions are conversations, blocks are billing windows, and
+    they can overlap many-to-many. The honest heuristic the available
+    data supports is "blocks that started on the same local-zone day the
+    session was last active". Most sessions are short enough that this
+    captures the right set; the session-detail view caption notes the
+    approximation so the user isn't surprised.
+
+    Gap blocks are always excluded — they don't carry usage. When ``tz``
+    is None, falls back to UTC-prefix matching (legacy behaviour).
+    """
+    return blocks_on_day(blocks_report, session.last_activity, tz=tz)
+
+
 def cost_by_kind(daily_report: DailyReport) -> list[dict] | None:
     """Estimate per-kind cost for the window using LiteLLM's pricing.
 
