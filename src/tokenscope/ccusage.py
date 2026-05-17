@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from tokenscope.log import get_logger
 from tokenscope.models import BlocksReport, DailyReport
 from tokenscope.query import Query
+
+_log = get_logger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CCUSAGE_BIN = REPO_ROOT / "node_modules" / ".bin" / "ccusage"
@@ -29,6 +33,7 @@ class CcusageError(RuntimeError):
 
 def _check_installed() -> Path:
     if not CCUSAGE_BIN.exists():
+        _log.error("ccusage.not_installed path=%s", CCUSAGE_BIN)
         raise CcusageError(
             f"ccusage binary not found at {CCUSAGE_BIN}. "
             f"Run `npm ci` (or `./scripts/setup.sh`) in {REPO_ROOT}."
@@ -47,6 +52,8 @@ def _run_json(args: list[str]) -> dict[str, Any]:
     """
     binary = _check_installed()
     cmd = [str(binary), *args, "--json"]
+    _log.debug("ccusage.start argv=%s", args)
+    start = time.monotonic()
     try:
         result = subprocess.run(
             cmd,
@@ -55,18 +62,37 @@ def _run_json(args: list[str]) -> dict[str, Any]:
             check=True,
         )
     except subprocess.CalledProcessError as exc:
+        _log.error(
+            "ccusage.exit_nonzero returncode=%d argv=%s stderr=%r",
+            exc.returncode,
+            args,
+            exc.stderr.strip()[:300],
+        )
         raise CcusageError(
             f"ccusage exited with code {exc.returncode}: {exc.stderr.strip()}"
         ) from exc
+    duration_ms = int((time.monotonic() - start) * 1000)
     try:
-        return json.loads(result.stdout)
+        parsed = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
+        _log.error(
+            "ccusage.bad_json argv=%s stdout_head=%r",
+            args,
+            result.stdout[:300],
+        )
         raise CcusageError(
             f"ccusage produced invalid JSON: {exc}\n"
             f"argv: {args}\n"
             f"stdout (first 300 chars): {result.stdout[:300]!r}\n"
             f"stderr (first 300 chars): {result.stderr[:300]!r}"
         ) from exc
+    _log.debug(
+        "ccusage.ok argv=%s duration_ms=%d stdout_bytes=%d",
+        args,
+        duration_ms,
+        len(result.stdout),
+    )
+    return parsed
 
 
 @lru_cache(maxsize=1)

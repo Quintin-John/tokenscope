@@ -72,6 +72,26 @@ the zone explicitly: `-e TZ=America/New_York`. The dashboard's
 sidebar caption shows which zone got detected — if it says
 `Etc/UTC`, the flag didn't take.
 
+#### Diagnostic logging
+
+Add `-e TOKENSCOPE_LOG_LEVEL=DEBUG` to your `docker run` to surface
+internal events on `docker logs <container>`. Levels: `DEBUG`
+(verbose — every ccusage call, every render, every chart event),
+`INFO` (user actions and navigation), `WARNING` (default — silent
+fallbacks and degraded modes), `ERROR` (subprocess failures and
+unrecoverable errors). The Dockerfile sets `PYTHONUNBUFFERED=1` so
+lines flush immediately. Example:
+
+```bash
+docker run --rm -p 8501:8501 \
+    -e TZ="..." \
+    -e TOKENSCOPE_LOG_LEVEL=DEBUG \
+    -v "$HOME/.claude":/root/.claude:ro \
+    tokenscope
+# then in another shell:
+docker logs -f <container-id>
+```
+
 The Dockerfile is multi-stage and pinned: Node 20.19.4 from the
 official `node:20-bookworm-slim` image (no third-party setup script
 runs), Python 3.12.7 from `python:3.12-slim-bookworm`, `uv` and

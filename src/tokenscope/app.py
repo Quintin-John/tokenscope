@@ -18,6 +18,7 @@ from pathlib import Path
 import streamlit as st
 
 from tokenscope.ccusage import CcusageError, get_ccusage_version
+from tokenscope.log import get_logger, setup_logging
 from tokenscope.navigation import TOP_LEVEL_VIEWS, Navigation, ViewName
 from tokenscope.ui import block as block_view
 from tokenscope.ui import cache as cache_view
@@ -26,6 +27,12 @@ from tokenscope.ui import live as live_view
 from tokenscope.ui import models as models_view
 from tokenscope.ui import overview, sidebar
 from tokenscope.ui import session as session_view
+
+# Hardcoded module name: app.py is launched as `__main__` by both
+# `streamlit run` and pytest's AppTest (runpy semantics), so
+# `__name__` would not start with "tokenscope" and the log records
+# would land outside our logger hierarchy.
+_log = get_logger("tokenscope.app")
 
 
 _VIEW_LABELS: dict[ViewName, str] = {
@@ -37,6 +44,7 @@ _VIEW_LABELS: dict[ViewName, str] = {
 
 
 def render() -> None:
+    setup_logging()
     st.set_page_config(page_title="tokenscope", layout="wide")
     # CSS injections:
     #  - Hide the "Made with Streamlit vX.Y.Z" footer. This is a local-only
@@ -72,6 +80,7 @@ def render() -> None:
     st.title("tokenscope")
 
     nav = Navigation.from_params(dict(st.query_params))
+    _log.debug("app.render view=%s", nav.view)
     state = sidebar.render()
 
     # Page selector is rendered on EVERY view (was previously hidden on
@@ -125,6 +134,7 @@ def _render_page_selector(nav: Navigation) -> Navigation:
         return nav
     chosen_view: ViewName = label_to_view[chosen_label]
     if chosen_view != nav.view:
+        _log.info("nav.page_selector from=%s to=%s", nav.view, chosen_view)
         st.query_params.clear()
         st.query_params["view"] = chosen_view
         st.rerun()

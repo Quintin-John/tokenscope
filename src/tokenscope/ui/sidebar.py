@@ -30,9 +30,12 @@ from tokenscope.analytics import (
     short_model_label,
 )
 from tokenscope.ccusage import CcusageError
+from tokenscope.log import get_logger
 from tokenscope.plans import Plan, get_plan, plan_names
 from tokenscope.query import Query
 from tokenscope.tz import detect_local_iana
+
+_log = get_logger(__name__)
 
 
 DEFAULT_RANGE_DAYS = config.DEFAULT_RANGE_DAYS
@@ -175,13 +178,13 @@ def _fetch_discovery_options(query: Query) -> tuple[list[str], list[str]]:
     try:
         discovery_daily = data.daily(query)
         model_options = available_models(discovery_daily)
-    except CcusageError:
-        pass
+    except CcusageError as exc:
+        _log.warning("sidebar.discovery.daily_failed exc=%s", exc)
     try:
         discovery_proj = data.daily_by_project(query)
         project_options = sorted(discovery_proj.projects.keys())
-    except CcusageError:
-        pass
+    except CcusageError as exc:
+        _log.warning("sidebar.discovery.by_project_failed exc=%s", exc)
     return model_options, project_options
 
 
@@ -249,6 +252,7 @@ def _render_reset_button() -> None:
         width="stretch",
     ):
         return
+    _log.info("sidebar.reset_clicked")
     for k in (_KEY_DATE_RANGE, _KEY_OFFLINE, _KEY_PROJECT, _KEY_MODELS, _KEY_PLAN):
         st.session_state.pop(k, None)
     for url_key in ("since", "until", "offline", "project", "models", "plan"):
@@ -311,6 +315,16 @@ def render(today: date | None = None) -> SidebarState:
         project_value=project_value,
         selected_models=selected_models,
         plan_name=plan_name,
+    )
+
+    _log.debug(
+        "sidebar.state since=%s until=%s project=%s offline=%s models=%s plan=%s",
+        since_date,
+        until_date,
+        project_value,
+        offline,
+        selected_models,
+        plan_name,
     )
 
     return SidebarState(

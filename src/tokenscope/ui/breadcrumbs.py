@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import streamlit as st
 
+from tokenscope.log import get_logger
 from tokenscope.navigation import Navigation
 from tokenscope.ui._nav import route_to
+
+_log = get_logger(__name__)
 
 
 def render(nav: Navigation) -> None:
@@ -28,6 +31,7 @@ def render(nav: Navigation) -> None:
     # button so the exit is always visible.
     if len(trail) == 1 and nav.view != "overview":
         if st.button("← Overview", key="crumb-back-only", type="secondary"):
+            _log.info("breadcrumbs.back_only_clicked")
             route_to(Navigation(view="overview"))
         return
     if len(trail) <= 1:
@@ -47,6 +51,7 @@ def render(nav: Navigation) -> None:
             # Secondary (was tertiary): renders with a visible border so it
             # actually looks clickable.
             if col.button(display, key=f"crumb-{idx}-{label}", type="secondary"):
+                _log.info("breadcrumbs.crumb_clicked idx=%d label=%s", idx, label)
                 route_to(target)
         if not is_last:
             crumb_cols[idx * 2 + 1].markdown("›")

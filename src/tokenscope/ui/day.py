@@ -11,12 +11,15 @@ from tokenscope.analytics import (
     sessions_on_day,
 )
 from tokenscope.ccusage import CcusageError
+from tokenscope.log import get_logger
 from tokenscope.models import BlockEntry, SessionEntry
 from tokenscope.navigation import Navigation
 from tokenscope.ui import breadcrumbs
 from tokenscope.ui._nav import route_to
 from tokenscope.ui.charts import donut_cost_by_model
 from tokenscope.ui.sidebar import SidebarState
+
+_log = get_logger(__name__)
 
 
 def render(state: SidebarState, nav: Navigation) -> None:
@@ -110,6 +113,7 @@ def _entity_row(
     cols[1].markdown(f"${cost:,.2f}")
     cols[2].markdown(f"{tokens:,} tok")
     if cols[3].button(button_label, key=button_key, type="secondary"):
+        _log.info("day.entity_open button=%r key=%s", button_label, button_key)
         route_to(nav_target)
 
 

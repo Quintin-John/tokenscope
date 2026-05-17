@@ -28,6 +28,9 @@ from statistics import median
 from typing import TypedDict
 
 from tokenscope import config
+from tokenscope.log import get_logger
+
+_log = get_logger(__name__)
 
 LITELLM_PRICING_URL = config.PRICING_LITELLM_URL
 _CACHE_DIR = config.PRICING_CACHE_DIR
@@ -64,30 +67,44 @@ def _fetch_pricing_json() -> dict | None:
         try:
             age = time.time() - _CACHE_FILE.stat().st_mtime
             if age < _CACHE_TTL_SECONDS:
+                _log.debug("pricing.cache.fresh age_seconds=%d", int(age))
                 return json.loads(_CACHE_FILE.read_text())
         except (OSError, json.JSONDecodeError):
             pass
 
+    _log.info("pricing.fetch.start url=%s", LITELLM_PRICING_URL)
+    fetch_start = time.monotonic()
     try:
         with urllib.request.urlopen(
             LITELLM_PRICING_URL, timeout=_FETCH_TIMEOUT_SECONDS
         ) as resp:
-            data = json.loads(resp.read())
+            raw = resp.read()
+        data = json.loads(raw)
+        duration_ms = int((time.monotonic() - fetch_start) * 1000)
+        _log.info(
+            "pricing.fetch.ok bytes=%d duration_ms=%d", len(raw), duration_ms
+        )
         try:
             _CACHE_DIR.mkdir(parents=True, exist_ok=True)
             _CACHE_FILE.write_text(json.dumps(data))
         except OSError:
             pass  # cache write is best-effort; failure isn't fatal.
         return data
-    except (urllib.error.URLError, json.JSONDecodeError, OSError, TimeoutError):
-        pass
+    except (urllib.error.URLError, json.JSONDecodeError, OSError, TimeoutError) as exc:
+        _log.warning(
+            "pricing.fetch.failed exc=%s using_stale_cache=%s",
+            exc,
+            _CACHE_FILE.exists(),
+        )
 
     # Stale cache as last resort.
     if _CACHE_FILE.exists():
         try:
             return json.loads(_CACHE_FILE.read_text())
         except (OSError, json.JSONDecodeError):
+            _log.error("pricing.unavailable network_failed_and_cache_corrupt")
             return None
+    _log.error("pricing.unavailable network_failed_and_no_cache")
     return None
 
 

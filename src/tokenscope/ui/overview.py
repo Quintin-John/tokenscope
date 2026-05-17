@@ -99,7 +99,9 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             on_select="rerun",
             selection_mode=("points",),
         )
-        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
+        handle_chart_drill(
+            event, lambda x: nav.to_day(x[:10]), chart_key="overview-stacked-area"
+        )
 
     st.subheader("7-day rolling average cost")
     fig = rolling_average_line(daily_report, window_days=7)
@@ -111,7 +113,9 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             on_select="rerun",
             selection_mode=("points",),
         )
-        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
+        handle_chart_drill(
+            event, lambda x: nav.to_day(x[:10]), chart_key="overview-rolling-line"
+        )
 
     st.subheader("Daily token mix")
     fig = token_mix_bar(daily_report)
@@ -123,7 +127,9 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             on_select="rerun",
             selection_mode=("points",),
         )
-        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
+        handle_chart_drill(
+            event, lambda x: nav.to_day(x[:10]), chart_key="overview-token-mix"
+        )
 
 
 def _render_kpis(

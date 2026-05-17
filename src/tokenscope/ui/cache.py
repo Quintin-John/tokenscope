@@ -74,4 +74,6 @@ def render(state: SidebarState, nav: Navigation) -> None:
             on_select="rerun",
             selection_mode=("points",),
         )
-        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
+        handle_chart_drill(
+            event, lambda x: nav.to_day(x[:10]), chart_key="cache-hit-ratio-line"
+        )
