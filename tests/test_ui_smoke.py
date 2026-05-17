@@ -259,6 +259,56 @@ def test_reset_filters_button_present(mock_ccusage, mock_ccusage_version) -> Non
     assert btn is not None
 
 
+def test_models_select_all_button_present(mock_ccusage, mock_ccusage_version) -> None:
+    """Slice 25: scoped escape hatch sits next to the Models multiselect."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    btn = next(
+        (b for b in at.sidebar.button if b.label == "Select all"),
+        None,
+    )
+    assert btn is not None
+    assert btn.key == "sidebar-models-select-all"
+
+
+def test_models_select_all_clears_narrowed_selection(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Slice 25: clicking Select all wipes the narrowed session_state +
+    URL param, and the next render re-seeds the multiselect with the
+    full default list (every available model)."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at(models="claude-opus-4-7")
+    # Simulate the user having narrowed to a single model and that
+    # narrowing having round-tripped through the URL.
+    at.session_state["sidebar-models"] = ["claude-opus-4-7"]
+    at.run()
+    _assert_clean(at)
+
+    btn = next(b for b in at.sidebar.button if b.label == "Select all")
+    btn.click()
+    at.run()
+    _assert_clean(at)
+
+    # Multiselect must re-render with every available model selected
+    # (fixture has at least opus-4-7 and haiku-4-5; both must appear).
+    models_widget = next(
+        m for m in at.sidebar.multiselect if m.label == "Models"
+    )
+    assert len(models_widget.value) >= 2
+    assert "claude-opus-4-7" in models_widget.value
+    assert "claude-haiku-4-5-20251001" in models_widget.value
+    # The pre-narrowing URL value must not have survived. The wipe + rerun
+    # path means even if `_sync_url_from_session` writes `models=` back,
+    # it writes the *full* set, not the prior narrow value. (The
+    # absent-when-default behaviour is Slice 26's territory.)
+    url_models = at.query_params.get("models")
+    if url_models is not None:
+        url_list = url_models[0] if isinstance(url_models, list) else url_models
+        assert "claude-haiku-4-5-20251001" in url_list
+
+
 def test_plan_switch_to_pro_flips_window_cost_kpi(
     mock_ccusage, mock_ccusage_version
 ) -> None:

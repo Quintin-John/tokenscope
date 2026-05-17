@@ -210,11 +210,17 @@ def _render_project_selectbox(project_options: list[str]) -> str | None:
 def _render_models_multiselect(model_options: list[str]) -> list[str]:
     """Models filter (post-fetch). On first render every available model
     is selected by default so the dashboard shows everything until the
-    user narrows in."""
+    user narrows in.
+
+    Slice 25: a "Select all" button below the multiselect clears just
+    this widget's session_state + URL param and reruns, so the next pass
+    re-seeds with the full default list. Scoped escape hatch — does not
+    touch date range, project, plan, or offline.
+    """
     models_kwargs: dict = {"key": _KEY_MODELS}
     if _KEY_MODELS not in st.session_state:
         models_kwargs["default"] = model_options
-    return list(
+    selected = list(
         st.multiselect(
             "Models",
             options=model_options,
@@ -223,6 +229,17 @@ def _render_models_multiselect(model_options: list[str]) -> list[str]:
             **models_kwargs,
         )
     )
+    if st.button(
+        "Select all",
+        key="sidebar-models-select-all",
+        help="Reset the Models filter to every model available in the window.",
+    ):
+        _log.info("sidebar.models_select_all_clicked")
+        st.session_state.pop(_KEY_MODELS, None)
+        if "models" in st.query_params:
+            del st.query_params["models"]
+        st.rerun()
+    return selected
 
 
 def _render_plan_selectbox() -> str:
