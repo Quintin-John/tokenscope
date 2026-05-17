@@ -485,59 +485,45 @@ def token_flow_sankey_data(daily_report: DailyReport) -> dict:
     return {"labels": labels, "sources": sources, "targets": targets, "values": values}
 
 
-_PATH_ANCHORS = (
-    "Documents",
-    "Downloads",
-    "Desktop",
-    "Library",
-    "Projects",
-    "Code",
-    "src",
-    "Volumes",
-    "tmp",
-    "var",
-    "opt",
-)
+def friendly_project_label(slug: str, home_slug: str | None = None) -> str:
+    """Make a ccusage project slug scannable.
 
+    ccusage encodes a project's absolute path as a slugified string with
+    `-` separators (e.g. `-Users-q-johnsmith-Documents-RiderProjects-WorldForge`).
+    The encoding is *lossy* — hyphens inside directory names collide
+    with the separator. `mini-ollama-ui` looks identical to `mini/ollama/ui`
+    in slug form, so any "split on `-` and label the last bit" heuristic
+    invents wrong leaves the moment a project name contains a hyphen.
 
-def friendly_project_label(slug: str) -> str:
-    """Turn a ccusage project slug into something scannable.
+    We deliberately do **not** try to recover directory structure. Instead:
 
-    ccusage uses the project's absolute path slugified with `-`
-    separators (e.g. `-Users-quintin-johnsmith-Documents-RiderProjects-WorldForge`).
-    Slugging is lossy because hyphens in directory or user names collide
-    with the separator — there's no way to perfectly reverse it.
+    1. If the slug matches the user's home-directory slug (passed in as
+       `home_slug` — sidebar.py computes it from `pathlib.Path.home()`),
+       substitute the home prefix with `~`. That's where 90% of the
+       sidebar noise lives.
+    2. Otherwise, strip the leading `-` and leave the rest verbatim.
+       The user reads "Volumes-SSK-Drive--Foo" and instantly recognises
+       it as their external drive without us mangling it further.
 
-    Heuristic: walk segments and trim everything up to the first known
-    "path anchor" (`Documents`, `Downloads`, `Volumes`, etc.). That drops
-    the noisy `Users/<user>` prefix without trying to guess where the
-    username ends. If no anchor is found, fall back to the slug stripped
-    of its leading hyphen.
-
-    Examples:
-        "-Users-q-johnsmith-Documents-RiderProjects-WorldForge"
-            → "WorldForge — Documents/RiderProjects"
-        "-Volumes-SSK-Drive--ManageLiterature"
-            → "ManageLiterature — Volumes/SSK/Drive"
-        "Unknown Project"   → "Unknown Project"   (pass-through)
-        ""                  → ""                  (pass-through)
+    Examples (with `home_slug="-Users-q-johnsmith"`):
+        "-Users-q-johnsmith"                              → "~"
+        "-Users-q-johnsmith-Documents-RiderProjects-tok"  → "~/Documents-RiderProjects-tok"
+        "-Users-q-johnsmith-baremetal-audit"              → "~/baremetal-audit"
+        "-Volumes-SSK-Drive--ManageLiterature"            → "Volumes-SSK-Drive--ManageLiterature"
+        "Unknown Project"                                  → "Unknown Project"   (pass-through)
+        ""                                                 → ""                  (pass-through)
     """
-    if not slug or not slug.startswith("-"):
+    if not slug:
         return slug
-    parts = [p for p in slug[1:].split("-") if p]
-    if not parts:
-        return slug
-    # Trim everything before the first recognised path anchor; if none
-    # exists, keep all parts so we don't silently drop information.
-    for i, part in enumerate(parts):
-        if part in _PATH_ANCHORS:
-            parts = parts[i:]
-            break
-    leaf = parts[-1]
-    parent = parts[:-1]
-    if not parent:
-        return leaf
-    return f"{leaf} — {'/'.join(parent)}"
+    if home_slug:
+        if slug == home_slug:
+            return "~"
+        prefix = home_slug + "-"
+        if slug.startswith(prefix):
+            return "~/" + slug[len(prefix):]
+    if slug.startswith("-"):
+        return slug[1:]
+    return slug
 
 
 def short_model_label(model_name: str) -> str:

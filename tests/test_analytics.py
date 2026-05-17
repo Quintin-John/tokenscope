@@ -1045,27 +1045,53 @@ def test_model_breakdown_empty_report() -> None:
     assert model_breakdown(_report([])) == []
 
 
-def test_friendly_project_label() -> None:
+HOME_SLUG = "-Users-quintin-johnsmith"
+
+
+def test_friendly_project_label_home_dir_itself() -> None:
+    """Regression for the johnsmith bug: the home directory slug must NOT
+    be rendered as 'johnsmith — Users/quintin'."""
+    assert friendly_project_label(HOME_SLUG, home_slug=HOME_SLUG) == "~"
+
+
+def test_friendly_project_label_under_home() -> None:
     assert (
         friendly_project_label(
-            "-Users-quintin-johnsmith-Documents-RiderProjects-WorldForge"
+            "-Users-quintin-johnsmith-Documents-RiderProjects-WorldForge",
+            home_slug=HOME_SLUG,
         )
-        == "WorldForge — Documents/RiderProjects"
+        == "~/Documents-RiderProjects-WorldForge"
     )
 
 
-def test_friendly_project_label_drops_users_prefix() -> None:
-    # Users/<user> is shared noise across every project — trim it.
-    result = friendly_project_label("-Users-jane-Documents-Hack")
-    assert result == "Hack — Documents"
+def test_friendly_project_label_under_home_hyphenated_dir() -> None:
+    """Hyphenated directory name (mini-ollama-ui) survives verbatim — we
+    can't recover its structure from the slug but we shouldn't mangle it."""
+    assert (
+        friendly_project_label(
+            "-Users-quintin-johnsmith-Downloads-mini-ollama-ui",
+            home_slug=HOME_SLUG,
+        )
+        == "~/Downloads-mini-ollama-ui"
+    )
 
 
-def test_friendly_project_label_volume_path() -> None:
-    """Path under /Volumes shouldn't get the Users/ trimming."""
-    result = friendly_project_label("-Volumes-SSK-Drive--ManageLiterature")
-    # leaf is "ManageLiterature", parent is "Volumes/SSK/Drive"
-    assert result.startswith("ManageLiterature — ")
-    assert "Volumes" in result
+def test_friendly_project_label_outside_home() -> None:
+    """Path not under home → strip leading dash, leave the rest verbatim."""
+    assert (
+        friendly_project_label(
+            "-Volumes-SSK-Drive--ManageLiterature", home_slug=HOME_SLUG
+        )
+        == "Volumes-SSK-Drive--ManageLiterature"
+    )
+
+
+def test_friendly_project_label_no_home_slug() -> None:
+    """Without home info, we just strip the leading dash."""
+    assert (
+        friendly_project_label("-Users-anyone-Documents-Foo")
+        == "Users-anyone-Documents-Foo"
+    )
 
 
 def test_friendly_project_label_passthrough() -> None:
@@ -1073,15 +1099,13 @@ def test_friendly_project_label_passthrough() -> None:
     assert friendly_project_label("") == ""
 
 
-def test_friendly_project_label_single_segment() -> None:
-    # Just `-projname` with no parent path
-    assert friendly_project_label("-Hack") == "Hack"
-
-
-def test_friendly_project_label_only_dashes() -> None:
-    # Pathological input: nothing but separators.
-    assert friendly_project_label("-") == "-"
-    assert friendly_project_label("---") == "---"
+def test_friendly_project_label_home_lookalike() -> None:
+    """A different user's home should not match — we require exact prefix."""
+    result = friendly_project_label(
+        "-Users-jane-Documents-Hack", home_slug=HOME_SLUG
+    )
+    # No home match → fall back to leading-dash strip.
+    assert result == "Users-jane-Documents-Hack"
 
 
 @pytest.mark.parametrize(
