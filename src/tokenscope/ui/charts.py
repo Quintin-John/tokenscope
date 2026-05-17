@@ -18,7 +18,6 @@ from tokenscope.analytics import (
     cost_share_by_model,
     daily_cache_hit_ratio,
     daily_cost_by_model,
-    daily_dollars_saved,
     daily_token_mix,
     rolling_cost_average,
     token_flow_sankey_data,
@@ -114,8 +113,15 @@ def session_token_mix(entry: SessionEntry) -> go.Figure:
     return fig
 
 
-def burn_gauge(block: BlockEntry) -> go.Figure | None:
-    """Burn-rate gauge: actual cost-per-hour, with projected end-of-window cost as a delta.
+def burn_gauge(
+    block: BlockEntry, typical: float | None = None
+) -> go.Figure | None:
+    """Burn-rate gauge: actual cost-per-hour with projected end-of-window cost as a delta.
+
+    When `typical` is provided (median burn from completed historical
+    blocks), a red threshold line is drawn at that value — gives users an
+    instant "above/below my usual" read instead of asking them to remember
+    what their typical burn looks like.
 
     Returns None when the block has no burn rate (gap block or finished block).
     """
@@ -123,16 +129,23 @@ def burn_gauge(block: BlockEntry) -> go.Figure | None:
         return None
     projected = block.projection.total_cost if block.projection else None
     delta = {"reference": projected, "valueformat": "$,.2f"} if projected else None
+    gauge: dict = {
+        "axis": {"tickprefix": "$"},
+        "bar": {"color": "#1f77b4"},
+    }
+    if typical is not None and typical > 0:
+        gauge["threshold"] = {
+            "line": {"color": "#d62728", "width": 3},
+            "thickness": 0.85,
+            "value": typical,
+        }
     fig = go.Figure(
         go.Indicator(
             mode="gauge+number" + ("+delta" if delta else ""),
             value=block.burn_rate.cost_per_hour,
             number={"prefix": "$", "valueformat": ",.2f", "suffix": "/hr"},
             delta=delta,
-            gauge={
-                "axis": {"tickprefix": "$"},
-                "bar": {"color": "#1f77b4"},
-            },
+            gauge=gauge,
             title={"text": "Burn rate"},
         )
     )
@@ -160,30 +173,6 @@ def cache_hit_ratio_line(daily_report: DailyReport) -> go.Figure | None:
     return fig
 
 
-def dollars_saved_bar(daily_report: DailyReport) -> go.Figure | None:
-    """Stacked bar of estimated $ saved per day, coloured by model family."""
-    rows = daily_dollars_saved(daily_report)
-    if not rows:
-        return None
-    df = pd.DataFrame(rows)
-    # Collapse same-day-same-family rows so the bars are one band per family.
-    grouped = df.groupby(["date", "family"], as_index=False)["dollars_saved"].sum()
-    fig = px.bar(
-        grouped,
-        x="date",
-        y="dollars_saved",
-        color="family",
-        labels={"date": "Date", "dollars_saved": "Estimated $ saved", "family": ""},
-    )
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=30, b=10),
-        yaxis_tickprefix="$",
-        barmode="stack",
-        legend_title_text="",
-    )
-    return fig
-
-
 def single_family_token_bar(daily_report: DailyReport) -> go.Figure | None:
     """Horizontal bar of total tokens per kind, for a window where only
     one model family is present.
@@ -191,7 +180,9 @@ def single_family_token_bar(daily_report: DailyReport) -> go.Figure | None:
     A Sankey with one right-side node is just a four-strand comb feeding
     one label — adds visual ceremony without insight. This bar gives the
     same information honestly. Uses log x-axis for the same reason the
-    daily token-mix bar does (cache_read swamps everything else).
+    daily token-mix bar does (cache_read swamps everything else). Each
+    kind gets its own colour from Plotly's default qualitative palette
+    so the four bars read as distinct categories at a glance.
     """
     if not daily_report.daily:
         return None
@@ -204,21 +195,24 @@ def single_family_token_bar(daily_report: DailyReport) -> go.Figure | None:
     if not any(totals.values()):
         return None
     kinds = ["cache_read", "cache_create", "output", "input"]
-    values = [totals[k] for k in kinds]
-    fig = go.Figure(
-        go.Bar(
-            x=values,
-            y=kinds,
-            orientation="h",
-            hovertemplate="<b>%{y}</b><br>%{x:,.0f} tokens<extra></extra>",
-        )
+    df = pd.DataFrame({"kind": kinds, "tokens": [totals[k] for k in kinds]})
+    fig = px.bar(
+        df,
+        x="tokens",
+        y="kind",
+        color="kind",
+        orientation="h",
+        category_orders={"kind": kinds},
+        labels={"tokens": "Tokens", "kind": ""},
+    )
+    fig.update_traces(
+        hovertemplate="<b>%{y}</b><br>%{x:,.0f} tokens<extra></extra>",
     )
     fig.update_layout(
         margin=dict(l=10, r=10, t=30, b=10),
         xaxis_type="log",
-        xaxis_title="Tokens",
-        yaxis_title="",
         height=260,
+        showlegend=False,
     )
     return fig
 

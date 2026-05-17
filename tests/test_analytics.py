@@ -22,9 +22,7 @@ from tokenscope.analytics import (
     cost_share_by_model,
     daily_cache_hit_ratio,
     daily_cost_by_model,
-    daily_dollars_saved,
     daily_token_mix,
-    dollars_saved,
     filter_daily_by_models,
     find_block,
     find_daily_entry,
@@ -34,14 +32,18 @@ from tokenscope.analytics import (
     model_breakdown,
     model_family,
     mtd_cost,
+    prior_window_query,
     rolling_cost_average,
     sessions_on_day,
     short_model_label,
     today_cost,
     token_flow_sankey_data,
     top_n_by_cost,
+    typical_burn_rate,
     window_cost,
+    window_effective_per_mtok,
 )
+from tokenscope.query import Query
 from tokenscope.models import (
     BlockEntry,
     BlocksReport,
@@ -276,36 +278,6 @@ def test_cache_hit_ratio_excludes_output_tokens() -> None:
         output_tokens=10_000_000,
     )
     assert cache_hit_ratio(base) == cache_hit_ratio(huge_output)
-
-
-# ---------- dollars_saved ----------
-
-
-def test_dollars_saved_typical() -> None:
-    entry = _entry("2026-04-01", cache_read_tokens=2_000_000)
-    # 2M tokens * $3/MTok = $6.00
-    assert dollars_saved(entry, input_price_per_mtok=3.0) == pytest.approx(6.0)
-
-
-def test_dollars_saved_zero_cache_reads() -> None:
-    entry = _entry("2026-04-01", cache_read_tokens=0)
-    assert dollars_saved(entry, input_price_per_mtok=15.0) == 0.0
-
-
-def test_dollars_saved_zero_price() -> None:
-    entry = _entry("2026-04-01", cache_read_tokens=1_000_000)
-    assert dollars_saved(entry, input_price_per_mtok=0.0) == 0.0
-
-
-def test_dollars_saved_negative_price_treated_as_undefined() -> None:
-    entry = _entry("2026-04-01", cache_read_tokens=1_000_000)
-    assert dollars_saved(entry, input_price_per_mtok=-1.0) == 0.0
-
-
-def test_dollars_saved_fractional_million() -> None:
-    entry = _entry("2026-04-01", cache_read_tokens=250_000)
-    # 0.25M * $15 = $3.75
-    assert dollars_saved(entry, input_price_per_mtok=15.0) == pytest.approx(3.75)
 
 
 # ---------- top_n_by_cost ----------
@@ -822,53 +794,6 @@ def test_daily_cache_hit_ratio_empty_report() -> None:
     assert daily_cache_hit_ratio(_report([])) == []
 
 
-# ---------- daily_dollars_saved ----------
-
-
-def test_daily_dollars_saved_uses_family_pricing() -> None:
-    # 1M cache-read on opus-4-7 ($15/MTok) and 1M on haiku-4-5 ($1/MTok).
-    opus_b = ModelBreakdown(
-        modelName="claude-opus-4-7",
-        inputTokens=0,
-        outputTokens=0,
-        cacheCreationTokens=0,
-        cacheReadTokens=1_000_000,
-        cost=5.0,
-    )
-    haiku_b = ModelBreakdown(
-        modelName="claude-haiku-4-5-20251001",
-        inputTokens=0,
-        outputTokens=0,
-        cacheCreationTokens=0,
-        cacheReadTokens=1_000_000,
-        cost=0.1,
-    )
-    report = _report(
-        [
-            _entry(
-                "2026-05-16",
-                total_cost=5.1,
-                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
-                model_breakdowns=[opus_b, haiku_b],
-                cache_read_tokens=2_000_000,
-                input_tokens=0,
-                output_tokens=0,
-                cache_creation_tokens=0,
-            )
-        ]
-    )
-    rows = daily_dollars_saved(report)
-    assert len(rows) == 2
-    by_family = {row["family"]: row["dollars_saved"] for row in rows}
-    assert by_family["opus"] == pytest.approx(15.0)
-    assert by_family["haiku"] == pytest.approx(1.0)
-    assert all(row["date"] == "2026-05-16" for row in rows)
-
-
-def test_daily_dollars_saved_empty_report() -> None:
-    assert daily_dollars_saved(_report([])) == []
-
-
 # ---------- token_flow_sankey_data ----------
 
 
@@ -1150,3 +1075,153 @@ def test_model_breakdown_zero_tokens_safe() -> None:
     rows = model_breakdown(report)
     assert rows[0]["per_mtok"] == 0.0
     assert rows[0]["share"] == 0.0
+
+
+# ---------- prior_window_query ----------
+
+
+def test_prior_window_query_shifts_back_by_window_length() -> None:
+    q = Query(since="20260417", until="20260516")
+    prior = prior_window_query(q)
+    # 30-day window → prior is 20260318 → 20260416 (30 days ending day before).
+    assert prior is not None
+    assert prior.since == "20260318"
+    assert prior.until == "20260416"
+
+
+def test_prior_window_query_carries_project_and_offline() -> None:
+    q = Query(since="20260501", until="20260516", project="x", offline=True)
+    prior = prior_window_query(q)
+    assert prior is not None
+    assert prior.project == "x"
+    assert prior.offline is True
+
+
+def test_prior_window_query_returns_none_without_bounds() -> None:
+    assert prior_window_query(Query()) is None
+    assert prior_window_query(Query(since="20260501")) is None
+    assert prior_window_query(Query(until="20260516")) is None
+
+
+def test_prior_window_query_handles_malformed_dates() -> None:
+    assert prior_window_query(Query(since="bad", until="20260516")) is None
+
+
+def test_prior_window_query_single_day() -> None:
+    q = Query(since="20260516", until="20260516")
+    prior = prior_window_query(q)
+    assert prior is not None
+    assert prior.since == "20260515"
+    assert prior.until == "20260515"
+
+
+def test_prior_window_query_rejects_inverted_range() -> None:
+    """Until earlier than since → invalid range, no prior to compute."""
+    assert prior_window_query(Query(since="20260601", until="20260501")) is None
+
+
+# ---------- window_effective_per_mtok ----------
+
+
+def test_window_effective_per_mtok_blended_rate() -> None:
+    """Effective rate = total cost / total tokens × 1M. Caches pull this
+    down — a window with 99% cache reads but full input pricing should
+    end up well below the per-token input rate."""
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                input_tokens=1_000,
+                output_tokens=1_000,
+                cache_creation_tokens=1_000,
+                cache_read_tokens=997_000,
+                total_cost=1.0,
+            )
+        ]
+    )
+    # 1M total tokens, $1 cost → $1/MTok effective.
+    assert window_effective_per_mtok(report) == pytest.approx(1.0)
+
+
+def test_window_effective_per_mtok_empty_report() -> None:
+    assert window_effective_per_mtok(_report([])) is None
+
+
+def test_window_effective_per_mtok_zero_tokens() -> None:
+    """A report with entries but no tokens → no division possible → None."""
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation_tokens=0,
+                cache_read_tokens=0,
+                total_cost=0.0,
+            )
+        ]
+    )
+    assert window_effective_per_mtok(report) is None
+
+
+# ---------- typical_burn_rate ----------
+
+
+def test_typical_burn_rate_median_of_completed_blocks() -> None:
+    rep = BlocksReport(
+        blocks=[
+            _block(block_id="b1", is_active=False, cost_per_hour=4.0),
+            _block(block_id="b2", is_active=False, cost_per_hour=8.0),
+            _block(block_id="b3", is_active=False, cost_per_hour=12.0),
+        ]
+    )
+    assert typical_burn_rate(rep) == pytest.approx(8.0)
+
+
+def test_typical_burn_rate_excludes_active_block() -> None:
+    rep = BlocksReport(
+        blocks=[
+            _block(block_id="b1", is_active=False, cost_per_hour=4.0),
+            _block(block_id="b2", is_active=False, cost_per_hour=8.0),
+            _block(block_id="b3", is_active=False, cost_per_hour=12.0),
+            # Active block sets a wildly high rate; must be ignored.
+            _block(block_id="b-active", is_active=True, cost_per_hour=100.0),
+        ]
+    )
+    assert typical_burn_rate(rep) == pytest.approx(8.0)
+
+
+def test_typical_burn_rate_excludes_gap_blocks() -> None:
+    rep = BlocksReport(
+        blocks=[
+            _block(block_id="b1", is_active=False, cost_per_hour=4.0),
+            _block(block_id="b2", is_active=False, cost_per_hour=8.0),
+            _block(block_id="b3", is_active=False, cost_per_hour=12.0),
+            _block(block_id="gap", is_active=False, is_gap=True, cost_per_hour=999.0),
+        ]
+    )
+    assert typical_burn_rate(rep) == pytest.approx(8.0)
+
+
+def test_typical_burn_rate_too_few_samples() -> None:
+    """Fewer than 3 completed blocks → no baseline (median is misleading)."""
+    rep = BlocksReport(
+        blocks=[
+            _block(block_id="b1", is_active=False, cost_per_hour=4.0),
+            _block(block_id="b2", is_active=False, cost_per_hour=8.0),
+        ]
+    )
+    assert typical_burn_rate(rep) is None
+
+
+def test_typical_burn_rate_no_burn_rate_field() -> None:
+    """A completed block with burn_rate=None doesn't count."""
+    rep = BlocksReport(
+        blocks=[
+            _block(block_id="b1", is_active=False, cost_per_hour=4.0),
+            _block(block_id="b2", is_active=False, cost_per_hour=8.0),
+            _block(block_id="b3", is_active=False, cost_per_hour=None),
+        ]
+    )
+    # Only 2 valid samples → too few.
+    assert typical_burn_rate(rep) is None
