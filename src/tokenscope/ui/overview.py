@@ -138,23 +138,25 @@ def _render_kpis(
 
     if plan.is_flat_rate:
         # Flat-rate plans (Pro / Max): the user pays their monthly fee
-        # regardless of token volume. Headline is the prorated plan cost
-        # for this window; the API-equivalent appears as a "would have
-        # cost" delta so the user knows what they're saving.
-        days = _window_days(query) or 30
-        plan_cost = plan.flat_rate_usd_per_month * (days / 30.0)
-        savings = api_window_cost - plan_cost
+        # *regardless of window length*. Showing a prorated number was
+        # confusing — implied the price varies with date-picker selection
+        # when it doesn't. Headline is the flat monthly fee verbatim;
+        # the API-equivalent is the savings-context delta.
+        savings = api_window_cost - plan.flat_rate_usd_per_month
         c1.metric(
-            f"Window cost ({plan.name})",
-            f"${plan_cost:,.2f}",
-            delta=f"would cost ${api_window_cost:,.2f} at API rates",
+            f"Plan cost ({plan.name})",
+            f"${plan.flat_rate_usd_per_month:,.0f}/mo",
+            delta=(
+                f"would cost ${api_window_cost:,.2f} at API rates this window"
+            ),
             delta_color="off",
             help=(
                 f"Your {plan.name} plan is flat-rate at "
-                f"${plan.flat_rate_usd_per_month:.0f}/month — this is the prorated "
-                f"cost for the selected window ({days}d). The delta is what the "
-                f"same usage would have cost at API rates "
-                f"(${savings:,.2f} {'saved' if savings >= 0 else 'over'})."
+                f"${plan.flat_rate_usd_per_month:.0f}/month — paid regardless of "
+                f"how many tokens you push or how long this window is. "
+                f"The delta is what the same usage would have cost at API rates "
+                f"(${abs(savings):,.2f} {'saved' if savings >= 0 else 'over'} "
+                f"vs your subscription)."
             ),
         )
     else:
