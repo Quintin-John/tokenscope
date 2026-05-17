@@ -86,8 +86,15 @@ def _run_json(args: list[str]) -> dict[str, Any]:
             f"stdout (first 300 chars): {result.stdout[:300]!r}\n"
             f"stderr (first 300 chars): {result.stderr[:300]!r}"
         ) from exc
-    _log.debug(
-        "ccusage.ok argv=%s duration_ms=%d stdout_bytes=%d",
+    # INFO not DEBUG: ccusage is the data boundary of the entire app
+    # and an unobservable boundary cost us multiple debugging cycles.
+    # The line carries the argv (so you can re-run by hand), the
+    # elapsed time (so a regression in `elapsed_ms` is visible at a
+    # glance), and the response size (so a silently-empty response
+    # doesn't look the same as a successful one). Full stdout stays
+    # at DEBUG — too noisy at INFO.
+    _log.info(
+        "ccusage.ok argv=%s elapsed_ms=%d stdout_bytes=%d",
         args,
         duration_ms,
         len(result.stdout),

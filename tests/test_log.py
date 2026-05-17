@@ -87,10 +87,13 @@ def test_setup_logging_idempotent_under_streamlit_reruns() -> None:
     assert len(tagged) == 1
 
 
-def test_setup_logging_default_level_is_warning(monkeypatch) -> None:
+def test_setup_logging_default_level_is_info(monkeypatch) -> None:
+    """Default level is INFO — verbose-by-default for a local-first
+    dashboard. Quieten with `TOKENSCOPE_LOG_LEVEL=ERROR`; add detail
+    with `TOKENSCOPE_LOG_LEVEL=DEBUG`."""
     monkeypatch.delenv("TOKENSCOPE_LOG_LEVEL", raising=False)
     setup_logging()
-    assert logging.getLogger("tokenscope").level == logging.WARNING
+    assert logging.getLogger("tokenscope").level == logging.INFO
 
 
 def test_setup_logging_env_var_overrides_default(monkeypatch) -> None:
@@ -106,9 +109,19 @@ def test_setup_logging_explicit_arg_beats_env_var(monkeypatch) -> None:
 
 
 def test_setup_logging_junk_env_falls_back_to_default(monkeypatch) -> None:
+    """Garbage in the env var falls back to the documented default
+    (INFO) so a typo doesn't accidentally silence the stream."""
     monkeypatch.setenv("TOKENSCOPE_LOG_LEVEL", "NOT_A_LEVEL")
     setup_logging()
-    assert logging.getLogger("tokenscope").level == logging.WARNING
+    assert logging.getLogger("tokenscope").level == logging.INFO
+
+
+def test_setup_logging_env_var_quiets_to_error(monkeypatch) -> None:
+    """The env var must work in both directions — DEBUG to add detail
+    AND ERROR to quieten. Locks the bidirectional contract."""
+    monkeypatch.setenv("TOKENSCOPE_LOG_LEVEL", "ERROR")
+    setup_logging()
+    assert logging.getLogger("tokenscope").level == logging.ERROR
 
 
 def test_setup_logging_format_includes_module_name(caplog) -> None:
@@ -129,20 +142,113 @@ def test_setup_logging_does_not_propagate(monkeypatch) -> None:
     assert logging.getLogger("tokenscope").propagate is False
 
 
-def test_setup_logging_handler_writes_to_stderr() -> None:
-    """Docker contract: `docker logs <container>` shows stderr. Our
-    handler MUST write to `sys.stderr` (file descriptor 2) so that
-    pipe works. If something later reassigns sys.stderr, the handler
-    captured the original reference at setup time — that's the
-    correct semantics (writes go to the original container stderr,
-    not a sub-process buffer)."""
+def test_setup_logging_handler_writes_to_stdout() -> None:
+    """Docker contract: `docker logs <container>` surfaces stdout
+    (and stderr) — but downstream tooling typically expects app
+    output on stdout, so the handler writes there. A developer's
+    terminal sees the same lines without any extra plumbing."""
     import sys
     setup_logging(level="DEBUG")
     root = logging.getLogger("tokenscope")
     tagged = [h for h in root.handlers if getattr(h, _HANDLER_MARKER, False)]
     assert len(tagged) == 1
     assert isinstance(tagged[0], logging.StreamHandler)
-    assert tagged[0].stream is sys.stderr
+    assert tagged[0].stream is sys.stdout
+
+
+def test_setup_logging_json_format_when_no_tty(monkeypatch) -> None:
+    """Auto-detect: no TTY attached → JSON formatter. Covers the
+    Docker / piped-stdout case where downstream tooling (e.g.
+    `docker logs | jq`) expects one JSON record per line."""
+    monkeypatch.delenv("TOKENSCOPE_LOG_FORMAT", raising=False)
+    # Force isatty to False so the auto-detect picks JSON regardless
+    # of whether the test runner happens to have a TTY.
+    import sys
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
+    setup_logging()
+    root = logging.getLogger("tokenscope")
+    tagged = next(h for h in root.handlers if getattr(h, _HANDLER_MARKER, False))
+    from tokenscope.log import _JsonFormatter
+
+    assert isinstance(tagged.formatter, _JsonFormatter)
+
+
+def test_setup_logging_human_format_when_tty(monkeypatch) -> None:
+    """Auto-detect: TTY attached → human-readable formatter. Covers
+    the local-terminal case where a developer is reading logs
+    directly."""
+    monkeypatch.delenv("TOKENSCOPE_LOG_FORMAT", raising=False)
+    import sys
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    setup_logging()
+    root = logging.getLogger("tokenscope")
+    tagged = next(h for h in root.handlers if getattr(h, _HANDLER_MARKER, False))
+    from tokenscope.log import _JsonFormatter
+
+    assert not isinstance(tagged.formatter, _JsonFormatter)
+    assert isinstance(tagged.formatter, logging.Formatter)
+
+
+def test_setup_logging_explicit_json_format(monkeypatch) -> None:
+    """`TOKENSCOPE_LOG_FORMAT=json` forces JSON even on a TTY —
+    e.g. a developer wanting to pipe to `jq` from their terminal."""
+    monkeypatch.setenv("TOKENSCOPE_LOG_FORMAT", "json")
+    import sys
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    setup_logging()
+    root = logging.getLogger("tokenscope")
+    tagged = next(h for h in root.handlers if getattr(h, _HANDLER_MARKER, False))
+    from tokenscope.log import _JsonFormatter
+
+    assert isinstance(tagged.formatter, _JsonFormatter)
+
+
+def test_setup_logging_explicit_human_format(monkeypatch) -> None:
+    """`TOKENSCOPE_LOG_FORMAT=human` forces human-readable even
+    when not on a TTY — useful for `docker logs` viewers who
+    prefer the readable form."""
+    monkeypatch.setenv("TOKENSCOPE_LOG_FORMAT", "human")
+    import sys
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
+    setup_logging()
+    root = logging.getLogger("tokenscope")
+    tagged = next(h for h in root.handlers if getattr(h, _HANDLER_MARKER, False))
+    from tokenscope.log import _JsonFormatter
+
+    assert not isinstance(tagged.formatter, _JsonFormatter)
+
+
+def test_json_formatter_emits_one_object_per_record() -> None:
+    """The JSON formatter's output for a single record parses as
+    one JSON object with the expected fields. Locks the downstream
+    `jq` contract."""
+    from tokenscope.log import _JsonFormatter
+
+    record = logging.LogRecord(
+        name="tokenscope.x", level=logging.INFO,
+        pathname=__file__, lineno=1,
+        msg="ccusage.ok argv=%s", args=(["daily"],),
+        exc_info=None,
+    )
+    formatted = _JsonFormatter().format(record)
+    parsed = json.loads(formatted)
+    assert parsed["level"] == "INFO"
+    assert parsed["logger"] == "tokenscope.x"
+    assert "ccusage.ok" in parsed["message"]
+    assert "ts" in parsed
+
+
+def test_setup_logging_suppresses_noisy_third_party() -> None:
+    """Streamlit / watchdog / urllib3 each log their own internal
+    lifecycle at INFO/WARNING. On the Live view's 30s refresh
+    cadence the websocket-reconnect chatter alone dominates the
+    stream — pin them to WARNING so `TOKENSCOPE_LOG_LEVEL=DEBUG`
+    doesn't drown the user in framework internals."""
+    setup_logging(level="DEBUG")
+    for noisy in ("streamlit", "watchdog", "urllib3"):
+        assert logging.getLogger(noisy).level == logging.WARNING, (
+            f"{noisy!r} logger not pinned to WARNING"
+        )
 
 
 # ---------- ccusage instrumentation ----------
@@ -180,8 +286,11 @@ def test_ccusage_run_json_logs_start_and_ok(monkeypatch, caplog) -> None:
     start = [r for r in caplog.records if "ccusage.start" in r.message]
     ok = [r for r in caplog.records if "ccusage.ok" in r.message]
     assert len(start) == 1 and start[0].levelno == logging.DEBUG
-    assert len(ok) == 1 and ok[0].levelno == logging.DEBUG
-    assert "duration_ms=" in ok[0].message
+    # ccusage.ok is INFO — every subprocess invocation visible by
+    # default. The data boundary cost us multiple debugging cycles
+    # while it was DEBUG-only.
+    assert len(ok) == 1 and ok[0].levelno == logging.INFO
+    assert "elapsed_ms=" in ok[0].message
     assert "stdout_bytes=" in ok[0].message
 
 
@@ -281,12 +390,16 @@ def test_pricing_fetch_logs_warning_on_network_failure(
 # ---------- tz instrumentation ----------
 
 
-def test_tz_logs_debug_on_invalid_tz_env(monkeypatch, caplog) -> None:
-    setup_logging(level="DEBUG")
+def test_tz_logs_warning_on_invalid_tz_env(monkeypatch, caplog) -> None:
+    """An invalid `TZ` env var (POSIX rule, absolute path, junk) is
+    a misconfiguration the user benefits from seeing at WARNING —
+    silently falling back to the OS probe is exactly the class of
+    drift that produced the Live UTC bug ("page banner said EDT
+    but charts ticked in UTC")."""
+    setup_logging(level="INFO")
     monkeypatch.setenv("TZ", "EST5EDT,M3.2.0,M11.1.0")  # POSIX rule, not IANA
     # Force the symlink probe to a known IANA target so detection
-    # succeeds and the function returns — we just want the WARNING/DEBUG
-    # from the TZ-invalid path.
+    # succeeds and the function returns.
     monkeypatch.setattr(
         tz.Path, "is_symlink", lambda self: True, raising=False
     )
@@ -294,13 +407,33 @@ def test_tz_logs_debug_on_invalid_tz_env(monkeypatch, caplog) -> None:
         tz.os, "readlink",
         lambda _: "/usr/share/zoneinfo/America/Chicago",
     )
-    with caplog.at_level(logging.DEBUG, logger="tokenscope"):
+    with caplog.at_level(logging.WARNING, logger="tokenscope"):
         tz.detect_local_iana()
     invalid = [
         r for r in caplog.records
-        if "tz.probe.env_invalid" in r.message and r.levelno == logging.DEBUG
+        if "tz.probe.env_invalid" in r.message and r.levelno == logging.WARNING
     ]
     assert len(invalid) == 1
+
+
+def test_tz_logs_detected_zone_at_info(monkeypatch, caplog) -> None:
+    """Every successful detection emits an INFO line with the
+    resolved zone and the source it came from (env var / OS /
+    /etc/localtime symlink). The Live UTC bug would have been a
+    glance at this line — `source=env_var zone=UTC` is the smoking
+    gun."""
+    setup_logging(level="INFO")
+    monkeypatch.setenv("TZ", "America/Chicago")
+    with caplog.at_level(logging.INFO, logger="tokenscope"):
+        result = tz.detect_local_iana()
+    assert result == "America/Chicago"
+    detected = [
+        r for r in caplog.records
+        if "tz.detected" in r.message and r.levelno == logging.INFO
+    ]
+    assert len(detected) == 1
+    assert "zone=America/Chicago" in detected[0].message
+    assert "source=env_var" in detected[0].message
 
 
 def test_tz_logs_warning_on_full_fallback(monkeypatch, caplog) -> None:

@@ -1,144 +1,490 @@
-"""Active-block live view: burn gauge + projection, auto-refreshing every 30s.
+"""Active-block live view.
 
-Phase 6 deliverable per PLAN.md §6:
-    "Auto-refresh `--active` block every 30s (`st.fragment(run_every="30s")`),
-     burn gauge + projection."
+A real-time snapshot of the current 5-hour billing window. Replaces
+the prior gauge-only layout (which duplicated the `$/hr` KPI in a
+larger, scaled-to-an-arbitrary-axis form and carried a cryptic
+unlabelled delta) with:
 
-Slice 12 additions: "Last refreshed at HH:MM:SS" caption (you can tell
-the panel is alive) and a "typical burn" threshold line on the gauge
-computed from the median cost-per-hour of recent completed blocks.
+  * `# Live` page header + a one-line subtitle.
+  * Window banner — start → end time, minutes remaining, models
+    active. Light-bg panel, distinct from KPI cards.
+  * KPI strip — Cost so far / $/hr / Tokens/min / Projected total,
+    all wrapped in `st.container(border=True)` cards matching the
+    Overview look.
+  * Spend trajectory chart — cumulative cost line from window start
+    through "now" with a dashed projection continuation to window
+    end. The chart's slope IS the burn rate; users see whether
+    spend is accelerating or steady at a glance.
+  * Projected-token caption — the one piece of the prior "Projection
+    detail" expander that wasn't duplicated elsewhere.
 
 Implementation notes:
-- The refreshing panel is a `@st.fragment(run_every=30)`. Only the panel
-  re-runs on the timer — the page selector, sidebar, and breadcrumbs are
-  not affected.
-- The live ccusage call bypasses `tokenscope.data` (which is wrapped in
-  `@st.cache_data(ttl=30)`). Compounding two 30s windows would give the
-  user a snapshot up to a minute stale, which defeats "live". The
-  fragment is the only refresh cadence.
-- The sidebar's date/project/model filters don't apply to "right now";
-  the only sidebar control we honour is `offline`, so an offline-pinned
-  session keeps using cached pricing in the live view too.
-- We fetch ALL blocks (not just `--active`) and filter for the active
-  block in Python. Single ccusage call serves both the headline KPIs
-  and the typical-burn baseline.
+
+- The refreshing panel is a `@st.fragment(run_every=...)`. Only the
+  panel re-runs on the timer — the page selector, sidebar, and
+  breadcrumbs are not affected.
+- The live ccusage call bypasses `tokenscope.data` (which is wrapped
+  in `@st.cache_data(ttl=30)`). Compounding two 30s windows would
+  give the user a snapshot up to a minute stale, which defeats
+  "live". The fragment is the only refresh cadence.
+- Spend-trajectory samples are appended to `st.session_state` on
+  each fragment refresh so the chart's solid line gets richer as
+  the user keeps the page open. Samples are keyed by block id so
+  a new billing block starts the history fresh.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import streamlit as st
 
 from tokenscope import ccusage, config
-from tokenscope.analytics import typical_burn_rate
+from tokenscope.analytics import (
+    UNKNOWN_MODEL_FAMILY,
+    block_cache_hit_ratio,
+    block_cost_by_kind,
+    format_compact_int,
+    format_timezone_for_display,
+    typical_burn_rate,
+)
 from tokenscope.ccusage import CcusageError
+from tokenscope.log import get_logger
+from tokenscope.models import BlockEntry
 from tokenscope.navigation import Navigation
 from tokenscope.query import Query
-from tokenscope.ui.charts import burn_gauge
+from tokenscope.ui.charts import (
+    PALETTE,
+    live_spend_trajectory,
+    live_token_kind_composition_bar,
+)
 from tokenscope.ui.sidebar import SidebarState
 
+_log = get_logger(__name__)
+
+# Display labels for the four token kinds. Match the PALETTE keys so
+# the swatch lookup is the same string used to colour every other
+# chart trace named for that kind.
+_TOKEN_KIND_LABELS: dict[str, str] = {
+    "input": "Input",
+    "output": "Output",
+    "cache_create": "Cache create",
+    "cache_read": "Cache read",
+}
+_TOKEN_KIND_ORDER: tuple[str, ...] = (
+    "input",
+    "output",
+    "cache_create",
+    "cache_read",
+)
 
 REFRESH_SECONDS = config.LIVE_REFRESH_SECONDS
 
 
 def render(state: SidebarState, nav: Navigation) -> None:
-    st.subheader("Active billing block (live)")
-    st.caption(
-        f"Auto-refreshes every {REFRESH_SECONDS}s. Ignores the date / project / "
-        "model filters — this view is a real-time snapshot of the current "
-        "5-hour billing window."
-    )
-
+    """Live view shell: H1 + subtitle, then the fragment-refreshed
+    panel for everything else."""
+    st.markdown("# Live")
+    st.caption("Real-time snapshot of the current 5-hour billing window.")
     _live_panel(offline=state.query.offline, tz=state.query.tz)
 
 
 @st.fragment(run_every=REFRESH_SECONDS)
 def _live_panel(offline: bool, tz: str | None = None) -> None:
-    """The actual live panel. Args must be hashable so Streamlit can key the
-    fragment; a bool + string are fine."""
+    """Auto-refreshing live panel. Args must be hashable so Streamlit
+    can key the fragment; bool + str are fine."""
     refreshed_at = datetime.now()
+    now_utc = datetime.now(timezone.utc)
     try:
-        # Fetch all blocks so we can both pick the active one and compute
-        # the typical-burn baseline from completed blocks in a single call.
         report = ccusage.blocks(active=False, query=Query(offline=offline, tz=tz))
     except CcusageError as exc:
         st.error(f"ccusage failed:\n\n```\n{exc}\n```")
         return
 
     active = next((b for b in report.blocks if b.is_active), None)
-    typical = typical_burn_rate(report)
-    st.caption(
-        f"Last refreshed at **{refreshed_at.strftime('%H:%M:%S')}** "
-        f"({REFRESH_SECONDS}s cadence)."
-    )
+    _render_refresh_line(refreshed_at)
 
     if active is None:
         st.info(
-            "No active billing block right now. Start a Claude Code session "
-            "to see the live burn gauge."
+            "No active billing block right now. Start a Claude Code "
+            "session to see live spend."
         )
         return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Cost so far", f"${active.cost_usd:,.2f}")
-    if active.burn_rate is not None:
-        burn_kwargs: dict = {}
-        if typical is not None:
-            change = (active.burn_rate.cost_per_hour - typical) / typical
-            burn_kwargs["delta"] = f"{change:+.0%} vs typical"
-        c2.metric(
-            "$/hr",
-            f"${active.burn_rate.cost_per_hour:,.2f}",
-            help=(
-                f"Median burn over recent completed blocks: ${typical:,.2f}/hr."
-                if typical is not None
-                else "Need 3+ completed blocks to compute a typical baseline."
-            ),
-            **burn_kwargs,
-        )
-        c3.metric(
-            "Tokens / min",
-            f"{active.burn_rate.tokens_per_minute:,.0f}",
-            help="Indicator-weighted tokens per minute, from ccusage's burnRate.",
-        )
-    else:
-        c2.metric("$/hr", "—")
-        c3.metric("Tokens / min", "—")
-    if active.projection is not None:
-        c4.metric(
-            "Projected total",
-            f"${active.projection.total_cost:,.2f}",
-            delta=f"{active.projection.remaining_minutes} min left",
-            delta_color="off",
-            help="Cost projected to the end of this 5-hour window at the current burn rate.",
-        )
-    else:
-        c4.metric("Projected total", "—")
+    typical = typical_burn_rate(report)
+    _render_window_banner(active, tz=tz)
+    _render_kpis(active, typical=typical)
+    _render_token_kind_kpis(active)
+    _render_cache_hit_callout(active)
+    now_iso = _now_iso(now_utc)
+    _log.info(
+        "live.block_snapshot id=%s start=%s end=%s entries=%d "
+        "total_tokens=%d cost_usd=%.2f",
+        active.id,
+        active.start_time,
+        active.end_time,
+        active.entries,
+        active.total_tokens,
+        active.cost_usd,
+    )
+    _render_spend_trajectory(active, now_iso=now_iso, tz=tz)
+    _render_token_kind_composition(active)
 
+
+# --- refresh indicator ---------------------------------------------------
+
+
+def _render_refresh_line(refreshed_at: datetime) -> None:
+    """Single-line `Last refreshed HH:MM:SS · auto-refreshes every Ns`
+    with a small pulsing dot to telegraph that the panel is alive.
+
+    The previous build had TWO separate caption lines saying nearly
+    the same thing; this collapses both into one. The pulsing dot is
+    a CSS animation that runs continuously — the user reads it as
+    "the page IS live" even between refreshes.
+    """
+    st.markdown(
+        f"""
+        <div class="tokenscope-live-refresh">
+          <span class="tokenscope-live-pulse"></span>
+          Last refreshed {refreshed_at.strftime("%H:%M:%S")} ·
+          auto-refreshes every {REFRESH_SECONDS}s
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# --- window banner -------------------------------------------------------
+
+
+def _render_window_banner(active: BlockEntry, *, tz: str | None) -> None:
+    """Two-line banner under the H1 with the active block's context.
+
+    Line 1: time range + minutes remaining.
+    Line 2: models active in the block.
+
+    Time range renders in the user's display timezone (sidebar's
+    detected zone) with underscores stripped from the IANA
+    identifier. If no tz is configured, falls back to UTC.
+    """
     if tz:
-        from tokenscope.tz import utc_iso_to_local
+        from tokenscope.tz import utc_iso_to_local_clock
 
-        start_disp = utc_iso_to_local(active.start_time, tz) or active.start_time
-        end_disp = utc_iso_to_local(active.end_time, tz) or active.end_time
-        st.caption(
-            f"Window {start_disp} → {end_disp}. "
-            f"Models: {', '.join(active.models) or '—'}."
+        start_disp = (
+            utc_iso_to_local_clock(active.start_time, tz) or active.start_time
         )
+        end_disp = (
+            utc_iso_to_local_clock(active.end_time, tz) or active.end_time
+        )
+        tz_label = format_timezone_for_display(tz)
     else:
+        start_disp = active.start_time
+        end_disp = active.end_time
+        tz_label = "UTC"
+
+    minutes_remaining = (
+        active.projection.remaining_minutes if active.projection else None
+    )
+    remaining_part = (
+        f" · {minutes_remaining} min remaining"
+        if minutes_remaining is not None
+        else ""
+    )
+
+    models = (
+        ", ".join(active.models)
+        if active.models
+        else UNKNOWN_MODEL_FAMILY
+    )
+
+    st.markdown(
+        f"""
+        <div class="tokenscope-live-banner">
+          <div class="tokenscope-live-banner-row">
+            <strong>Active block</strong>
+            · {start_disp} – {end_disp} {tz_label}{remaining_part}
+          </div>
+          <div class="tokenscope-live-banner-row tokenscope-live-banner-sub">
+            Models in use: {models}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# --- KPIs ---------------------------------------------------------------
+
+
+def _render_kpis(active: BlockEntry, *, typical: float | None) -> None:
+    """Four-card KPI row matching the Overview look. Every card has a
+    value + a one-line plain-English caption — no formula captions,
+    no help icons (the labels are self-explanatory; cache_hit-style
+    surprises don't apply on this view).
+
+    `45 min left` moved OUT of the Projected-total card and into the
+    window banner above — minutes remaining is a property of the
+    window, not the projected cost.
+    """
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1, st.container(border=True):
+        st.metric("Cost so far", f"${active.cost_usd:,.2f}")
+        st.caption("this 5-hour block")
+
+    with c2, st.container(border=True):
+        if active.burn_rate is not None:
+            kwargs: dict = {}
+            if typical is not None and typical > 0:
+                change = (active.burn_rate.cost_per_hour - typical) / typical
+                kwargs["delta"] = f"{change:+.0%} vs typical"
+                # Cost up = bad: inverse paints positive red, negative
+                # green — same convention the Overview Window-cost
+                # delta uses.
+                kwargs["delta_color"] = "inverse"
+            st.metric("$/hr", f"${active.burn_rate.cost_per_hour:,.2f}", **kwargs)
+            st.caption(
+                f"vs typical ${typical:,.2f}/hr"
+                if typical is not None and typical > 0
+                else "current rate"
+            )
+        else:
+            st.metric("$/hr", "—")
+            st.caption("no burn rate yet")
+
+    with c3, st.container(border=True):
+        if active.burn_rate is not None:
+            st.metric(
+                "Tokens / min",
+                f"{active.burn_rate.tokens_per_minute:,.0f}",
+            )
+            st.caption("indicator-weighted")
+        else:
+            st.metric("Tokens / min", "—")
+            st.caption("no burn rate yet")
+
+    with c4, st.container(border=True):
+        if active.projection is not None:
+            st.metric(
+                "Projected total",
+                f"${active.projection.total_cost:,.2f}",
+            )
+            st.caption("at the current rate")
+        else:
+            st.metric("Projected total", "—")
+            st.caption("no projection")
+
+
+# --- spend trajectory chart ---------------------------------------------
+
+
+def _now_iso(now_utc: datetime) -> str:
+    """ISO-8601 "now" string in the format the chart layer expects
+    (`...Z` suffix, second precision)."""
+    return now_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _render_spend_trajectory(
+    active: BlockEntry,
+    *,
+    now_iso: str,
+    tz: str | None,
+) -> None:
+    """Cumulative-spend line with dashed projection to window end.
+
+    Two anchor points: (block.start_time, $0) and (now, block.cost_usd),
+    plus a dashed projection segment from "now" to the window end.
+    The slope of the actual segment IS the average burn rate so far
+    in this block — users see acceleration vs. projection at a
+    glance.
+
+    The ``tz`` parameter routes the user's IANA zone through to the
+    chart builder so every X-axis tick renders in local clock time
+    rather than UTC.
+    """
+    with st.container(border=True):
+        st.markdown("### Spend in this block")
         st.caption(
-            f"Window {active.start_time} → {active.end_time} (UTC). "
-            f"Models: {', '.join(active.models) or '—'}."
+            "Cumulative spend across the 5-hour block. Solid is "
+            "actual, dotted is projection at the current rate."
         )
+        fig = live_spend_trajectory(active, [], now_iso=now_iso, tz=tz)
+        if fig is None:
+            st.caption("No projection available for this block yet.")
+            return
+        st.plotly_chart(
+            fig, width="stretch", key="live-spend-trajectory"
+        )
+        if active.projection is not None:
+            st.caption(
+                f"Projected total tokens: "
+                f"{format_compact_int(active.projection.total_tokens)}"
+            )
 
-    gauge = burn_gauge(active, typical=typical)
-    if gauge is not None:
-        st.plotly_chart(gauge, width="stretch")
 
-    if active.projection is not None:
-        with st.expander("Projection detail"):
-            p = active.projection
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Projected total cost", f"${p.total_cost:,.2f}")
-            c2.metric("Projected total tokens", f"{p.total_tokens:,}")
-            c3.metric("Minutes remaining", str(p.remaining_minutes))
+# --- token-kind KPIs ----------------------------------------------------
+
+
+def _render_token_kind_kpis(active: BlockEntry) -> None:
+    """Second KPI row — four cards, one per token kind.
+
+    Each card carries:
+
+      * The kind's PALETTE colour as a 12×12 swatch beside the
+        label, so the visual category (input is pink, output is
+        blue, ...) is established BEFORE the user reads the
+        throughput chart below. The same swatch hue paints the
+        matching band in `live_token_throughput`, so the cards
+        and the chart share one mental mapping.
+      * Abbreviated token count (`format_compact_int`) — the
+        magnitudes span 5+ orders of magnitude (cache_read in
+        the millions, input in the thousands), so full integers
+        would dominate the card.
+      * Estimated cost contribution, derived by `block_cost_by_kind`
+        from LiteLLM pricing rates. The per-kind costs always sum
+        to `block.cost_usd` (the actual cost ccusage reported);
+        only the split between kinds is an approximation. Hidden
+        as `—` when rates aren't resolvable (offline + no cache).
+    """
+    cost_rows = block_cost_by_kind(active)
+    cost_by_kind = (
+        {row["kind"]: row["est_cost"] for row in cost_rows}
+        if cost_rows is not None
+        else None
+    )
+    counts = {
+        "input": active.token_counts.input_tokens,
+        "output": active.token_counts.output_tokens,
+        "cache_create": active.token_counts.cache_creation_input_tokens,
+        "cache_read": active.token_counts.cache_read_input_tokens,
+    }
+
+    cols = st.columns(len(_TOKEN_KIND_ORDER))
+    for col, kind in zip(cols, _TOKEN_KIND_ORDER):
+        label = _TOKEN_KIND_LABELS[kind]
+        color = PALETTE[kind]
+        token_count = counts[kind]
+        est_cost = cost_by_kind.get(kind) if cost_by_kind is not None else None
+
+        with col, st.container(border=True):
+            st.markdown(
+                f"""
+                <div class="tokenscope-kind-card-header">
+                  <span class="tokenscope-kind-swatch"
+                        style="background:{color};"></span>
+                  <span class="tokenscope-kind-card-label">{label}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='tokenscope-kind-card-value'>"
+                f"{format_compact_int(token_count)} tokens"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if est_cost is not None:
+                st.caption(f"≈ ${est_cost:,.2f} of block cost")
+            else:
+                st.caption("cost estimate unavailable")
+
+
+def _render_cache_hit_callout(active: BlockEntry) -> None:
+    """Cache hit ratio rendered as a composite / derived stat,
+    visually distinct from the four token-kind KPI cards.
+
+    Slate-tinted background + teal left border (same hue as
+    `cache_read` in PALETTE — visual breadcrumb that this stat is
+    derived from cache_read divided by cache-eligible total) so
+    the eye reads it as "derived from the four kinds", not "a
+    fifth raw count". The supporting copy is plain English
+    ("share of input-side tokens served from cache") rather than
+    the formula — same fix the Overview KPI already had.
+    """
+    ratio = block_cache_hit_ratio(active)
+    pct = ratio * 100
+    st.markdown(
+        f"""
+        <div class="tokenscope-cache-ratio-callout">
+          <div class="tokenscope-cache-ratio-value">{pct:.1f}%</div>
+          <div class="tokenscope-cache-ratio-label">
+            Cache hit ratio · share of input-side tokens served from cache
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_token_kind_composition(active: BlockEntry) -> None:
+    """Horizontal stacked bar of the block's aggregate token-kind
+    composition + a mini-table with absolute counts, estimated
+    cost contribution, and share %.
+
+    Honest answer to the question "what kinds of tokens has this
+    block burned?" given the data ccusage exposes (block-level
+    aggregates only — no intra-block timestamps, no recoverable
+    pre-page-load history). The prior `Token throughput` chart was
+    structurally impossible from this data; this composition
+    snapshot is.
+
+    The mini-table mirrors the Overview Cost composition table's
+    row shape (Kind · Tokens · Est. cost · Share %) so a user
+    moving between Overview and Live reads the same vocabulary.
+    """
+    with st.container(border=True):
+        st.markdown("### Token mix in this block")
+        st.caption(
+            "Cumulative token mix for the active block so far. "
+            f"Updated every {REFRESH_SECONDS}s."
+        )
+        fig = live_token_kind_composition_bar(active)
+        if fig is None:
+            st.caption("Block has no token activity yet.")
+            return
+        st.plotly_chart(
+            fig, width="stretch", key="live-token-mix"
+        )
+        _render_token_kind_table(active)
+
+
+def _render_token_kind_table(active: BlockEntry) -> None:
+    """4-row mini-table beneath the composition bar. Same column
+    set as the Overview Cost composition table so the vocabulary
+    is consistent across the app.
+
+    `Est. cost` rides the same `block_cost_by_kind` helper the
+    token-kind KPI cards already use (rate-weighted split of
+    `block.cost_usd`). When LiteLLM rates aren't resolvable
+    (offline + no cache), the column renders `—` rather than
+    fabricated zeros."""
+    cost_rows = block_cost_by_kind(active)
+    cost_by_kind = (
+        {row["kind"]: row["est_cost"] for row in cost_rows}
+        if cost_rows is not None
+        else None
+    )
+    counts = {
+        "input": active.token_counts.input_tokens,
+        "output": active.token_counts.output_tokens,
+        "cache_create": active.token_counts.cache_creation_input_tokens,
+        "cache_read": active.token_counts.cache_read_input_tokens,
+    }
+    total = sum(counts.values()) or 1  # avoid div-by-zero — caller short-circuited on 0
+    rows = []
+    for kind in ("input", "output", "cache_create", "cache_read"):
+        tokens = counts[kind]
+        share = tokens / total * 100
+        est_cost = cost_by_kind.get(kind) if cost_by_kind is not None else None
+        rows.append(
+            {
+                "Kind": _TOKEN_KIND_LABELS[kind],
+                "Tokens": format_compact_int(tokens),
+                "Est. cost": (
+                    f"${est_cost:,.2f}" if est_cost is not None else "—"
+                ),
+                "Share %": f"{share:.1f}%",
+            }
+        )
+    st.dataframe(rows, hide_index=True, width="stretch")

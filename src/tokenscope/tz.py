@@ -17,7 +17,7 @@ lives outside `analytics.py` (which is pure).
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -61,6 +61,7 @@ def detect_local_iana() -> str:
     if tz_env:
         try:
             ZoneInfo(tz_env)
+            _log.info("tz.detected source=env_var zone=%s", tz_env)
             return tz_env
         except _ZONE_INVALID as exc:
             # TZ set to a POSIX-style string ("EST5EDT,M3.2.0,M11.1.0"),
@@ -68,11 +69,16 @@ def detect_local_iana() -> str:
             # to the other probes rather than confidently returning
             # garbage. Anything that isn't a zone-resolution failure
             # (e.g. an OSError from a corrupt tzdata file) surfaces.
-            _log.debug("tz.probe.env_invalid value=%r reason=%s", tz_env, exc)
+            _log.warning(
+                "tz.probe.env_invalid value=%r reason=%s — falling back to OS",
+                tz_env,
+                exc,
+            )
 
     tz = datetime.now().astimezone().tzinfo
     key = getattr(tz, "key", None)
     if isinstance(key, str) and "/" in key:
+        _log.info("tz.detected source=os_astimezone zone=%s", key)
         return key
 
     localtime = Path("/etc/localtime")
@@ -82,7 +88,9 @@ def detect_local_iana() -> str:
         except OSError:
             target = ""
         if _LOCALTIME_MARKER in target:
-            return target.rsplit(_LOCALTIME_MARKER, 1)[1]
+            resolved = target.rsplit(_LOCALTIME_MARKER, 1)[1]
+            _log.info("tz.detected source=etc_localtime zone=%s", resolved)
+            return resolved
     _log.warning(
         "tz.fallback_to_utc all_probes_failed — ccusage will bucket by UTC"
     )
@@ -115,6 +123,88 @@ def utc_iso_to_local(iso: str, zone: str) -> str | None:
         # Any other exception (e.g. tzdata corruption) is a bug; surface it.
         return iso
     return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def utc_iso_to_local_clock(iso: str, zone: str) -> str | None:
+    """Return just the local-zone `HH:MM` clock time of a UTC ISO
+    timestamp. Used by the Live view's window banner where the date
+    is implicit (the active block always covers the current day's
+    5-hour slice) and only the start/end clock times need to render.
+    """
+    if not iso:
+        return None
+    try:
+        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    try:
+        local_dt = utc_dt.astimezone(ZoneInfo(zone))
+    except _ZONE_INVALID:
+        return iso
+    return local_dt.strftime("%H:%M")
+
+
+def utc_iso_to_local_naive_iso(iso: str, zone: str) -> str | None:
+    """Convert a UTC ISO timestamp to a *naive* local-clock ISO string
+    suitable for handing directly to Plotly's date-axis machinery
+    without re-interpretation.
+
+    The trailing ``Z`` (UTC marker) and any timezone offset are
+    stripped from the output. Plotly treats the resulting
+    ``YYYY-MM-DDTHH:MM:SS`` value as a naive datetime and renders
+    the axis tick at exactly that clock value — i.e. the user's
+    wall-clock time in their zone, no automatic re-conversion.
+
+    This is the one-line answer to "why does my chart axis say UTC
+    when the rest of the page says EDT": Plotly silently coerces
+    any ``...Z`` value into the browser's locale. Naive ISO sidesteps
+    the coercion entirely.
+
+    Returns ``None`` for empty / malformed input (defensive — a
+    corrupted block id shouldn't crash a Plotly figure build); the
+    raw input is returned if the zone itself can't be resolved.
+
+    Example:
+        utc_iso_to_local_naive_iso(
+            "2026-05-17T19:00:00.000Z", "America/New_York"
+        )
+            → "2026-05-17T15:00:00"   (3pm EDT, the wall-clock time)
+    """
+    if not iso:
+        return None
+    try:
+        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    try:
+        local_dt = utc_dt.astimezone(ZoneInfo(zone))
+    except _ZONE_INVALID:
+        return iso
+    return local_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def minutes_since_utc_iso(iso: str, now_utc: datetime | None = None) -> float | None:
+    """Minutes elapsed between a UTC ISO timestamp and ``now_utc``.
+
+    Used by the Live view's throughput-chart empty state to decide
+    whether enough wall-clock time has passed for the bucketing
+    chart to be informative — when the active block has just started,
+    a percent-stacked area of one bucket is a degenerate single
+    column and the chart layer renders a "block too new" caption
+    instead.
+
+    ``now_utc`` defaults to ``datetime.now(timezone.utc)`` so the
+    test surface can inject a frozen instant. Returns ``None`` for
+    empty / unparseable input.
+    """
+    if not iso:
+        return None
+    try:
+        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    reference = now_utc if now_utc is not None else datetime.now(timezone.utc)
+    return (reference - utc_dt).total_seconds() / 60.0
 
 
 def utc_iso_to_local_date(iso: str, zone: str) -> str | None:

@@ -12,6 +12,7 @@ figures.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Iterable, Protocol
@@ -58,6 +59,15 @@ def rolling_cost_average(
     return out
 
 
+def _cache_hit_ratio_from_counts(
+    input_tokens: int, cache_create: int, cache_read: int
+) -> float:
+    denom = input_tokens + cache_create + cache_read
+    if denom == 0:
+        return 0.0
+    return cache_read / denom
+
+
 def cache_hit_ratio(entry: _HasCacheTokens) -> float:
     """Fraction of "cache-eligible" tokens that were served by a cache read.
 
@@ -67,14 +77,28 @@ def cache_hit_ratio(entry: _HasCacheTokens) -> float:
 
     Returns 0.0 when the denominator is zero (no input/cache activity).
     """
-    denom = (
-        entry.input_tokens
-        + entry.cache_creation_tokens
-        + entry.cache_read_tokens
+    return _cache_hit_ratio_from_counts(
+        entry.input_tokens,
+        entry.cache_creation_tokens,
+        entry.cache_read_tokens,
     )
-    if denom == 0:
-        return 0.0
-    return entry.cache_read_tokens / denom
+
+
+def block_cache_hit_ratio(block: BlockEntry) -> float:
+    """Cache hit ratio for an active billing block.
+
+    `BlockTokenCounts` uses the JSON field names ccusage emits for
+    blocks (`cacheCreationInputTokens` / `cacheReadInputTokens`),
+    which differ from `DailyEntry`'s (`cacheCreationTokens` /
+    `cacheReadTokens`). Same formula — different attribute names —
+    so this routes the three block counts through the shared
+    `_cache_hit_ratio_from_counts` helper rather than duplicating
+    the formula.
+    """
+    c = block.token_counts
+    return _cache_hit_ratio_from_counts(
+        c.input_tokens, c.cache_creation_input_tokens, c.cache_read_input_tokens
+    )
 
 
 def top_n_by_cost(entries: Iterable, n: int) -> list:
@@ -363,13 +387,27 @@ def model_breakdown(daily_report: DailyReport) -> list[dict]:
 
     Each row keeps the full model name (no family collapse), so a user
     running both `claude-opus-4-6` and `claude-opus-4-7` sees each
-    version separately — the per-family rollup happens in the Sankey
-    and the donut, not here.
+    version separately.
 
-    Columns: ``model``, ``family``, ``tokens``, ``cost``, ``per_mtok``,
-    ``share`` (cost fraction of the window). Returned descending by cost
-    so the table reads "where the money goes" top-down. Empty input
-    yields an empty list.
+    Columns:
+
+      * ``model`` — full model id
+      * ``family`` — `model_family(model)` result
+      * ``tokens`` — total tokens (sum across kinds)
+      * ``input``, ``output``, ``cache_create``, ``cache_read`` —
+        per-kind token counts (drive the per-model token-kind chart)
+      * ``cost`` — total cost USD
+      * ``per_mtok`` — blended `$ / 1M tokens` (cost ÷ tokens × 1M)
+      * ``share`` — cost fraction of the window total (0–1)
+      * ``cache_hit_ratio`` — `cache_read / (input + cache_create +
+        cache_read)` for this model
+      * ``last_used`` — the latest `YYYY-MM-DD` the model appeared
+        in the window, or `None` if never seen (defensive — every row
+        is built from at least one daily entry, so this is always set
+        in practice).
+
+    Sorted descending by cost so the table reads "where the money
+    goes" top-down. Empty input yields an empty list.
     """
     totals: dict[str, dict] = {}
     window_total_cost = 0.0
@@ -380,10 +418,19 @@ def model_breakdown(daily_report: DailyReport) -> list[dict]:
                 {
                     "model": b.model_name,
                     "family": model_family(b.model_name),
+                    "input": 0,
+                    "output": 0,
+                    "cache_create": 0,
+                    "cache_read": 0,
                     "tokens": 0,
                     "cost": 0.0,
+                    "last_used": None,
                 },
             )
+            row["input"] += b.input_tokens
+            row["output"] += b.output_tokens
+            row["cache_create"] += b.cache_creation_tokens
+            row["cache_read"] += b.cache_read_tokens
             row["tokens"] += (
                 b.input_tokens
                 + b.output_tokens
@@ -392,6 +439,8 @@ def model_breakdown(daily_report: DailyReport) -> list[dict]:
             )
             row["cost"] += b.cost
             window_total_cost += b.cost
+            if row["last_used"] is None or entry.date > row["last_used"]:
+                row["last_used"] = entry.date
 
     rows = list(totals.values())
     for row in rows:
@@ -401,135 +450,35 @@ def model_breakdown(daily_report: DailyReport) -> list[dict]:
         row["share"] = (
             row["cost"] / window_total_cost if window_total_cost else 0.0
         )
+        row["cache_hit_ratio"] = _cache_hit_ratio_from_counts(
+            row["input"], row["cache_create"], row["cache_read"]
+        )
     rows.sort(key=lambda r: r["cost"], reverse=True)
     return rows
 
 
-def token_flow_sankey_data(
-    daily_report: DailyReport,
-    *,
-    value_mode: str = "tokens",
-    top_n: int | None = None,
-) -> dict:
-    """Build Sankey-compatible nodes + links for the models view.
+def cost_concentration_summary(rows: list[dict]) -> dict | None:
+    """For the Models view's "Cost concentration" KPI card.
 
-    Flow: token-kind (input/output/cache_create/cache_read) → model family.
-    Family nodes carry the family's aggregate cost in their label so the
-    "→ cost" direction PLAN.md §3.2 calls for is conveyed without an
-    additional mis-scaled layer.
+    Identifies the top-cost model in the window and reports what
+    share of total spend it represents. Useful for the "is one
+    model dominating?" question without needing the user to read
+    the share column.
 
-    Parameters:
-        value_mode: ``"tokens"`` (default) makes link widths proportional
-            to token counts. ``"cost"`` proportionally attributes each
-            family's total cost across its kinds, so total link width
-            equals total window cost. The cost-mode value is necessarily
-            an approximation — ccusage doesn't break out per-kind
-            pricing, so we apportion by token share. The header label
-            on each family stays in dollars either way.
-        top_n: when given, keep the N highest-cost families and collapse
-            the rest into a single "Others" node. Useful when 8+
-            families turn the Sankey into spaghetti.
+    Takes the already-built `model_breakdown` rows so the helper
+    stays decoupled from `DailyReport` shape — same input shape
+    the Models view already has on hand.
 
-    Each link's ``customdata`` carries two extra fields for the Plotly
-    hovertemplate: the absolute token count and the family's aggregate
-    cost — so the user sees both axes regardless of which mode they're in.
-
-    Returns a dict shaped for ``go.Sankey``:
-        {labels, sources, targets, values, customdata, value_mode}
-
-    Empty report → all-empty lists (caller short-circuits).
+    Returns ``{model, family, share}`` for the top row, or
+    ``None`` when the row list is empty.
     """
-    if value_mode not in ("tokens", "cost"):
-        raise ValueError(f"value_mode must be 'tokens' or 'cost', got {value_mode!r}")
-
-    KINDS = ("input", "output", "cache_create", "cache_read")
-    tokens_by_kind_family: dict[tuple[str, str], int] = {}
-    cost_by_family: dict[str, float] = {}
-    tokens_by_family: dict[str, int] = {}
-
-    for entry in daily_report.daily:
-        for b in entry.model_breakdowns:
-            family = model_family(b.model_name)
-            cost_by_family[family] = cost_by_family.get(family, 0.0) + b.cost
-            counts = {
-                "input": b.input_tokens,
-                "output": b.output_tokens,
-                "cache_create": b.cache_creation_tokens,
-                "cache_read": b.cache_read_tokens,
-            }
-            family_total = 0
-            for kind, n in counts.items():
-                key = (kind, family)
-                tokens_by_kind_family[key] = tokens_by_kind_family.get(key, 0) + n
-                family_total += n
-            tokens_by_family[family] = tokens_by_family.get(family, 0) + family_total
-
-    families = sorted(cost_by_family.keys())
-    if not families:
-        return {
-            "labels": [],
-            "sources": [],
-            "targets": [],
-            "values": [],
-            "customdata": [],
-            "value_mode": value_mode,
-        }
-
-    # Top-N collapse: keep the N highest-cost families, fold the rest
-    # into an "Others" bucket. Costs and tokens accumulate into the bucket
-    # so node labels and link values stay correct.
-    if top_n is not None and 0 < top_n < len(families):
-        ranked = sorted(families, key=lambda f: cost_by_family[f], reverse=True)
-        kept = set(ranked[:top_n])
-        OTHERS = "Others"
-        cost_by_family[OTHERS] = sum(
-            cost_by_family[f] for f in families if f not in kept
-        )
-        tokens_by_family[OTHERS] = sum(
-            tokens_by_family[f] for f in families if f not in kept
-        )
-        for (kind, fam), v in list(tokens_by_kind_family.items()):
-            if fam not in kept:
-                key = (kind, OTHERS)
-                tokens_by_kind_family[key] = tokens_by_kind_family.get(key, 0) + v
-                del tokens_by_kind_family[(kind, fam)]
-        for f in list(families):
-            if f not in kept:
-                del cost_by_family[f]
-                del tokens_by_family[f]
-        families = sorted(cost_by_family.keys())
-
-    labels = list(KINDS) + [
-        f"{fam} (${cost_by_family[fam]:,.2f})" for fam in families
-    ]
-    family_idx = {fam: len(KINDS) + i for i, fam in enumerate(families)}
-
-    sources: list[int] = []
-    targets: list[int] = []
-    values: list[float] = []
-    customdata: list[tuple[int, float]] = []
-    for kind_idx, kind in enumerate(KINDS):
-        for fam in families:
-            token_count = tokens_by_kind_family.get((kind, fam), 0)
-            if token_count <= 0:
-                continue
-            if value_mode == "cost":
-                # Proportionally attribute the family's cost across kinds.
-                fam_tokens = tokens_by_family[fam] or 1
-                width = cost_by_family[fam] * token_count / fam_tokens
-            else:
-                width = float(token_count)
-            sources.append(kind_idx)
-            targets.append(family_idx[fam])
-            values.append(width)
-            customdata.append((token_count, cost_by_family[fam]))
+    if not rows:
+        return None
+    top = max(rows, key=lambda r: r["cost"])
     return {
-        "labels": labels,
-        "sources": sources,
-        "targets": targets,
-        "values": values,
-        "customdata": customdata,
-        "value_mode": value_mode,
+        "model": top["model"],
+        "family": top["family"],
+        "share": top["share"],
     }
 
 
@@ -590,6 +539,19 @@ def short_model_label(model_name: str) -> str:
     return model_name
 
 
+UNKNOWN_MODEL_FAMILY = "other"
+
+# Currently-known Anthropic model families, listed in capability order
+# (most-capable first). The dashboard reasons about families, not
+# individual model versions — `claude-opus-4-7`, `claude-opus-4-6`,
+# `claude-3-5-sonnet-20240620` all collapse to one of these names via
+# `model_family`. The list is the authoritative "known" registry the
+# chart layer consults when assigning brand-stable colors so each
+# family keeps the same hue across every render regardless of which
+# subset happens to be in the user's window.
+KNOWN_MODEL_FAMILIES: tuple[str, ...] = ("opus", "sonnet", "haiku")
+
+
 def model_family(model_name: str) -> str:
     """Strip date/version suffixes from a model identifier, keep the family.
 
@@ -599,21 +561,29 @@ def model_family(model_name: str) -> str:
         claude-sonnet-4-6          -> sonnet
         claude-3-5-sonnet-20240620 -> sonnet   (legacy ordering)
         gpt-4o                     -> gpt-4o   (no claude prefix, pass through)
-        ""                         -> ""
+        ""                         -> "other"  (defensive fallback)
+        None                       -> "other"
 
     The family is the first non-digit-prefixed segment after `claude-`.
     Anything that does not start with `claude-` is returned unchanged so the
     UI can still group/display it.
+
+    Defensive: an empty / None / falsy model_name returns `UNKNOWN_MODEL_FAMILY`
+    rather than the empty string. Plotly's JS layer stringifies empty
+    category names to the literal `"undefined"` in legends and axis
+    labels, which surfaced as a phantom legend entry on the Overview
+    Daily-cost chart. Returning a known sentinel here makes the
+    fallback explicit and chartable.
     """
     if not model_name:
-        return model_name
+        return UNKNOWN_MODEL_FAMILY
     parts = model_name.split("-")
     if parts[0] != "claude":
         return model_name
     for part in parts[1:]:
         if part and not part[0].isdigit():
             return part
-    return model_name
+    return model_name or UNKNOWN_MODEL_FAMILY
 
 
 def prior_window_query(query: Query) -> Query | None:
@@ -772,3 +742,444 @@ def cost_by_kind(daily_report: DailyReport) -> list[dict] | None:
             }
         )
     return rows
+
+
+def _block_token_counts_by_kind(block: BlockEntry) -> dict[str, int]:
+    """Block's cumulative token counts as a {kind: count} dict using
+    the same kind keys (`input` / `output` / `cache_create` /
+    `cache_read`) the rest of the analytics layer uses.
+
+    Single mapping point between `BlockTokenCounts`'s JSON field names
+    (`cacheCreationInputTokens` / `cacheReadInputTokens`) and the
+    kind keys downstream code expects. Adding a new caller doesn't
+    re-establish the mapping ad-hoc.
+    """
+    c = block.token_counts
+    return {
+        "input": c.input_tokens,
+        "output": c.output_tokens,
+        "cache_create": c.cache_creation_input_tokens,
+        "cache_read": c.cache_read_input_tokens,
+    }
+
+
+def block_cost_by_kind(block: BlockEntry) -> list[dict] | None:
+    """Estimate per-kind cost contribution for an active block.
+
+    The block aggregates tokens across every model used in the
+    window, but ccusage doesn't break out per-kind cost in the
+    block JSON. We use the first resolvable model in `block.models`
+    as the rate source to derive a per-kind RATIO, then rescale so
+    the per-kind costs sum exactly to `block.cost_usd`. The total
+    matches what ccusage reported; only the split between kinds is
+    an approximation.
+
+    Returns one row per kind with the same shape as
+    `cost_by_kind`: `{kind, tokens, est_cost, share}`. `share` is
+    the rate-weighted fraction (sums to 1.0 when any kind has
+    tokens), independent of the absolute total.
+
+    Returns `None` when no model in the block has resolvable rates
+    (offline + no cached LiteLLM pricing). The caller hides the
+    cost line on the KPI cards rather than rendering zeroes that
+    would look like "no cost" when in fact rates are unknown.
+    """
+    from tokenscope.pricing import KINDS, rates_for_model
+
+    if not block.models:
+        return None
+
+    rates = None
+    for model_name in block.models:
+        candidate = rates_for_model(model_name)
+        if candidate is not None:
+            rates = candidate
+            break
+    if rates is None:
+        return None
+
+    counts = _block_token_counts_by_kind(block)
+    notional: dict[str, float] = {
+        k: counts[k] * rates[k] / 1_000_000 for k in KINDS
+    }
+    notional_total = sum(notional.values())
+    actual_total = block.cost_usd
+
+    rows: list[dict] = []
+    for kind in KINDS:
+        if notional_total > 0:
+            share = notional[kind] / notional_total
+            est_cost = share * actual_total
+        else:
+            share = 0.0
+            est_cost = 0.0
+        rows.append(
+            {
+                "kind": kind,
+                "tokens": counts[kind],
+                "est_cost": est_cost,
+                "share": share,
+            }
+        )
+    return rows
+
+
+def cache_savings(daily_report: DailyReport) -> dict | None:
+    """Estimated dollar savings from caching `cache_read` tokens
+    vs. paying the full input rate for the same tokens.
+
+    For each model breakdown in the window:
+      saving = (rate.input - rate.cache_read) × cache_read_tokens / 1M
+
+    Summed across every model breakdown across every day. The
+    formula is the rate DELTA — not the full input rate — because
+    every cache_read token still costs something (the discounted
+    cache_read rate); the saving is the discount, not the full
+    rate. This was the framing problem that broke the previous
+    `$X saved` headline two iterations back.
+
+    Returns a dict ``{savings_usd, actual_cost_usd, uncached_cost_usd}``
+    where ``uncached_cost_usd = actual_cost_usd + savings_usd``
+    (the hypothetical "what would I have paid without caching"
+    figure the Cache view shows under the savings hero).
+
+    Returns ``None`` when ZERO model breakdowns resolved a rate
+    (offline + no LiteLLM cache). The caller hides the hero
+    rather than showing made-up zeros.
+    """
+    from tokenscope.pricing import rates_for_model
+
+    savings_total = 0.0
+    actual_total = 0.0
+    any_rates_available = False
+    for entry in daily_report.daily:
+        actual_total += entry.total_cost
+        for b in entry.model_breakdowns:
+            rates = rates_for_model(b.model_name)
+            if rates is None:
+                continue
+            any_rates_available = True
+            savings_total += (
+                (rates["input"] - rates["cache_read"])
+                * b.cache_read_tokens
+                / 1_000_000
+            )
+    if not any_rates_available:
+        return None
+    return {
+        "savings_usd": savings_total,
+        "actual_cost_usd": actual_total,
+        "uncached_cost_usd": actual_total + savings_total,
+    }
+
+
+def daily_cache_savings(daily_report: DailyReport) -> list[dict] | None:
+    """Per-day version of `cache_savings` — one row per date with
+    ``{date, savings_usd}``. Returns rows in ascending-date order.
+
+    Same formula as `cache_savings` applied per-entry. Returns
+    ``None`` when no rates resolve for any model (offline + no
+    cache) so the chart layer hides the panel.
+    """
+    from tokenscope.pricing import rates_for_model
+
+    any_rates_available = False
+    rows: list[dict] = []
+    for entry in sorted(daily_report.daily, key=lambda e: e.date):
+        day_savings = 0.0
+        for b in entry.model_breakdowns:
+            rates = rates_for_model(b.model_name)
+            if rates is None:
+                continue
+            any_rates_available = True
+            day_savings += (
+                (rates["input"] - rates["cache_read"])
+                * b.cache_read_tokens
+                / 1_000_000
+            )
+        rows.append({"date": entry.date, "savings_usd": day_savings})
+    if not any_rates_available:
+        return None
+    return rows
+
+
+def per_model_cache_performance(daily_report: DailyReport) -> list[dict] | None:
+    """One row per unique model in the window with cache stats.
+
+    Each row carries:
+      * ``model`` — full model name
+      * ``cache_hit_ratio`` — `cache_read / (input + cache_create + cache_read)`
+      * ``cache_read_tokens`` — total reads served from cache
+      * ``cache_create_tokens`` — total writes / fresh cache loads
+      * ``savings_usd`` — `(input_rate − cache_read_rate) ×
+        cache_read_tokens / 1M` using THIS model's rates
+      * ``has_rates`` — False when LiteLLM didn't resolve a rate
+        for the model (the savings figure is then 0.0 but the
+        cache hit ratio + token counts are still accurate)
+
+    Sorted by `cache_read_tokens` descending so the heaviest cache
+    user reads first.
+
+    Returns ``None`` when the report has no model breakdowns at all
+    (empty window) — the UI hides the per-model panel rather than
+    rendering an empty table.
+    """
+    from tokenscope.pricing import rates_for_model
+
+    aggregates: dict[str, dict[str, int | float]] = {}
+    for entry in daily_report.daily:
+        for b in entry.model_breakdowns:
+            agg = aggregates.setdefault(
+                b.model_name,
+                {
+                    "input": 0,
+                    "output": 0,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                },
+            )
+            agg["input"] += b.input_tokens
+            agg["output"] += b.output_tokens
+            agg["cache_create"] += b.cache_creation_tokens
+            agg["cache_read"] += b.cache_read_tokens
+    if not aggregates:
+        return None
+
+    rows: list[dict] = []
+    for model_name, agg in aggregates.items():
+        cache_eligible = agg["input"] + agg["cache_create"] + agg["cache_read"]
+        ratio = (agg["cache_read"] / cache_eligible) if cache_eligible else 0.0
+        rates = rates_for_model(model_name)
+        if rates is not None:
+            savings = (
+                (rates["input"] - rates["cache_read"])
+                * agg["cache_read"]
+                / 1_000_000
+            )
+            has_rates = True
+        else:
+            savings = 0.0
+            has_rates = False
+        rows.append(
+            {
+                "model": model_name,
+                "cache_hit_ratio": ratio,
+                "cache_read_tokens": agg["cache_read"],
+                "cache_create_tokens": agg["cache_create"],
+                "savings_usd": savings,
+                "has_rates": has_rates,
+            }
+        )
+    rows.sort(key=lambda r: r["cache_read_tokens"], reverse=True)
+    return rows
+
+
+def cache_data_range(daily_report: DailyReport) -> tuple[str, str] | None:
+    """First and last date with any cache activity (cache_create OR
+    cache_read tokens > 0) in the window.
+
+    Drives the "Cache data available from … onward" banner on the
+    Cache view: when the user's sidebar window starts before any
+    cache data was emitted (e.g. caching only kicked in part-way
+    through the 30-day window), the banner surfaces that gap
+    explicitly so the user isn't left wondering why the chart's
+    X-axis is narrower than the sidebar's date range.
+
+    Returns ``None`` when no entry in the window has cache
+    activity.
+    """
+    cache_dates = sorted(
+        e.date
+        for e in daily_report.daily
+        if e.cache_creation_tokens > 0 or e.cache_read_tokens > 0
+    )
+    if not cache_dates:
+        return None
+    return cache_dates[0], cache_dates[-1]
+
+
+# --- formatting helpers (presentation-layer, but pure / unit-testable) ---
+
+
+_COMPACT_THOUSAND = 1_000
+_COMPACT_MILLION = 1_000_000
+_COMPACT_BILLION = 1_000_000_000
+
+
+_BOLD_NUMBER_PATTERN = re.compile(
+    # Order matters: dollar amounts first (so "$1,020.73" is caught
+    # whole, not as "$1," + "020.73"); then signed-or-unsigned
+    # percentages.
+    r"(\$[\d,]+\.\d{2}|[+\-]?\d+(?:\.\d+)?%)"
+)
+
+
+def bold_numbers_in_insight(text: str) -> str:
+    """Wrap dollar amounts (``$X.XX``) and percentages (``+91%``,
+    ``99.0%``) in HTML ``<strong>`` tags. Used by the Overview
+    insight renderer to draw the eye to the key figures in the
+    narrative paragraph.
+
+    Pure text → text/HTML transform — kept here (not in the
+    Streamlit-coupled renderer) so the regex contract is
+    unit-testable without a Streamlit context.
+    """
+    return _BOLD_NUMBER_PATTERN.sub(r"<strong>\1</strong>", text)
+
+
+def collapse_composition_rows(
+    rows: list[dict], *, hide_threshold: float
+) -> list[dict]:
+    """Group cost-composition rows whose ``share`` is below
+    ``hide_threshold`` into a single ``"other"`` row.
+
+    The cost-composition table on Overview lists per-kind contribution
+    to window spend. With four kinds (input / output / cache_create /
+    cache_read), the share is often dominated by one (cache_read ≈ 99%)
+    and the smallest is sub-0.01% — a row that adds no signal and a
+    visible-share bar that clips to zero pixels.
+
+    ``hide_threshold`` is a *share fraction* (0–1), not a percentage.
+    Rows at or above the threshold pass through unchanged; rows below
+    are summed into a single "other" row whose tokens, est_cost, and
+    share are the aggregate of the collapsed rows. If no rows
+    qualify for collapse (or only one row is below threshold), the
+    input is returned unchanged.
+    """
+    if hide_threshold <= 0:
+        return list(rows)
+    below = [r for r in rows if r["share"] < hide_threshold]
+    above = [r for r in rows if r["share"] >= hide_threshold]
+    if len(below) < 2:
+        # Either nothing to collapse or exactly one small row, which
+        # we leave alone — collapsing one row into an "other" row
+        # would be a relabel, not a simplification.
+        return list(rows)
+    other = {
+        "kind": "other",
+        "tokens": sum(r["tokens"] for r in below),
+        "est_cost": sum(r["est_cost"] for r in below),
+        "share": sum(r["share"] for r in below),
+    }
+    return above + [other]
+
+
+def format_timezone_for_display(tz: str) -> str:
+    """Convert an IANA timezone identifier to display copy.
+
+    IANA identifiers use underscores in place of spaces (``America/New_York``)
+    so they're filename-safe and parser-friendly. The dashboard's UI
+    copy should show spaces — the underscore is implementation
+    detail leaking through. Pass-through for already-spaced inputs.
+    """
+    if not tz:
+        return ""
+    return tz.replace("_", " ")
+
+
+def format_compact_int(n: int) -> str:
+    """Compact integer formatting for token counts.
+
+    Below 1M: thousand-separated (``7,358``).
+    1M–1B:    one-decimal M (``4.9M``, ``15.7M``).
+    >=1B:     two-decimal B (``1.60B``).
+
+    No K abbreviation — at the magnitudes Claude usage hits (tens of
+    thousands at the low end), comma-grouping is cleaner than `7.4K`
+    on a dashboard, and the user explicitly called out `7,358 /
+    4.9M / 15.7M / 1.6B` as the desired reading.
+
+    Negative inputs format as ``-`` + the positive-side formatting,
+    which is uncommon in practice (token counts are non-negative)
+    but keeps the function total over the int domain.
+    """
+    if n < 0:
+        return "-" + format_compact_int(-n)
+    if n < _COMPACT_MILLION:
+        return f"{n:,}"
+    if n < _COMPACT_BILLION:
+        return f"{n / _COMPACT_MILLION:.1f}M"
+    return f"{n / _COMPACT_BILLION:.2f}B"
+
+
+# --- Overview-page summary primitives ------------------------------------
+
+
+def spike_day(
+    daily_report: DailyReport, threshold_multiplier: float
+) -> tuple[str, float] | None:
+    """Return ``(date, cost)`` for the day with cost above
+    ``threshold_multiplier * median``, or ``None`` if no day qualifies.
+
+    Used by the Overview cost chart to annotate a single notable
+    outlier in plain language ("Apr 18 · $447") rather than leaving
+    the user to wonder why one bar dwarfs the rest. The threshold is
+    operator-tunable via ``[overview] spike_threshold_median_multiplier``;
+    the conventional outlier heuristic is ``3.0``.
+
+    Returns the highest-cost qualifying day so a window with several
+    spikes still surfaces one annotation rather than crowding the
+    chart.
+    """
+    entries = daily_report.daily
+    if len(entries) < 3:
+        return None
+    costs = [e.total_cost for e in entries]
+    med = median(costs)
+    if med <= 0:
+        return None
+    threshold = threshold_multiplier * med
+    qualifying = [(e.date, e.total_cost) for e in entries if e.total_cost > threshold]
+    if not qualifying:
+        return None
+    return max(qualifying, key=lambda r: r[1])
+
+
+def overview_insight(
+    *,
+    window_total_cost: float,
+    window_days: int,
+    prior_total: float | None,
+    spike: tuple[str, float] | None,
+    cache_hit_ratio: float,
+) -> str:
+    """Build the Overview insight-summary paragraph from rollup numbers.
+
+    Returns plain prose (no Markdown). Sentences are stitched together
+    conditionally — missing inputs (no prior period to compare, no
+    spike to call out) just omit their sentence rather than producing
+    null-laden output.
+
+    The first sentence always exists ("You spent $X over the last N
+    days."); the prior-period comparison and spike sentences are
+    conditional; the cache-hit sentence appears when the ratio is
+    non-zero.
+    """
+    sentences: list[str] = []
+
+    headline = f"You spent ${window_total_cost:,.2f} over the last {window_days} days"
+    if prior_total and prior_total > 0:
+        change = (window_total_cost - prior_total) / prior_total
+        direction = "up" if change >= 0 else "down"
+        headline += (
+            f", {direction} {abs(change):.0%} vs the prior {window_days} days."
+        )
+    else:
+        headline += "."
+    sentences.append(headline)
+
+    if spike is not None and window_total_cost > 0:
+        spike_date, spike_cost = spike
+        share = spike_cost / window_total_cost
+        sentences.append(
+            f"{spike_date} alone accounted for ${spike_cost:,.2f} "
+            f"({share:.0%} of the window)."
+        )
+
+    if cache_hit_ratio > 0:
+        sentences.append(
+            f"Cache reads served {cache_hit_ratio:.1%} of input-side tokens."
+        )
+
+    return " ".join(sentences)
+

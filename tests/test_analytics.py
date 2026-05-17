@@ -17,20 +17,33 @@ from tokenscope.analytics import (
     active_block_burn,
     aggregate_cache_hit_ratio,
     available_models,
+    block_cache_hit_ratio,
+    block_cost_by_kind,
     blocks_for_session,
     blocks_on_day,
+    cache_data_range,
     cache_hit_ratio,
+    cache_savings,
     cost_by_kind,
+    cost_concentration_summary,
+    daily_cache_savings,
+    per_model_cache_performance,
     cost_share_by_model,
     daily_cache_hit_ratio,
     daily_cost_by_model,
     daily_token_mix,
+    bold_numbers_in_insight,
+    collapse_composition_rows,
     filter_daily_by_models,
     find_block,
     find_daily_entry,
     find_session,
+    format_compact_int,
+    format_timezone_for_display,
     friendly_project_label,
     last_day_cost,
+    overview_insight,
+    spike_day,
     model_breakdown,
     model_family,
     mtd_cost,
@@ -39,7 +52,6 @@ from tokenscope.analytics import (
     sessions_on_day,
     short_model_label,
     today_cost,
-    token_flow_sankey_data,
     top_n_by_cost,
     typical_burn_rate,
     window_cost,
@@ -362,12 +374,25 @@ def test_top_n_by_cost_empty_iterable() -> None:
         ("claude-sonnet-4-6", "sonnet"),
         ("claude-3-5-sonnet-20240620", "sonnet"),
         ("gpt-4o", "gpt-4o"),
-        ("", ""),
+        # Defensive: falsy model names map to `"other"`, never the
+        # empty string. Plotly's JS layer stringifies empty category
+        # names to `"undefined"` in legends, which previously surfaced
+        # as a phantom legend entry on the Overview Daily-cost chart.
+        ("", "other"),
         ("claude", "claude"),
     ],
 )
 def test_model_family(name: str, expected: str) -> None:
     assert model_family(name) == expected
+
+
+def test_model_family_falsy_inputs_return_fallback() -> None:
+    """Regression for the `undefined` legend bug: any falsy model
+    name returns the documented fallback sentinel, not the input."""
+    from tokenscope.analytics import UNKNOWN_MODEL_FAMILY
+
+    assert model_family("") == UNKNOWN_MODEL_FAMILY
+    assert UNKNOWN_MODEL_FAMILY == "other"
 
 
 # ---------- mtd_cost ----------
@@ -794,223 +819,6 @@ def test_daily_cache_hit_ratio_per_day_in_order() -> None:
 
 def test_daily_cache_hit_ratio_empty_report() -> None:
     assert daily_cache_hit_ratio(_report([])) == []
-
-
-# ---------- token_flow_sankey_data ----------
-
-
-def test_token_flow_sankey_data_two_families() -> None:
-    opus_b = ModelBreakdown(
-        modelName="claude-opus-4-7",
-        inputTokens=10,
-        outputTokens=20,
-        cacheCreationTokens=30,
-        cacheReadTokens=40,
-        cost=5.0,
-    )
-    haiku_b = ModelBreakdown(
-        modelName="claude-haiku-4-5",
-        inputTokens=1,
-        outputTokens=2,
-        cacheCreationTokens=3,
-        cacheReadTokens=4,
-        cost=0.5,
-    )
-    report = _report(
-        [
-            _entry(
-                "2026-05-16",
-                models=["claude-opus-4-7", "claude-haiku-4-5"],
-                model_breakdowns=[opus_b, haiku_b],
-                total_cost=5.5,
-            )
-        ]
-    )
-    data_ = token_flow_sankey_data(report)
-    # 4 kinds + 2 families = 6 labels.
-    assert len(data_["labels"]) == 6
-    assert data_["labels"][:4] == ["input", "output", "cache_create", "cache_read"]
-    # Family labels carry cost. Sorted alphabetically (haiku before opus).
-    assert data_["labels"][4].startswith("haiku ($")
-    assert "$0.50" in data_["labels"][4]
-    assert data_["labels"][5].startswith("opus ($")
-    assert "$5.00" in data_["labels"][5]
-    # 4 kinds × 2 families = 8 nonzero links.
-    assert len(data_["sources"]) == 8
-    assert all(s in range(4) for s in data_["sources"])
-    assert all(t in (4, 5) for t in data_["targets"])
-    # Total link value equals total tokens across both models.
-    expected_total_tokens = (
-        opus_b.input_tokens
-        + opus_b.output_tokens
-        + opus_b.cache_creation_tokens
-        + opus_b.cache_read_tokens
-        + haiku_b.input_tokens
-        + haiku_b.output_tokens
-        + haiku_b.cache_creation_tokens
-        + haiku_b.cache_read_tokens
-    )
-    assert sum(data_["values"]) == expected_total_tokens
-
-
-def test_token_flow_sankey_data_skips_zero_links() -> None:
-    """Kind→family links with zero tokens are omitted to keep the diagram clean."""
-    only_input = ModelBreakdown(
-        modelName="claude-opus-4-7",
-        inputTokens=100,
-        outputTokens=0,
-        cacheCreationTokens=0,
-        cacheReadTokens=0,
-        cost=1.0,
-    )
-    report = _report(
-        [
-            _entry(
-                "2026-05-16",
-                model_breakdowns=[only_input],
-                total_cost=1.0,
-                input_tokens=100,
-                output_tokens=0,
-                cache_creation_tokens=0,
-                cache_read_tokens=0,
-            )
-        ]
-    )
-    data_ = token_flow_sankey_data(report)
-    # Only the input→opus link survives.
-    assert data_["values"] == [100]
-    assert data_["sources"] == [0]  # "input" kind index
-    assert data_["targets"] == [4]  # first family node
-
-
-def test_token_flow_sankey_data_empty_report() -> None:
-    data_ = token_flow_sankey_data(_report([]))
-    assert data_["labels"] == []
-    assert data_["values"] == []
-    assert data_["customdata"] == []
-    assert data_["value_mode"] == "tokens"
-
-
-def test_token_flow_sankey_data_customdata_carries_tokens_and_cost() -> None:
-    """Every link carries (absolute_tokens, family_total_cost) for the hover."""
-    b = ModelBreakdown(
-        modelName="claude-opus-4-7",
-        inputTokens=10,
-        outputTokens=20,
-        cacheCreationTokens=30,
-        cacheReadTokens=40,
-        cost=5.0,
-    )
-    report = _report(
-        [
-            _entry(
-                "2026-05-16",
-                model_breakdowns=[b],
-                total_cost=5.0,
-            )
-        ]
-    )
-    data_ = token_flow_sankey_data(report)
-    # 4 links (one per kind), each carrying (tokens, family_cost).
-    assert len(data_["customdata"]) == 4
-    for tokens, cost in data_["customdata"]:
-        assert tokens > 0
-        assert cost == pytest.approx(5.0)
-
-
-def test_token_flow_sankey_data_cost_mode_widths_sum_to_window_cost() -> None:
-    """In cost mode, total link width equals total window cost (within rounding).
-    Proportional attribution conserves cost at family level."""
-    opus = ModelBreakdown(
-        modelName="claude-opus-4-7",
-        inputTokens=10,
-        outputTokens=20,
-        cacheCreationTokens=30,
-        cacheReadTokens=40,
-        cost=10.0,
-    )
-    haiku = ModelBreakdown(
-        modelName="claude-haiku-4-5",
-        inputTokens=1,
-        outputTokens=2,
-        cacheCreationTokens=3,
-        cacheReadTokens=4,
-        cost=1.0,
-    )
-    report = _report(
-        [
-            _entry(
-                "2026-05-16",
-                model_breakdowns=[opus, haiku],
-                models=["claude-opus-4-7", "claude-haiku-4-5"],
-                total_cost=11.0,
-            )
-        ]
-    )
-    data_ = token_flow_sankey_data(report, value_mode="cost")
-    assert sum(data_["values"]) == pytest.approx(11.0, rel=1e-6)
-    assert data_["value_mode"] == "cost"
-
-
-def test_token_flow_sankey_data_invalid_mode_raises() -> None:
-    with pytest.raises(ValueError):
-        token_flow_sankey_data(_report([]), value_mode="dollars")
-
-
-def test_token_flow_sankey_data_top_n_collapses_into_others() -> None:
-    """top_n=2 keeps the 2 most-expensive families and folds the rest into Others."""
-    families = [
-        ("claude-opus-4-7", 100.0),
-        ("claude-haiku-4-5", 50.0),
-        ("claude-sonnet-4-6", 10.0),
-        ("claude-3-5-sonnet", 5.0),
-    ]
-    breakdowns = [
-        ModelBreakdown(
-            modelName=name,
-            inputTokens=10,
-            outputTokens=10,
-            cacheCreationTokens=10,
-            cacheReadTokens=10,
-            cost=cost,
-        )
-        for name, cost in families
-    ]
-    report = _report(
-        [
-            _entry(
-                "2026-05-16",
-                model_breakdowns=breakdowns,
-                models=[n for n, _ in families],
-                total_cost=sum(c for _, c in families),
-            )
-        ]
-    )
-    data_ = token_flow_sankey_data(report, top_n=2)
-    # 4 kinds + (top 2 families + "Others") = 7 labels.
-    assert len(data_["labels"]) == 7
-    family_labels = data_["labels"][4:]
-    # Top 2 by cost: opus (100) and haiku (50). Then Others = sonnet+legacy = 15.
-    assert any(lbl.startswith("Others ($") for lbl in family_labels)
-    assert any(lbl.startswith("opus ($100.00)") for lbl in family_labels)
-    assert any(lbl.startswith("haiku ($50.00)") for lbl in family_labels)
-    others_label = next(lbl for lbl in family_labels if lbl.startswith("Others"))
-    assert "$15.00" in others_label
-
-
-def test_token_flow_sankey_data_top_n_larger_than_families_is_noop() -> None:
-    """top_n bigger than the actual count → no Others node, no collapse."""
-    b = ModelBreakdown(
-        modelName="claude-opus-4-7",
-        inputTokens=10,
-        outputTokens=10,
-        cacheCreationTokens=10,
-        cacheReadTokens=10,
-        cost=1.0,
-    )
-    report = _report([_entry("2026-05-16", model_breakdowns=[b], total_cost=1.0)])
-    data_ = token_flow_sankey_data(report, top_n=10)
-    assert not any("Others" in lbl for lbl in data_["labels"])
 
 
 # ---------- model_breakdown ----------
@@ -1490,3 +1298,874 @@ def test_blocks_for_session_excludes_gap_blocks() -> None:
     )
     matched = blocks_for_session(rep, sess)
     assert [b.id for b in matched] == ["b-real"]
+
+
+# ---------- format_compact_int ----------
+
+
+def test_format_compact_int_thousand_separators_under_1m() -> None:
+    """Sub-1M stays comma-grouped — `7,358` reads cleaner than `7.4K`
+    at dashboard magnitudes."""
+    assert format_compact_int(0) == "0"
+    assert format_compact_int(7) == "7"
+    assert format_compact_int(7_358) == "7,358"
+    assert format_compact_int(999_999) == "999,999"
+
+
+def test_format_compact_int_million_and_billion() -> None:
+    assert format_compact_int(1_000_000) == "1.0M"
+    assert format_compact_int(4_911_389) == "4.9M"
+    assert format_compact_int(15_697_744) == "15.7M"
+    assert format_compact_int(1_000_000_000) == "1.00B"
+    assert format_compact_int(1_602_177_029) == "1.60B"
+    assert format_compact_int(2_321_335_452) == "2.32B"
+
+
+def test_format_compact_int_negative_mirror() -> None:
+    """Defensive: negative input keeps the sign, formats the absolute
+    value through the same scale."""
+    assert format_compact_int(-7_358) == "-7,358"
+    assert format_compact_int(-4_911_389) == "-4.9M"
+
+
+# ---------- spike_day ----------
+
+
+def test_spike_day_returns_none_for_short_windows() -> None:
+    """A 2-day window has too few points to compute a meaningful
+    median + threshold. Bail out rather than annotate noise."""
+    rep = _report(
+        [
+            _entry("2026-05-15", total_cost=10.0),
+            _entry("2026-05-16", total_cost=50.0),
+        ]
+    )
+    assert spike_day(rep, threshold_multiplier=3.0) is None
+
+
+def test_spike_day_returns_none_when_no_outlier() -> None:
+    """All days within `3 × median` → no spike to annotate."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=10.0) for d in range(10, 20)]
+    )
+    assert spike_day(rep, threshold_multiplier=3.0) is None
+
+
+def test_spike_day_identifies_outlier_above_threshold() -> None:
+    """One day at ~10× median = clear spike. Returns (date, cost)."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=10.0) for d in range(10, 18)]
+        + [_entry("2026-04-18", total_cost=400.0)]
+    )
+    spike = spike_day(rep, threshold_multiplier=3.0)
+    assert spike == ("2026-04-18", 400.0)
+
+
+def test_spike_day_picks_highest_when_multiple_spikes_qualify() -> None:
+    """Multiple days exceed the threshold — return the most extreme
+    so the chart annotation calls out the loudest signal."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=10.0) for d in range(10, 18)]
+        + [
+            _entry("2026-04-18", total_cost=200.0),
+            _entry("2026-04-19", total_cost=400.0),
+        ]
+    )
+    spike = spike_day(rep, threshold_multiplier=3.0)
+    assert spike == ("2026-04-19", 400.0)
+
+
+def test_spike_day_threshold_multiplier_drives_sensitivity() -> None:
+    """Same data, two thresholds — looser threshold flags the day,
+    stricter one does not."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=10.0) for d in range(10, 18)]
+        + [_entry("2026-04-18", total_cost=25.0)]
+    )
+    # 25 vs median ~10 → 2.5×.  3× threshold leaves it alone.
+    assert spike_day(rep, threshold_multiplier=3.0) is None
+    # 2× threshold catches it.
+    assert spike_day(rep, threshold_multiplier=2.0) == ("2026-04-18", 25.0)
+
+
+def test_spike_day_zero_median_returns_none() -> None:
+    """If every day is zero, there's no meaningful threshold; bail."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=0.0) for d in range(10, 18)]
+    )
+    assert spike_day(rep, threshold_multiplier=3.0) is None
+
+
+# ---------- overview_insight ----------
+
+
+def test_overview_insight_headline_includes_total_and_window() -> None:
+    text = overview_insight(
+        window_total_cost=1_020.73,
+        window_days=30,
+        prior_total=None,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "1,020.73" in text
+    assert "30 days" in text
+
+
+def test_overview_insight_appends_prior_period_comparison() -> None:
+    """When prior_total is provided, the headline gains a `, up X% vs
+    prior N days` continuation."""
+    text = overview_insight(
+        window_total_cost=2000.0,
+        window_days=30,
+        prior_total=1000.0,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "up 100% vs the prior 30 days" in text
+
+
+def test_overview_insight_uses_down_for_decreased_cost() -> None:
+    text = overview_insight(
+        window_total_cost=500.0,
+        window_days=30,
+        prior_total=1000.0,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "down 50%" in text
+
+
+def test_overview_insight_omits_prior_when_unknown() -> None:
+    """No prior data → drop the comparison sentence rather than
+    surface a null. Headline stays single-sentence."""
+    text = overview_insight(
+        window_total_cost=500.0,
+        window_days=30,
+        prior_total=None,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "vs the prior" not in text
+
+
+def test_overview_insight_includes_spike_sentence_when_provided() -> None:
+    text = overview_insight(
+        window_total_cost=1_000.0,
+        window_days=30,
+        prior_total=None,
+        spike=("2026-04-18", 400.0),
+        cache_hit_ratio=0.0,
+    )
+    assert "2026-04-18" in text
+    assert "400.00" in text
+    # 400/1000 = 40% of the window.
+    assert "40%" in text
+
+
+def test_overview_insight_includes_cache_sentence_when_ratio_nonzero() -> None:
+    text = overview_insight(
+        window_total_cost=1_000.0,
+        window_days=30,
+        prior_total=None,
+        spike=None,
+        cache_hit_ratio=0.992,
+    )
+    assert "99.2%" in text
+    assert "Cache reads" in text
+
+
+def test_overview_insight_omits_cache_sentence_at_zero() -> None:
+    """Zero cache-hit ratio = nothing to say about caching. Drop
+    the sentence rather than surface "0.0%"."""
+    text = overview_insight(
+        window_total_cost=1_000.0,
+        window_days=30,
+        prior_total=None,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "Cache reads" not in text
+
+
+def test_overview_insight_spike_skipped_on_zero_window_cost() -> None:
+    """Defensive: window_total_cost=0 → spike share is undefined.
+    Drop the spike sentence rather than surface a nonsense ratio."""
+    text = overview_insight(
+        window_total_cost=0.0,
+        window_days=30,
+        prior_total=None,
+        spike=("2026-04-18", 0.0),
+        cache_hit_ratio=0.0,
+    )
+    assert "2026-04-18" not in text
+
+
+# ---------- bold_numbers_in_insight ----------
+
+
+def test_bold_numbers_in_insight_wraps_dollar_amounts() -> None:
+    """Dollar amounts (`$1,020.73`, `$303.06`) get wrapped in
+    `<strong>` so the eye lands on the figures."""
+    out = bold_numbers_in_insight("You spent $1,020.73 over 30 days.")
+    assert "<strong>$1,020.73</strong>" in out
+
+
+def test_bold_numbers_in_insight_wraps_unsigned_percentages() -> None:
+    out = bold_numbers_in_insight("Cache reads served 99.0% of input-side tokens.")
+    assert "<strong>99.0%</strong>" in out
+
+
+def test_bold_numbers_in_insight_wraps_signed_percentages() -> None:
+    """Signed percentages like `+91%` or `-15%` keep the sign inside
+    the `<strong>` wrapping."""
+    out = bold_numbers_in_insight("up 91% vs the prior 30 days")
+    assert "<strong>91%</strong>" in out
+    out_signed = bold_numbers_in_insight("+91% increase")
+    assert "<strong>+91%</strong>" in out_signed
+    out_neg = bold_numbers_in_insight("a -15% change")
+    assert "<strong>-15%</strong>" in out_neg
+
+
+def test_bold_numbers_in_insight_pass_through_when_no_match() -> None:
+    """No numbers → no transformation. Don't introduce stray tags."""
+    out = bold_numbers_in_insight("Cache reads dominate the window.")
+    assert out == "Cache reads dominate the window."
+    assert "<strong>" not in out
+
+
+def test_bold_numbers_in_insight_handles_full_paragraph() -> None:
+    """End-to-end: the actual insight paragraph from `overview_insight`
+    gets every figure bolded without breaking the prose."""
+    paragraph = overview_insight(
+        window_total_cost=1_020.73,
+        window_days=30,
+        prior_total=535.0,
+        spike=("2026-04-18", 303.06),
+        cache_hit_ratio=0.990,
+    )
+    out = bold_numbers_in_insight(paragraph)
+    for figure in ("$1,020.73", "$303.06", "99.0%"):
+        assert f"<strong>{figure}</strong>" in out, (
+            f"figure {figure!r} not bolded; output: {out!r}"
+        )
+
+
+# ---------- collapse_composition_rows ----------
+
+
+def _comp_row(kind: str, share: float, *, tokens: int = 1000, est_cost: float = 1.0) -> dict:
+    return {"kind": kind, "share": share, "tokens": tokens, "est_cost": est_cost}
+
+
+def test_collapse_composition_rows_groups_below_threshold() -> None:
+    """Rows with share below threshold group into a single 'other' row
+    whose tokens / cost / share are the sum of the collapsed rows."""
+    rows = [
+        _comp_row("cache_read", 0.99, tokens=1_000_000, est_cost=900.0),
+        _comp_row("input", 0.005, tokens=5_000, est_cost=4.0),
+        _comp_row("cache_create", 0.004, tokens=4_000, est_cost=3.0),
+        _comp_row("output", 0.001, tokens=1_000, est_cost=1.0),
+    ]
+    out = collapse_composition_rows(rows, hide_threshold=0.01)
+    assert {r["kind"] for r in out} == {"cache_read", "other"}
+    other = next(r for r in out if r["kind"] == "other")
+    assert other["tokens"] == 5_000 + 4_000 + 1_000
+    assert other["est_cost"] == pytest.approx(4.0 + 3.0 + 1.0)
+    assert other["share"] == pytest.approx(0.005 + 0.004 + 0.001)
+
+
+def test_collapse_composition_rows_no_op_when_nothing_below_threshold() -> None:
+    """All rows ≥ threshold → input passes through unchanged
+    (different list object, same content)."""
+    rows = [
+        _comp_row("a", 0.40),
+        _comp_row("b", 0.30),
+        _comp_row("c", 0.20),
+        _comp_row("d", 0.10),
+    ]
+    out = collapse_composition_rows(rows, hide_threshold=0.01)
+    assert out == rows
+    assert out is not rows  # defensive copy
+
+
+def test_collapse_composition_rows_keeps_single_small_row() -> None:
+    """If only ONE row is below threshold, collapsing it into 'other'
+    would be a relabel, not a simplification. Leave it alone."""
+    rows = [
+        _comp_row("big", 0.99),
+        _comp_row("small", 0.01),
+    ]
+    out = collapse_composition_rows(rows, hide_threshold=0.05)
+    assert out == rows
+
+
+def test_collapse_composition_rows_zero_threshold_passes_through() -> None:
+    rows = [_comp_row("a", 0.5), _comp_row("b", 0.5)]
+    assert collapse_composition_rows(rows, hide_threshold=0.0) == rows
+
+
+# ---------- format_timezone_for_display ----------
+
+
+def test_format_timezone_for_display_replaces_underscores() -> None:
+    """IANA identifiers use underscores; UI copy should show spaces."""
+    assert format_timezone_for_display("America/New_York") == "America/New York"
+    assert format_timezone_for_display("Pacific/Pago_Pago") == "Pacific/Pago Pago"
+
+
+def test_format_timezone_for_display_passes_through_when_already_spaced() -> None:
+    assert format_timezone_for_display("UTC") == "UTC"
+    assert format_timezone_for_display("America/Chicago") == "America/Chicago"
+
+
+def test_format_timezone_for_display_empty_returns_empty() -> None:
+    """Defensive: missing tz string doesn't crash; returns empty."""
+    assert format_timezone_for_display("") == ""
+
+
+# ---------- KNOWN_MODEL_FAMILIES ----------
+
+
+def test_known_model_families_lists_current_anthropic_families() -> None:
+    """The dashboard reasons about families, not versions. The
+    registry of currently-known Anthropic families is the source the
+    chart layer consults for canonical brand colors — opus always
+    indigo, sonnet always cyan, haiku always emerald."""
+    from tokenscope.analytics import KNOWN_MODEL_FAMILIES
+
+    assert KNOWN_MODEL_FAMILIES == ("opus", "sonnet", "haiku")
+
+
+# ---------- block_cache_hit_ratio ----------
+
+
+def _block_with_counts(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_create: int,
+    cache_read: int,
+    cost_usd: float = 1.0,
+    models: list[str] | None = None,
+) -> BlockEntry:
+    """Active-block fixture with caller-controlled token counts.
+
+    Distinct from the module-level `_block` helper (which hard-codes
+    10/20/30/40 counts) — the cache_hit / cost_by_kind tests need to
+    vary the counts to drive the formula across cases."""
+    return BlockEntry(
+        id="2026-05-16T13:00:00.000Z",
+        startTime="2026-05-16T13:00:00.000Z",
+        endTime="2026-05-16T18:00:00.000Z",
+        actualEndTime=None,
+        isActive=True,
+        isGap=False,
+        entries=1,
+        tokenCounts=BlockTokenCounts(
+            inputTokens=input_tokens,
+            outputTokens=output_tokens,
+            cacheCreationInputTokens=cache_create,
+            cacheReadInputTokens=cache_read,
+        ),
+        totalTokens=input_tokens + output_tokens + cache_create + cache_read,
+        costUSD=cost_usd,
+        models=models or ["claude-opus-4-7"],
+        burnRate=BurnRate(
+            tokensPerMinute=1.0,
+            tokensPerMinuteForIndicator=1.0,
+            costPerHour=8.0,
+        ),
+        projection=None,
+    )
+
+
+def test_block_cache_hit_ratio_matches_formula() -> None:
+    """Block cache hit ratio uses the SAME formula as the daily one
+    (`cache_read / (input + cache_create + cache_read)`) but reads
+    from `BlockTokenCounts`'s JSON-aliased field names. Output
+    tokens are excluded from the denominator — they're produced by
+    the model, not part of the cache decision."""
+    block = _block_with_counts(
+        input_tokens=100, output_tokens=999_999,
+        cache_create=200, cache_read=700,
+    )
+    expected = 700 / (100 + 200 + 700)
+    assert block_cache_hit_ratio(block) == pytest.approx(expected)
+
+
+def test_block_cache_hit_ratio_zero_when_no_cache_eligible_tokens() -> None:
+    """A block with only output tokens has no cache-eligible
+    denominator — return 0.0, not a ZeroDivisionError."""
+    block = _block_with_counts(
+        input_tokens=0, output_tokens=500,
+        cache_create=0, cache_read=0,
+    )
+    assert block_cache_hit_ratio(block) == 0.0
+
+
+def test_block_cache_hit_ratio_one_when_all_reads_from_cache() -> None:
+    """Pure cache_read case — the ratio is 1.0 (every cache-eligible
+    token was served from cache, no fresh input or cache creation)."""
+    block = _block_with_counts(
+        input_tokens=0, output_tokens=0,
+        cache_create=0, cache_read=5_000_000,
+    )
+    assert block_cache_hit_ratio(block) == pytest.approx(1.0)
+
+
+# ---------- block_cost_by_kind ----------
+
+
+def test_block_cost_by_kind_rescales_to_actual_block_cost(_stub_rates) -> None:
+    """The block reports an aggregate `cost_usd`; ccusage doesn't
+    break out per-kind cost in block JSON. `block_cost_by_kind`
+    derives the per-kind RATIO from LiteLLM rates, then rescales so
+    the sum matches `block.cost_usd` exactly. The user can trust the
+    totals to add up; only the kind-split is approximate."""
+    block = _block_with_counts(
+        input_tokens=1_000_000, output_tokens=1_000_000,
+        cache_create=1_000_000, cache_read=1_000_000,
+        cost_usd=10.0,
+    )
+    rows = block_cost_by_kind(block)
+    assert rows is not None
+    kinds = [r["kind"] for r in rows]
+    assert kinds == ["input", "output", "cache_create", "cache_read"]
+    total = sum(r["est_cost"] for r in rows)
+    assert total == pytest.approx(block.cost_usd)
+    # Rates: input=5, output=25, cache_create=6.25, cache_read=0.5.
+    # Notional cost ratio reflects rate ratio when token counts are equal.
+    notional = (5.0, 25.0, 6.25, 0.5)
+    notional_total = sum(notional)
+    for row, expected_share_notional in zip(rows, notional):
+        assert row["share"] == pytest.approx(expected_share_notional / notional_total)
+
+
+def test_block_cost_by_kind_returns_none_when_no_rates_resolve(monkeypatch) -> None:
+    """Offline + no cache → no model in `block.models` has rates.
+    The helper signals "hide the cost line" by returning None, NOT
+    a row of zero est_costs that would look like 'this kind costs
+    nothing' when in fact rates are unknown."""
+    monkeypatch.setattr("tokenscope.pricing.rates_for_model", lambda _name: None)
+    block = _block_with_counts(
+        input_tokens=100, output_tokens=200,
+        cache_create=300, cache_read=400,
+    )
+    assert block_cost_by_kind(block) is None
+
+
+def test_block_cost_by_kind_falls_back_to_later_models_for_rates(_stub_rates) -> None:
+    """When the first model in `block.models` has no rates, the
+    helper walks the list to find one that does. Defensive — the
+    block's first model might be an experimental id not yet in
+    LiteLLM's table."""
+    block = _block_with_counts(
+        input_tokens=1_000_000, output_tokens=1_000_000,
+        cache_create=1_000_000, cache_read=1_000_000,
+        cost_usd=10.0,
+        models=["unknown-experimental-id", "claude-opus-4-7"],
+    )
+    rows = block_cost_by_kind(block)
+    assert rows is not None
+    assert sum(r["est_cost"] for r in rows) == pytest.approx(block.cost_usd)
+
+
+def test_block_cost_by_kind_returns_none_when_block_has_no_models(_stub_rates) -> None:
+    """A block with `models=[]` (defensive — ccusage should always
+    emit at least one) has no rate source. The helper returns None
+    so the UI hides the cost line rather than pretending a value."""
+    block = BlockEntry(
+        id="2026-05-16T13:00:00.000Z",
+        startTime="2026-05-16T13:00:00.000Z",
+        endTime="2026-05-16T18:00:00.000Z",
+        actualEndTime=None,
+        isActive=True,
+        isGap=False,
+        entries=1,
+        tokenCounts=BlockTokenCounts(
+            inputTokens=100, outputTokens=200,
+            cacheCreationInputTokens=300, cacheReadInputTokens=400,
+        ),
+        totalTokens=1000,
+        costUSD=1.0,
+        models=[],
+        burnRate=None,
+        projection=None,
+    )
+    assert block_cost_by_kind(block) is None
+
+
+def test_block_cost_by_kind_no_tokens_returns_zero_shares(_stub_rates) -> None:
+    """A brand-new block with zero tokens of every kind: shares =
+    0.0 across the board, est_costs = 0.0 (the block has no cost
+    yet either). NOT None — None is the "rates unavailable" signal."""
+    block = _block_with_counts(
+        input_tokens=0, output_tokens=0,
+        cache_create=0, cache_read=0,
+        cost_usd=0.0,
+    )
+    rows = block_cost_by_kind(block)
+    assert rows is not None
+    assert [r["share"] for r in rows] == [0.0, 0.0, 0.0, 0.0]
+    assert [r["est_cost"] for r in rows] == [0.0, 0.0, 0.0, 0.0]
+
+
+# ---------- cache_savings ----------
+
+
+@pytest.fixture
+def _stub_cache_rates(monkeypatch):
+    """Stub LiteLLM with a fixed rate table so savings assertions
+    are deterministic against the (input − cache_read) delta."""
+    fake = {
+        "claude-opus-4-7": {
+            "input": 15.0, "output": 75.0,
+            "cache_create": 18.75, "cache_read": 1.50,
+        },
+        "claude-haiku-4-5-20251001": {
+            "input": 1.0, "output": 5.0,
+            "cache_create": 1.25, "cache_read": 0.10,
+        },
+    }
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model",
+        lambda name: fake.get(name),
+    )
+
+
+def test_cache_savings_calculation_matches_expected(_stub_cache_rates) -> None:
+    """Savings = (input_rate − cache_read_rate) × cache_read_tokens / 1M,
+    summed across breakdowns. For opus with the stub rates (15.0 − 1.5
+    = 13.5) and 1M cache_read tokens, that's $13.50. The headline
+    figure must reflect that delta — NOT the full input rate, which
+    was the framing problem the user pulled in slice 12."""
+    b = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=0, outputTokens=0,
+        cacheCreationTokens=0, cacheReadTokens=1_000_000,
+        cost=2.0,
+    )
+    report = _report([
+        _entry(
+            "2026-05-16",
+            model_breakdowns=[b],
+            cache_read_tokens=1_000_000,
+            cache_creation_tokens=0,
+            input_tokens=0,
+            output_tokens=0,
+            total_cost=2.0,
+        )
+    ])
+    result = cache_savings(report)
+    assert result is not None
+    assert result["savings_usd"] == pytest.approx(13.5)
+    assert result["actual_cost_usd"] == pytest.approx(2.0)
+    assert result["uncached_cost_usd"] == pytest.approx(15.5)
+
+
+def test_cache_savings_sums_across_models_and_days(_stub_cache_rates) -> None:
+    """Multiple models on multiple days → savings sum across every
+    breakdown."""
+    b_opus = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=0, outputTokens=0,
+        cacheCreationTokens=0, cacheReadTokens=1_000_000,
+        cost=1.0,
+    )
+    b_haiku = ModelBreakdown(
+        modelName="claude-haiku-4-5-20251001",
+        inputTokens=0, outputTokens=0,
+        cacheCreationTokens=0, cacheReadTokens=2_000_000,
+        cost=0.5,
+    )
+    report = _report([
+        _entry(
+            "2026-05-15",
+            model_breakdowns=[b_opus],
+            cache_read_tokens=1_000_000, cache_creation_tokens=0,
+            input_tokens=0, output_tokens=0, total_cost=1.0,
+        ),
+        _entry(
+            "2026-05-16",
+            model_breakdowns=[b_haiku],
+            cache_read_tokens=2_000_000, cache_creation_tokens=0,
+            input_tokens=0, output_tokens=0, total_cost=0.5,
+        ),
+    ])
+    result = cache_savings(report)
+    assert result is not None
+    # Opus: (15 − 1.5) × 1M / 1M = 13.5
+    # Haiku: (1 − 0.1) × 2M / 1M = 1.8
+    assert result["savings_usd"] == pytest.approx(13.5 + 1.8)
+    assert result["actual_cost_usd"] == pytest.approx(1.5)
+    assert result["uncached_cost_usd"] == pytest.approx(1.5 + 13.5 + 1.8)
+
+
+def test_cache_savings_returns_none_when_no_rates(monkeypatch) -> None:
+    """Offline + no cache → no rates resolve → return None so the
+    UI hides the hero rather than rendering made-up zeros."""
+    monkeypatch.setattr("tokenscope.pricing.rates_for_model", lambda _name: None)
+    report = _report([
+        _entry("2026-05-16", cache_read_tokens=1_000_000)
+    ])
+    assert cache_savings(report) is None
+
+
+def test_cache_savings_empty_report_returns_none(_stub_cache_rates) -> None:
+    """An empty window has no breakdowns to walk — no rates
+    resolve, return None. The empty-window banner on the Cache
+    view is the user-facing signal, not zero savings."""
+    assert cache_savings(_report([])) is None
+
+
+# ---------- daily_cache_savings ----------
+
+
+def test_daily_cache_savings_per_day_rows(_stub_cache_rates) -> None:
+    """One row per date in ascending order; each row's `savings_usd`
+    matches the delta-rate formula applied to THAT day only."""
+    b = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=0, outputTokens=0,
+        cacheCreationTokens=0, cacheReadTokens=1_000_000,
+        cost=1.0,
+    )
+    report = _report([
+        _entry(
+            "2026-05-15",
+            model_breakdowns=[b],
+            cache_read_tokens=1_000_000, cache_creation_tokens=0,
+            input_tokens=0, output_tokens=0, total_cost=1.0,
+        ),
+        _entry(
+            "2026-05-16",
+            model_breakdowns=[b],
+            cache_read_tokens=1_000_000, cache_creation_tokens=0,
+            input_tokens=0, output_tokens=0, total_cost=1.0,
+        ),
+    ])
+    rows = daily_cache_savings(report)
+    assert rows is not None
+    dates = [r["date"] for r in rows]
+    assert dates == ["2026-05-15", "2026-05-16"]
+    for row in rows:
+        assert row["savings_usd"] == pytest.approx(13.5)
+
+
+def test_daily_cache_savings_returns_none_when_no_rates(monkeypatch) -> None:
+    monkeypatch.setattr("tokenscope.pricing.rates_for_model", lambda _name: None)
+    report = _report([_entry("2026-05-16", cache_read_tokens=1_000_000)])
+    assert daily_cache_savings(report) is None
+
+
+# ---------- per_model_cache_performance ----------
+
+
+def test_per_model_cache_performance_aggregates_per_model(_stub_cache_rates) -> None:
+    """Tokens summed per `model_name` across days; cache_hit_ratio
+    + savings computed against the aggregated totals.
+
+    Locks the `test_cache_handles_single_model_gracefully` contract
+    indirectly: the helper still returns the single-model row, but
+    the UI layer suppresses the section based on `len(rows) < 2`."""
+    b_a = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=100, outputTokens=0,
+        cacheCreationTokens=200, cacheReadTokens=1_000_000,
+        cost=1.0,
+    )
+    b_b = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=400, outputTokens=0,
+        cacheCreationTokens=300, cacheReadTokens=0,
+        cost=0.5,
+    )
+    report = _report([
+        _entry(
+            "2026-05-15",
+            model_breakdowns=[b_a],
+            cache_read_tokens=1_000_000, cache_creation_tokens=200,
+            input_tokens=100, output_tokens=0, total_cost=1.0,
+        ),
+        _entry(
+            "2026-05-16",
+            model_breakdowns=[b_b],
+            cache_read_tokens=0, cache_creation_tokens=300,
+            input_tokens=400, output_tokens=0, total_cost=0.5,
+        ),
+    ])
+    rows = per_model_cache_performance(report)
+    assert rows is not None
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["model"] == "claude-opus-4-7"
+    assert row["cache_read_tokens"] == 1_000_000
+    assert row["cache_create_tokens"] == 500
+    cache_eligible = 100 + 400 + 500 + 1_000_000
+    assert row["cache_hit_ratio"] == pytest.approx(1_000_000 / cache_eligible)
+    assert row["savings_usd"] == pytest.approx(13.5)
+    assert row["has_rates"] is True
+
+
+def test_per_model_cache_performance_flags_missing_rates(_stub_cache_rates) -> None:
+    """A model whose name doesn't resolve to a rate keeps the
+    counts + ratio but reports `has_rates=False` and savings=0.0
+    — the UI renders the savings cell as `—` for that row."""
+    b = ModelBreakdown(
+        modelName="unknown-experimental-model",
+        inputTokens=100, outputTokens=0,
+        cacheCreationTokens=0, cacheReadTokens=1_000_000,
+        cost=1.0,
+    )
+    report = _report([
+        _entry(
+            "2026-05-15",
+            model_breakdowns=[b],
+            cache_read_tokens=1_000_000, cache_creation_tokens=0,
+            input_tokens=100, output_tokens=0, total_cost=1.0,
+        )
+    ])
+    rows = per_model_cache_performance(report)
+    assert rows is not None
+    assert rows[0]["has_rates"] is False
+    assert rows[0]["savings_usd"] == 0.0
+    # The ratio still computes regardless of pricing availability.
+    assert rows[0]["cache_hit_ratio"] == pytest.approx(
+        1_000_000 / (100 + 1_000_000)
+    )
+
+
+def test_per_model_cache_performance_returns_none_for_empty_report() -> None:
+    """No model breakdowns at all → return None so the UI hides
+    the per-model panel rather than rendering an empty table."""
+    assert per_model_cache_performance(_report([])) is None
+
+
+# ---------- cache_data_range ----------
+
+
+def test_cache_data_range_returns_first_and_last_cache_date() -> None:
+    """Days with zero cache_create AND zero cache_read are skipped;
+    the first/last with any cache activity bound the range."""
+    report = _report([
+        _entry(
+            "2026-05-15",
+            cache_read_tokens=0, cache_creation_tokens=0,
+            input_tokens=100, output_tokens=200,
+        ),
+        _entry(
+            "2026-05-16",
+            cache_read_tokens=1_000, cache_creation_tokens=500,
+        ),
+        _entry(
+            "2026-05-17",
+            cache_read_tokens=0, cache_creation_tokens=300,
+        ),
+    ])
+    assert cache_data_range(report) == ("2026-05-16", "2026-05-17")
+
+
+def test_cache_data_range_returns_none_when_no_cache_activity() -> None:
+    """Every entry has zero cache_create AND zero cache_read →
+    return None, the banner is suppressed."""
+    report = _report([
+        _entry(
+            "2026-05-15",
+            cache_read_tokens=0, cache_creation_tokens=0,
+            input_tokens=100, output_tokens=200,
+        )
+    ])
+    assert cache_data_range(report) is None
+
+
+# ---------- model_breakdown — extra columns (cache_hit + last_used) ------
+
+
+def test_model_breakdown_carries_cache_hit_ratio_per_model() -> None:
+    """The breakdown row now carries `cache_hit_ratio` per model
+    so the Models view's table can render the column without a
+    second analytics pass. Same formula as `cache_hit_ratio`,
+    applied to this model's aggregated counts."""
+    bd = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=100, outputTokens=200,
+        cacheCreationTokens=300, cacheReadTokens=700,
+        cost=5.0,
+    )
+    report = _report([
+        _entry(
+            "2026-05-15",
+            model_breakdowns=[bd],
+            input_tokens=100, output_tokens=200,
+            cache_creation_tokens=300, cache_read_tokens=700,
+            total_cost=5.0,
+        )
+    ])
+    rows = model_breakdown(report)
+    assert rows[0]["cache_hit_ratio"] == pytest.approx(
+        700 / (100 + 300 + 700)
+    )
+
+
+def test_model_breakdown_carries_last_used_date_per_model() -> None:
+    """`last_used` is the most-recent date the model appeared in
+    the window. The Models view shows it as a column so the user
+    spots stale model usage at a glance."""
+    bd = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=10, outputTokens=10,
+        cacheCreationTokens=10, cacheReadTokens=10,
+        cost=1.0,
+    )
+    report = _report([
+        _entry("2026-05-12", model_breakdowns=[bd], total_cost=1.0),
+        _entry("2026-05-15", model_breakdowns=[bd], total_cost=1.0),
+    ])
+    rows = model_breakdown(report)
+    assert rows[0]["last_used"] == "2026-05-15"
+
+
+def test_model_breakdown_per_kind_token_counts_sum_to_total() -> None:
+    """Per-kind columns (input / output / cache_create / cache_read)
+    drive the per-model token-kind chart. Their sum must equal the
+    aggregate `tokens` field — keeps the chart's row width
+    consistent with the table's Tokens column."""
+    bd = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=11, outputTokens=22,
+        cacheCreationTokens=33, cacheReadTokens=44,
+        cost=1.0,
+    )
+    report = _report(
+        [_entry("2026-05-15", model_breakdowns=[bd], total_cost=1.0)]
+    )
+    rows = model_breakdown(report)
+    row = rows[0]
+    assert row["input"] + row["output"] + row["cache_create"] + row[
+        "cache_read"
+    ] == row["tokens"]
+
+
+# ---------- cost_concentration_summary ----------
+
+
+def test_cost_concentration_summary_picks_top_cost_row() -> None:
+    """The KPI card's `Top model` carries the highest-cost row's
+    name + family + share."""
+    rows = [
+        {"model": "claude-opus-4-7", "family": "opus", "cost": 9.0, "share": 0.9},
+        {"model": "claude-haiku-4-5", "family": "haiku", "cost": 1.0, "share": 0.1},
+    ]
+    summary = cost_concentration_summary(rows)
+    assert summary == {
+        "model": "claude-opus-4-7",
+        "family": "opus",
+        "share": 0.9,
+    }
+
+
+def test_cost_concentration_summary_empty_rows_returns_none() -> None:
+    """Empty window → None so the KPI card renders its `—`
+    fallback instead of crashing on `max(...)`."""
+    assert cost_concentration_summary([]) is None
+

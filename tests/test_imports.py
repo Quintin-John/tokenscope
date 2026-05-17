@@ -145,7 +145,6 @@ def test_analytics_public_surface() -> None:
         "filter_daily_by_models",
         "available_models",
         "daily_cache_hit_ratio",
-        "token_flow_sankey_data",
         "window_cost",
         "last_day_cost",
         "model_breakdown",
@@ -156,6 +155,13 @@ def test_analytics_public_surface() -> None:
         "typical_burn_rate",
         "blocks_for_session",
         "cost_by_kind",
+        "block_cache_hit_ratio",
+        "block_cost_by_kind",
+        "cache_savings",
+        "daily_cache_savings",
+        "per_model_cache_performance",
+        "cache_data_range",
+        "cost_concentration_summary",
     ):
         assert callable(getattr(analytics, name)), name
 
@@ -203,18 +209,14 @@ def _resolved_hint(func, param_name: str):
 
 
 def test_overview_render_kpis_param_types_resolve() -> None:
-    """Audit Notable #8: _render_kpis was untyped on its first two
-    params. Slice 7 added DailyReport / BlocksReport | None. Lock that
-    in so a future refactor doesn't drop them."""
-    from tokenscope.models import BlocksReport, DailyReport
+    """`_render_kpis` carries `DailyReport` on its first param. The
+    Active-block burn KPI was retired (Live owns active-block data
+    now), so `BlocksReport` is no longer a parameter — this test was
+    updated to reflect the post-Overview-rework signature."""
+    from tokenscope.models import DailyReport
     from tokenscope.ui.overview import _render_kpis
 
     assert _resolved_hint(_render_kpis, "daily_report") is DailyReport
-    # BlocksReport | None resolves to a Union — confirm by checking
-    # both arms are present.
-    blocks_hint = _resolved_hint(_render_kpis, "blocks_report")
-    args = getattr(blocks_hint, "__args__", ())
-    assert BlocksReport in args and type(None) in args
 
 
 def test_overview_render_cost_composition_param_type_resolves() -> None:
@@ -224,11 +226,17 @@ def test_overview_render_cost_composition_param_type_resolves() -> None:
     assert _resolved_hint(_render_cost_composition, "daily_report") is DailyReport
 
 
-def test_models_view_render_composition_param_type_resolves() -> None:
+def test_models_view_render_token_kind_composition_param_type_resolves() -> None:
+    """The Models view's chart-card helper carries an annotated
+    `daily_report` so static type checks catch any future
+    misroute to a non-DailyReport caller."""
     from tokenscope.models import DailyReport
-    from tokenscope.ui.models import _render_composition
+    from tokenscope.ui.models import _render_token_kind_composition
 
-    assert _resolved_hint(_render_composition, "daily_report") is DailyReport
+    assert (
+        _resolved_hint(_render_token_kind_composition, "daily_report")
+        is DailyReport
+    )
 
 
 def test_day_view_row_entity_param_types_resolve() -> None:

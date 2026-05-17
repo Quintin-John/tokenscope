@@ -74,23 +74,42 @@ sidebar caption shows which zone got detected — if it says
 
 #### Diagnostic logging
 
-Add `-e TOKENSCOPE_LOG_LEVEL=DEBUG` to your `docker run` to surface
-internal events on `docker logs <container>`. Levels: `DEBUG`
-(verbose — every ccusage call, every render, every chart event),
-`INFO` (user actions and navigation), `WARNING` (default — silent
-fallbacks and degraded modes), `ERROR` (subprocess failures and
-unrecoverable errors). The Dockerfile sets `PYTHONUNBUFFERED=1` so
-lines flush immediately. Example:
+Logs are **on by default** at `INFO` and go to stdout, so
+`docker logs <container>` (and your terminal when running locally)
+surfaces every ccusage invocation, every chart build, the
+detected timezone at startup, and every user-driven navigation —
+no env-var flip required.
+
+Levels: `DEBUG` (adds verbose detail — full subprocess argv,
+per-view render events, internal bucketing), `INFO` (default —
+data-boundary calls + chart builds + nav), `WARNING` (silent
+fallbacks: unknown model id, invalid TZ, pricing fetch failure,
+phantom-trace scrubber), `ERROR` (subprocess failures, schema
+parse failures).
+
+Quieten it with `TOKENSCOPE_LOG_LEVEL=ERROR`; add detail with
+`TOKENSCOPE_LOG_LEVEL=DEBUG`. The Dockerfile sets
+`PYTHONUNBUFFERED=1` so lines flush immediately.
+
+The format auto-detects: JSON one-record-per-line when stdout
+isn't a TTY (Docker, pipes), human-readable single-line when it
+is (your terminal). Override with `TOKENSCOPE_LOG_FORMAT=json`
+or `=human`.
 
 ```bash
 docker run --rm -p 8501:8501 \
     -e TZ="..." \
-    -e TOKENSCOPE_LOG_LEVEL=DEBUG \
     -v "$HOME/.claude":/root/.claude:ro \
     tokenscope
-# then in another shell:
+# Logs are already streaming. Optional: add DEBUG detail or
+# pipe through jq.
 docker logs -f <container-id>
+docker logs <container-id> | jq 'select(.message | startswith("ccusage."))'
 ```
+
+Event-name convention: `domain.event[.detail]` (`ccusage.ok`,
+`chart.token_mix.built`, `nav.route`, `tz.detected`, etc.) — grep
+the stream by domain prefix to focus on a layer.
 
 The Dockerfile is multi-stage and pinned: Node 20.19.4 from the
 official `node:20-bookworm-slim` image (no third-party setup script

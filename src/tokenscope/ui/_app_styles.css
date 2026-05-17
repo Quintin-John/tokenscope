@@ -1,0 +1,366 @@
+/*
+ * App-wide CSS overrides — top page nav, card containers, code-pill
+ * suppression, column-flex responsive rules, Overview-page H1
+ * polish, insight-callout styling.
+ *
+ * Scoped where possible. Selectors target Streamlit's data-testid and
+ * data-baseweb attributes — the conventional hooks for theming
+ * Streamlit components. Values inline; this is a stylesheet.
+ *
+ * Layered intent:
+ *   1. Page-nav: the top page selector (Overview / Live / Cache /
+ *      Models) is still an `st.radio` because we want URL-state
+ *      persistence; CSS hides the radio bullets and gives the active
+ *      label an underline, so it READS as tabs.
+ *   2. Card containers: `st.container(border=True)` gets a tighter
+ *      enterprise treatment than Streamlit's default heavy border.
+ *   3. Dataframe / expander defaults that leak Streamlit's look on
+ *      the Overview page are dialled back.
+ *   4. Code-pill rendering of backticked text is suppressed
+ *      page-wide — defensive against any regression that re-introduces
+ *      a backtick in caption / header copy.
+ */
+
+/* ---------- Page-nav: radio rendered as tabs ----------
+ * The page selector has key `top-page-selector`. Streamlit's radio
+ * renders each option as a label containing a bullet element and the
+ * option text. We:
+ *   - hide the bullet element so labels look like plain tabs,
+ *   - give the labels comfortable padding and a transparent bottom
+ *     border, and
+ *   - apply the brand accent to the bottom border on `:has(input:checked)`
+ *     so the active tab gets the underline.
+ *
+ * Note `:has()` is well-supported in modern browsers (Chrome 105+,
+ * Safari 15.4+, Firefox 121+). Streamlit Cloud serves modern browsers
+ * exclusively; the local-only dashboard runs in whatever the user
+ * launches it from.
+ */
+[data-testid="stRadio"]:has(input[type="radio"][value="Overview"]),
+[data-testid="stRadio"]:has(input[type="radio"][value="Live"]),
+[data-testid="stRadio"]:has(input[type="radio"][value="Cache"]),
+[data-testid="stRadio"]:has(input[type="radio"][value="Models"]) {
+    border-bottom: 1px solid #e2e8f0;
+    margin-bottom: 1.25rem;
+}
+
+/* Radio bullets — hide them. The label text + underline does the job. */
+[data-testid="stRadio"] [role="radiogroup"] label > div:first-child {
+    display: none !important;
+}
+
+/* Tab-style labels: padding, transparent underline, hover affordance. */
+[data-testid="stRadio"] [role="radiogroup"] label {
+    padding: 0.5rem 1rem 0.65rem 1rem !important;
+    margin: 0 !important;
+    border-bottom: 2px solid transparent !important;
+    color: #64748b !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: color 120ms ease, border-color 120ms ease;
+}
+[data-testid="stRadio"] [role="radiogroup"] label:hover {
+    color: #1e293b !important;
+}
+[data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) {
+    color: #0f172a !important;
+    border-bottom-color: #475569 !important;
+}
+
+/* ---------- Card containers ----------
+ * `st.container(border=True)` renders with Streamlit's default border;
+ * we tighten the radius and use a more neutral grey so cards read as
+ * grouped surfaces, not as form sections.
+ */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 10px !important;
+    border-color: #e2e8f0 !important;
+    box-shadow: none !important;
+}
+
+/* ---------- Code-pill suppression ----------
+ * Defensive: if any caption / header on the Overview page accidentally
+ * carries backticked text, Streamlit's default styles it with a green
+ * inline-code background. We've eliminated backticks from this
+ * surface; the rule keeps regressions from re-introducing the look.
+ */
+main code,
+[data-testid="stMain"] code {
+    background: transparent !important;
+    color: inherit !important;
+    font-family: inherit !important;
+    padding: 0 !important;
+    border: none !important;
+    font-size: inherit !important;
+}
+
+/* ---------- Page H1 + subtitle ----------
+ * Overview page renders `# Overview` followed by a caption. Tighten
+ * the spacing between them.
+ */
+main h1 {
+    margin-bottom: 0.25rem !important;
+}
+main h1 + [data-testid="stCaptionContainer"] {
+    margin-top: 0 !important;
+    margin-bottom: 1.5rem !important;
+}
+
+/* ---------- Insight summary callout ----------
+ * Left-bordered panel; distinct from KPI cards so the eye reads it
+ * as narrative. Embedded `<strong>` tags are wrapped around dollar
+ * amounts and percentages by `analytics.bold_numbers_in_insight` —
+ * the eye lands on the figures.
+ */
+.tokenscope-insight {
+    border-left: 3px solid #475569;
+    padding: 0.6rem 0 0.6rem 1rem;
+    color: #1e293b;
+    line-height: 1.55;
+    margin: 0.75rem 0 1.5rem 0;
+    font-size: 0.95rem;
+}
+.tokenscope-insight strong {
+    color: #0f172a;
+    font-weight: 600;
+    font-size: 1.04em;
+}
+
+/* ---------- Page refresh stamp ----------
+ * Right-aligned `Updated HH:MM:SS` caption in the page header so
+ * users know when the data on screen was last fetched. Sits in the
+ * narrow right column of a 4:1 split next to the H1.
+ */
+.tokenscope-page-refresh {
+    text-align: right;
+    color: #64748b;
+    font-size: 0.8rem;
+    margin-top: 1.5rem;
+}
+
+/* ---------- Live view ---------- */
+
+/* Single-line refresh stamp + animated pulse dot. The pulse runs
+ * continuously so the user reads the page as "this IS live", not
+ * "this CLAIMS to be live". */
+.tokenscope-live-refresh {
+    color: #64748b;
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.25rem 0 1rem 0;
+}
+.tokenscope-live-pulse {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #10b981;  /* emerald — "live" status, distinct from any chart color */
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.45);
+    animation: tokenscope-live-pulse 1.6s ease-out infinite;
+}
+@keyframes tokenscope-live-pulse {
+    0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55);
+    }
+    70% {
+        transform: scale(1.1);
+        box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
+    }
+    100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+    }
+}
+
+/* Window-context banner under the Live H1. Light slate background,
+ * distinct from KPI cards (which have a 1px border + white fill)
+ * so the eye reads it as context, not metric. */
+.tokenscope-live-banner {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    margin: 0.25rem 0 1.25rem 0;
+    color: #1e293b;
+    font-size: 0.92rem;
+    line-height: 1.5;
+}
+.tokenscope-live-banner-row strong {
+    color: #0f172a;
+    font-weight: 600;
+}
+.tokenscope-live-banner-sub {
+    color: #64748b;
+    font-size: 0.85rem;
+    margin-top: 0.15rem;
+}
+
+/* Token-kind KPI cards on the Live view — second KPI row.
+ * Each card carries a color swatch matching the PALETTE entry for
+ * its kind, so the visual category mapping (input is pink,
+ * output is blue, cache_create is amber, cache_read is teal) is
+ * established at the card BEFORE the eye lands on the matching
+ * throughput chart band below. */
+.tokenscope-kind-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-bottom: 0.15rem;
+}
+.tokenscope-kind-swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    flex: 0 0 auto;
+}
+.tokenscope-kind-card-label {
+    color: #64748b;
+    font-size: 0.85rem;
+    line-height: 1.2;
+}
+.tokenscope-kind-card-value {
+    color: #0f172a;
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 1.25;
+    margin-bottom: 0.1rem;
+}
+
+/* Cache hit ratio callout — derived/composite stat, visually
+ * distinct from the four raw-count token-kind cards. Slate-tinted
+ * background + teal left border (same hue as `cache_read` in
+ * PALETTE — visual breadcrumb that this number is derived from
+ * cache_read divided by cache-eligible total). Reads as "derived
+ * from the four kinds", not "a fifth raw count". */
+.tokenscope-cache-ratio-callout {
+    background: #f1f5f9;
+    border-left: 3px solid #14b8a6;
+    border-radius: 6px;
+    padding: 0.7rem 1rem;
+    margin: 0.5rem 0 1.25rem 0;
+    display: flex;
+    align-items: baseline;
+    gap: 0.85rem;
+    flex-wrap: wrap;
+}
+.tokenscope-cache-ratio-value {
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: #0f172a;
+    line-height: 1.1;
+}
+.tokenscope-cache-ratio-label {
+    color: #475569;
+    font-size: 0.88rem;
+    line-height: 1.4;
+}
+
+/* ---------- Cache view ---------- */
+
+/* Savings hero — large headline number. Brand-accent typography
+ * scaled up so the figure dominates the page, with the comparison
+ * sentence in body-text size beneath. The hero is the page's
+ * reason for existing: caching's value proposition stated in
+ * money. */
+.tokenscope-cache-hero {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 1.2rem 1.4rem;
+    margin: 0.25rem 0 1.5rem 0;
+}
+.tokenscope-cache-hero-label {
+    color: #64748b;
+    font-size: 0.9rem;
+    font-weight: 500;
+    margin-bottom: 0.2rem;
+}
+.tokenscope-cache-hero-value {
+    color: #0f172a;
+    font-size: 2.4rem;
+    font-weight: 700;
+    line-height: 1.05;
+    margin-bottom: 0.45rem;
+}
+.tokenscope-cache-hero-context {
+    color: #475569;
+    font-size: 0.92rem;
+    line-height: 1.5;
+}
+.tokenscope-cache-hero-context strong {
+    color: #0f172a;
+    font-weight: 600;
+}
+
+/* Data-range banner — shown when the cache data range starts after
+ * the sidebar's selected `since`. Soft amber accent so the eye
+ * reads it as informational, not as an error. */
+.tokenscope-cache-range-banner {
+    background: #fef9c3;
+    border-left: 3px solid #f59e0b;
+    border-radius: 6px;
+    padding: 0.7rem 1rem;
+    margin: 0.5rem 0 1.25rem 0;
+    color: #1e293b;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+.tokenscope-cache-range-banner strong {
+    color: #0f172a;
+    font-weight: 600;
+}
+
+/* KPI cards on the Cache view — same shell as the Live view's
+ * KPI cards but driven by markdown (`st.metric` doesn't compose
+ * with the embedded sparkline; the hit-ratio card needs a custom
+ * value + sparkline layout). The label / value classes match the
+ * tone of `st.metric`'s built-in styles so they read as a single
+ * KPI row alongside the Effective $/1M card (which still uses
+ * `st.metric`). */
+.tokenscope-kpi-label {
+    color: rgba(49, 51, 63, 0.6);
+    font-size: 0.875rem;
+    line-height: 1.6;
+    font-weight: 400;
+    margin-bottom: 0.1rem;
+}
+.tokenscope-kpi-value {
+    color: #0f172a;
+    font-size: 2rem;
+    font-weight: 600;
+    line-height: 1.25;
+}
+
+/* ---------- Hide Streamlit's "Made with Streamlit" footer ----------
+ * Local-only dashboard; upstream branding adds nothing for the user.
+ */
+footer {
+    display: none !important;
+}
+
+/* ---------- Responsive column wrap for KPI rows ----------
+ * Streamlit's `st.columns(N)` shrinks columns to fit at any viewport
+ * width, which crushes 4-card KPI rows into unreadable slivers on a
+ * half-screen tab. Force flex-wrap and a min-width floor so columns
+ * wrap to the next row when there's not enough horizontal space.
+ */
+[data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap !important;
+}
+[data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    min-width: 220px !important;
+}
+@media (max-width: 900px) {
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        flex: 1 1 240px !important;
+    }
+}
+@media (max-width: 600px) {
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        flex: 1 1 100% !important;
+    }
+}
