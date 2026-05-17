@@ -38,6 +38,12 @@ _VIEW_LABELS: dict[ViewName, str] = {
 
 def render() -> None:
     st.set_page_config(page_title="tokenscope", layout="wide")
+    # Hide the "Made with Streamlit vX.Y.Z" footer. This is a local-only
+    # dashboard; the upstream branding adds nothing for the user.
+    st.markdown(
+        "<style>footer {display: none !important;}</style>",
+        unsafe_allow_html=True,
+    )
     st.title("tokenscope")
 
     nav = Navigation.from_params(dict(st.query_params))

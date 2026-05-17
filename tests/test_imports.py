@@ -140,6 +140,8 @@ def test_analytics_public_surface() -> None:
         "window_cost",
         "last_day_cost",
         "model_breakdown",
+        "friendly_project_label",
+        "short_model_label",
     ):
         assert callable(getattr(analytics, name)), name
 

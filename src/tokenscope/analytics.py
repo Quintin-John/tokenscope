@@ -485,6 +485,77 @@ def token_flow_sankey_data(daily_report: DailyReport) -> dict:
     return {"labels": labels, "sources": sources, "targets": targets, "values": values}
 
 
+_PATH_ANCHORS = (
+    "Documents",
+    "Downloads",
+    "Desktop",
+    "Library",
+    "Projects",
+    "Code",
+    "src",
+    "Volumes",
+    "tmp",
+    "var",
+    "opt",
+)
+
+
+def friendly_project_label(slug: str) -> str:
+    """Turn a ccusage project slug into something scannable.
+
+    ccusage uses the project's absolute path slugified with `-`
+    separators (e.g. `-Users-quintin-johnsmith-Documents-RiderProjects-WorldForge`).
+    Slugging is lossy because hyphens in directory or user names collide
+    with the separator — there's no way to perfectly reverse it.
+
+    Heuristic: walk segments and trim everything up to the first known
+    "path anchor" (`Documents`, `Downloads`, `Volumes`, etc.). That drops
+    the noisy `Users/<user>` prefix without trying to guess where the
+    username ends. If no anchor is found, fall back to the slug stripped
+    of its leading hyphen.
+
+    Examples:
+        "-Users-q-johnsmith-Documents-RiderProjects-WorldForge"
+            → "WorldForge — Documents/RiderProjects"
+        "-Volumes-SSK-Drive--ManageLiterature"
+            → "ManageLiterature — Volumes/SSK/Drive"
+        "Unknown Project"   → "Unknown Project"   (pass-through)
+        ""                  → ""                  (pass-through)
+    """
+    if not slug or not slug.startswith("-"):
+        return slug
+    parts = [p for p in slug[1:].split("-") if p]
+    if not parts:
+        return slug
+    # Trim everything before the first recognised path anchor; if none
+    # exists, keep all parts so we don't silently drop information.
+    for i, part in enumerate(parts):
+        if part in _PATH_ANCHORS:
+            parts = parts[i:]
+            break
+    leaf = parts[-1]
+    parent = parts[:-1]
+    if not parent:
+        return leaf
+    return f"{leaf} — {'/'.join(parent)}"
+
+
+def short_model_label(model_name: str) -> str:
+    """Strip the trailing date suffix from a Claude model identifier.
+
+    `claude-haiku-4-5-20251001` → `claude-haiku-4-5`. The 8-digit date is
+    noise in the sidebar; we keep family + version so the user can still
+    distinguish opus-4-6 from opus-4-7. Non-Claude names pass through.
+    """
+    if not model_name or not model_name.startswith("claude-"):
+        return model_name
+    parts = model_name.split("-")
+    # Trailing 8-digit YYYYMMDD: drop it.
+    if parts[-1].isdigit() and len(parts[-1]) == 8:
+        return "-".join(parts[:-1])
+    return model_name
+
+
 def model_family(model_name: str) -> str:
     """Strip date/version suffixes from a model identifier, keep the family.
 
