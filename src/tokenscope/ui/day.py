@@ -11,6 +11,7 @@ from tokenscope.analytics import (
     sessions_on_day,
 )
 from tokenscope.ccusage import CcusageError
+from tokenscope.models import BlockEntry, SessionEntry
 from tokenscope.navigation import Navigation
 from tokenscope.ui import breadcrumbs
 from tokenscope.ui._nav import route_to
@@ -82,25 +83,56 @@ def render(state: SidebarState, nav: Navigation) -> None:
             _block_row(block, nav)
 
 
-def _session_row(session, nav: Navigation) -> None:
+def _entity_row(
+    *,
+    id_label: str,
+    cost: float,
+    tokens: int,
+    button_label: str,
+    button_key: str,
+    nav_target: Navigation,
+) -> None:
+    """One drill-down row in the day-detail view.
+
+    `_session_row` and `_block_row` previously duplicated this exact
+    layout (four columns, three markdowns, one secondary button) and
+    differed only in the values and the nav target. The helper takes
+    pre-formatted values so the caller owns entity-specific formatting
+    (e.g. the block's "— **active**" suffix) without leaking entity
+    types into here.
+
+    `nav_target` is constructed eagerly by the caller — Navigation is a
+    pure dataclass with no I/O cost, so deferring it via a callable
+    would add complexity without saving any work.
+    """
     cols = st.columns([5, 2, 2, 2])
-    cols[0].markdown(f"`{session.session_id}`")
-    cols[1].markdown(f"${session.total_cost:,.2f}")
-    cols[2].markdown(f"{session.total_tokens:,} tok")
-    if cols[3].button(
-        "Open session", key=f"open-session-{session.session_id}", type="secondary"
-    ):
-        route_to(nav.to_session(session.session_id))
+    cols[0].markdown(id_label)
+    cols[1].markdown(f"${cost:,.2f}")
+    cols[2].markdown(f"{tokens:,} tok")
+    if cols[3].button(button_label, key=button_key, type="secondary"):
+        route_to(nav_target)
 
 
-def _block_row(block, nav: Navigation) -> None:
-    cols = st.columns([5, 2, 2, 2])
-    cols[0].markdown(f"`{block.id}`" + (" — **active**" if block.is_active else ""))
-    cols[1].markdown(f"${block.cost_usd:,.2f}")
-    cols[2].markdown(f"{block.total_tokens:,} tok")
-    if cols[3].button(
-        "Open block", key=f"open-block-{block.id}", type="secondary"
-    ):
-        route_to(nav.to_block(block.id))
+def _session_row(session: SessionEntry, nav: Navigation) -> None:
+    _entity_row(
+        id_label=f"`{session.session_id}`",
+        cost=session.total_cost,
+        tokens=session.total_tokens,
+        button_label="Open session",
+        button_key=f"open-session-{session.session_id}",
+        nav_target=nav.to_session(session.session_id),
+    )
+
+
+def _block_row(block: BlockEntry, nav: Navigation) -> None:
+    active_suffix = " — **active**" if block.is_active else ""
+    _entity_row(
+        id_label=f"`{block.id}`{active_suffix}",
+        cost=block.cost_usd,
+        tokens=block.total_tokens,
+        button_label="Open block",
+        button_key=f"open-block-{block.id}",
+        nav_target=nav.to_block(block.id),
+    )
 
 

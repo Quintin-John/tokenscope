@@ -119,6 +119,36 @@ def test_day_with_no_day_param_shows_back_affordance(
     assert back_buttons
 
 
+def test_day_renders_session_and_block_rows_via_shared_helper(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Slice 5 regression: _session_row and _block_row both compose
+    _entity_row, which must emit:
+      - one Open-session button keyed `open-session-<id>`
+      - one Open-block button keyed `open-block-<id>`
+    on a day where the session.json and blocks.json fixtures overlap.
+
+    The shared helper is correct iff the buttons appear with the
+    expected key prefixes for both entity types.
+    """
+    _wire_default_fixtures(mock_ccusage)
+    # 2026-04-05 is the first overlap date in the fixtures (1 session,
+    # 4 blocks all starting on that date).
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+
+    button_keys = [b.key for b in at.button if b.key]
+    session_buttons = [k for k in button_keys if k.startswith("open-session-")]
+    block_buttons = [k for k in button_keys if k.startswith("open-block-")]
+    assert len(session_buttons) >= 1, (
+        f"expected at least one 'open-session-*' button; got keys={button_keys}"
+    )
+    assert len(block_buttons) >= 1, (
+        f"expected at least one 'open-block-*' button; got keys={button_keys}"
+    )
+
+
 def test_session_renders_with_valid_id(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     session = json.loads((FIXTURES / "session.json").read_text())
