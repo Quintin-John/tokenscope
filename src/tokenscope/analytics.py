@@ -385,6 +385,53 @@ def daily_dollars_saved(daily_report: DailyReport) -> list[dict]:
     return rows
 
 
+def model_breakdown(daily_report: DailyReport) -> list[dict]:
+    """Window-aggregate per-model rows for the Models breakdown table.
+
+    Each row keeps the full model name (no family collapse), so a user
+    running both `claude-opus-4-6` and `claude-opus-4-7` sees each
+    version separately — the per-family rollup happens in the Sankey
+    and the donut, not here.
+
+    Columns: ``model``, ``family``, ``tokens``, ``cost``, ``per_mtok``,
+    ``share`` (cost fraction of the window). Returned descending by cost
+    so the table reads "where the money goes" top-down. Empty input
+    yields an empty list.
+    """
+    totals: dict[str, dict] = {}
+    window_total_cost = 0.0
+    for entry in daily_report.daily:
+        for b in entry.model_breakdowns:
+            row = totals.setdefault(
+                b.model_name,
+                {
+                    "model": b.model_name,
+                    "family": model_family(b.model_name),
+                    "tokens": 0,
+                    "cost": 0.0,
+                },
+            )
+            row["tokens"] += (
+                b.input_tokens
+                + b.output_tokens
+                + b.cache_creation_tokens
+                + b.cache_read_tokens
+            )
+            row["cost"] += b.cost
+            window_total_cost += b.cost
+
+    rows = list(totals.values())
+    for row in rows:
+        row["per_mtok"] = (
+            row["cost"] / row["tokens"] * 1_000_000 if row["tokens"] else 0.0
+        )
+        row["share"] = (
+            row["cost"] / window_total_cost if window_total_cost else 0.0
+        )
+    rows.sort(key=lambda r: r["cost"], reverse=True)
+    return rows
+
+
 def token_flow_sankey_data(daily_report: DailyReport) -> dict:
     """Build Sankey-compatible nodes + links for the models view.
 

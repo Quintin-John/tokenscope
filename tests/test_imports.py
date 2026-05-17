@@ -139,6 +139,7 @@ def test_analytics_public_surface() -> None:
         "token_flow_sankey_data",
         "window_cost",
         "last_day_cost",
+        "model_breakdown",
     ):
         assert callable(getattr(analytics, name)), name
 

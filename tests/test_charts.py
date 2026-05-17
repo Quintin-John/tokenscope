@@ -28,6 +28,7 @@ from tokenscope.ui.charts import (
     donut_cost_by_model,
     rolling_average_line,
     session_token_mix,
+    single_family_token_bar,
     stacked_area_cost_by_family,
     token_flow_sankey,
     token_mix_bar,
@@ -324,3 +325,21 @@ def test_token_flow_sankey_returns_figure() -> None:
 
 def test_token_flow_sankey_empty_returns_none() -> None:
     assert token_flow_sankey(_report([])) is None
+
+
+# ---------- single_family_token_bar ----------
+
+
+def test_single_family_token_bar_returns_horizontal_log_bar() -> None:
+    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
+    fig = single_family_token_bar(report)
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == 1
+    # Horizontal: y is the categories.
+    assert list(fig.data[0].y) == ["cache_read", "cache_create", "output", "input"]
+    # Log x so cache_read doesn't drown input.
+    assert fig.layout.xaxis.type == "log"
+
+
+def test_single_family_token_bar_empty_returns_none() -> None:
+    assert single_family_token_bar(_report([])) is None
