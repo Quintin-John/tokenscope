@@ -11,6 +11,7 @@ from tokenscope.tz import (
     DEFAULT_FALLBACK,
     detect_local_iana,
     utc_iso_to_local,
+    utc_iso_to_local_clock,
     utc_iso_to_local_date,
 )
 
@@ -350,3 +351,38 @@ def test_utc_iso_to_local_date_malformed_zone_returns_iso_prefix() -> None:
     """Malformed zone (ValueError) → same fall-back as unknown zone."""
     d = utc_iso_to_local_date("2026-05-16T13:00:00.000Z", "/etc/foo")
     assert d == "2026-05-16"
+
+
+# ---------- utc_iso_to_local_clock ----------
+
+
+def test_utc_iso_to_local_clock_returns_hh_mm() -> None:
+    """`HH:MM` format — used by the Live window banner where only the
+    clock time matters (the date is implicit on a 5-hour window)."""
+    # 13:00 UTC == 09:00 EDT in May (UTC-4 with DST).
+    clock = utc_iso_to_local_clock(
+        "2026-05-16T13:00:00.000Z", "America/New_York"
+    )
+    assert clock == "09:00"
+
+
+def test_utc_iso_to_local_clock_utc_zone() -> None:
+    """UTC zone → passes the wall-clock time through unchanged."""
+    assert (
+        utc_iso_to_local_clock("2026-05-16T13:00:00.000Z", "UTC") == "13:00"
+    )
+
+
+def test_utc_iso_to_local_clock_empty_input_returns_none() -> None:
+    assert utc_iso_to_local_clock("", "America/New_York") is None
+
+
+def test_utc_iso_to_local_clock_malformed_iso_returns_none() -> None:
+    assert utc_iso_to_local_clock("garbage", "America/New_York") is None
+
+
+def test_utc_iso_to_local_clock_unknown_zone_returns_raw_iso() -> None:
+    """Defensive: unknown zone falls back to the raw input rather
+    than crashing the live view's banner render."""
+    out = utc_iso_to_local_clock("2026-05-16T13:00:00.000Z", "Atlantis/Lost")
+    assert out == "2026-05-16T13:00:00.000Z"

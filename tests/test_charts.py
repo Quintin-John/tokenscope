@@ -33,6 +33,7 @@ from tokenscope.ui.charts import (
     cost_trend_with_rolling,
     donut_cost_by_model,
     family_color_map,
+    live_spend_trajectory,
     session_blocks_timeline,
     session_token_mix,
     single_family_token_bar,
@@ -1172,6 +1173,125 @@ def test_burn_gauge_returns_indicator_figure() -> None:
     # Single Indicator trace.
     assert len(fig.data) == 1
     assert fig.data[0].value == 8.83
+
+
+# ---------- live_spend_trajectory ----------
+
+
+def test_live_spend_trajectory_returns_two_traces() -> None:
+    """Actual line + dashed projection — exactly two traces, named
+    `Actual` and `Projected`."""
+    block = _block_with_burn()
+    fig = live_spend_trajectory(
+        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+    )
+    assert fig is not None
+    names = [t.name for t in fig.data]
+    assert names == ["Actual", "Projected"]
+
+
+def test_live_spend_trajectory_actual_starts_at_zero_cost() -> None:
+    """The actual line anchors at the block's start with cost = $0;
+    the user sees the trajectory rise from the window start, not
+    from some arbitrary baseline."""
+    block = _block_with_burn()
+    fig = live_spend_trajectory(
+        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+    )
+    actual = next(t for t in fig.data if t.name == "Actual")
+    assert list(actual.y)[0] == 0.0
+    assert list(actual.x)[0] == block.start_time
+
+
+def test_live_spend_trajectory_actual_ends_at_current_cost() -> None:
+    """The actual line ends at the current `now` snapshot — solid
+    line stops where the dashed projection picks up."""
+    block = _block_with_burn()
+    now = "2026-05-16T15:30:00Z"
+    fig = live_spend_trajectory(block, samples=[], now_iso=now)
+    actual = next(t for t in fig.data if t.name == "Actual")
+    assert list(actual.x)[-1] == now
+    assert list(actual.y)[-1] == block.cost_usd
+
+
+def test_live_spend_trajectory_projection_is_dashed() -> None:
+    """The projection trace is dashed so the user reads "actual vs
+    projected" as a single visual contract."""
+    block = _block_with_burn()
+    fig = live_spend_trajectory(
+        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+    )
+    projected = next(t for t in fig.data if t.name == "Projected")
+    assert projected.line.dash == "dot"
+
+
+def test_live_spend_trajectory_projection_endpoints() -> None:
+    """Projection goes from `now` at current cost to window end at
+    `projection.total_cost`. Verified for end-to-end correctness."""
+    block = _block_with_burn()
+    now = "2026-05-16T15:30:00Z"
+    fig = live_spend_trajectory(block, samples=[], now_iso=now)
+    projected = next(t for t in fig.data if t.name == "Projected")
+    assert list(projected.x) == [now, block.end_time]
+    assert list(projected.y) == [block.cost_usd, block.projection.total_cost]
+
+
+def test_live_spend_trajectory_samples_extend_actual_line() -> None:
+    """Persisted samples (from session_state) get woven into the
+    actual line so a long-open page shows real intra-block
+    trajectory instead of a straight start→now segment."""
+    block = _block_with_burn()
+    samples = [
+        ("2026-05-16T13:30:00Z", 0.20),
+        ("2026-05-16T14:00:00Z", 0.50),
+        ("2026-05-16T14:30:00Z", 0.80),
+    ]
+    fig = live_spend_trajectory(
+        block, samples=samples, now_iso="2026-05-16T15:30:00Z"
+    )
+    actual = next(t for t in fig.data if t.name == "Actual")
+    # Anchor + 3 samples + now = 5 points
+    assert len(actual.x) == 5
+    assert list(actual.y) == [0.0, 0.20, 0.50, 0.80, block.cost_usd]
+
+
+def test_live_spend_trajectory_returns_none_without_projection() -> None:
+    """Defensive: a block without a projection (gap block, finished
+    block) returns None so the caller can render an empty-state
+    caption instead of a misleading flat-line chart."""
+    block = BlockEntry(
+        id="2026-05-16T13:00:00.000Z",
+        startTime="2026-05-16T13:00:00.000Z",
+        endTime="2026-05-16T18:00:00.000Z",
+        actualEndTime=None,
+        isActive=True,
+        isGap=False,
+        entries=1,
+        tokenCounts=BlockTokenCounts(
+            inputTokens=10, outputTokens=20,
+            cacheCreationInputTokens=30, cacheReadInputTokens=40,
+        ),
+        totalTokens=100,
+        costUSD=1.0,
+        models=["claude-opus-4-7"],
+        burnRate=None,
+        projection=None,
+    )
+    assert live_spend_trajectory(
+        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+    ) is None
+
+
+def test_live_spend_trajectory_uses_palette_overlay_color() -> None:
+    """Both traces use `PALETTE["7-day avg"]` — the same near-black
+    used for reference / overlay lines on the Overview cost chart.
+    Single palette source of truth."""
+    block = _block_with_burn()
+    fig = live_spend_trajectory(
+        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+    )
+    for trace in fig.data:
+        assert trace.line.color == PALETTE["7-day avg"]
 
 
 def test_burn_gauge_with_typical_renders_threshold_marker() -> None:

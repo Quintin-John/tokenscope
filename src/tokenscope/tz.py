@@ -117,6 +117,25 @@ def utc_iso_to_local(iso: str, zone: str) -> str | None:
     return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def utc_iso_to_local_clock(iso: str, zone: str) -> str | None:
+    """Return just the local-zone `HH:MM` clock time of a UTC ISO
+    timestamp. Used by the Live view's window banner where the date
+    is implicit (the active block always covers the current day's
+    5-hour slice) and only the start/end clock times need to render.
+    """
+    if not iso:
+        return None
+    try:
+        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    try:
+        local_dt = utc_dt.astimezone(ZoneInfo(zone))
+    except _ZONE_INVALID:
+        return iso
+    return local_dt.strftime("%H:%M")
+
+
 def utc_iso_to_local_date(iso: str, zone: str) -> str | None:
     """Return just the YYYY-MM-DD local-zone date of a UTC ISO timestamp.
 

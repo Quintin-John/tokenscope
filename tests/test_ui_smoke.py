@@ -490,6 +490,134 @@ def test_live_renders(mock_ccusage, mock_ccusage_version) -> None:
     _assert_clean(at)
 
 
+# ---------- Live view rework ----------
+
+
+def test_live_h1_is_view_name_not_active_billing_block(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The Live page H1 is `Live` — matches the tab name. Prior
+    builds said `Active billing block (live)` (redundant when
+    you're on the Live tab) which inverted the hierarchy."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    assert "# Live" in md, f"expected `# Live` H1; got: {md!r}"
+
+
+def test_live_does_not_render_burn_gauge(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Regression: the burn gauge was deleted from the Live view
+    (duplicated the $/hr KPI, arbitrary $0–$60 scale, cryptic
+    delta). Replaced by the spend-trajectory chart."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    chart_keys = _plotly_chart_keys(at)
+    assert "live-burn-gauge" not in chart_keys
+    # No "Burn rate" subheader either (the gauge's old section title).
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Burn rate" not in md or "burn" in md.lower(), (
+        "the section header 'Burn rate' as a chart title should be gone"
+    )
+
+
+def test_live_renders_spend_trajectory_chart(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The replacement chart: cumulative cost line + dashed
+    projection across the 5-hour block."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    chart_keys = _plotly_chart_keys(at)
+    assert "live-spend-trajectory" in chart_keys
+
+
+def test_live_renders_window_banner_with_models_and_remaining(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The window context (start–end clock time, minutes remaining,
+    models in use) lives in a banner under the H1 — not inside a
+    KPI delta pill."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    assert "tokenscope-live-banner" in md, (
+        f"expected the banner HTML in markdown; got: {md!r}"
+    )
+    assert "Models in use" in md
+    assert "Active block" in md
+
+
+def test_live_does_not_show_minutes_left_in_projected_total_card(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """`X min left` was a property of the window, not the projected
+    total cost. It used to appear as a delta pill on the Projected-
+    total KPI; now it lives in the window banner."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    projected = next(
+        (m for m in at.metric if m.label == "Projected total"),
+        None,
+    )
+    assert projected is not None
+    # Delta is empty / None — no more "X min left" pill on this card.
+    proto = projected.proto.metric if hasattr(projected.proto, "metric") else projected.proto
+    delta_text = getattr(proto, "delta", "")
+    assert "min left" not in (delta_text or "")
+    assert "min remaining" not in (delta_text or "")
+
+
+def test_live_renders_refresh_indicator_with_pulse(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """A single line replaces the prior two-caption stack
+    (`Auto-refreshes every Ns` + `Last refreshed HH:MM:SS`). The
+    pulse dot is a CSS animation that runs continuously so the
+    user reads the page as live, not static."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    assert "tokenscope-live-refresh" in md
+    assert "tokenscope-live-pulse" in md
+    assert "Last refreshed" in md
+    assert "auto-refreshes every" in md
+    # The two-caption stack should NOT appear — the helper-text line
+    # "Auto-refreshes every Ns. Ignores the date / project / model
+    # filters" used to live separately.
+    assert "Ignores the date" not in md
+
+
+def test_live_does_not_render_projection_detail_expander(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The `Projection detail` expander duplicated KPI-strip values
+    and only carried `Projected total tokens` as unique data. That
+    one piece moves to a caption under the chart; the expander is
+    gone."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    expander_labels = [e.label for e in at.expander]
+    assert not any(
+        "Projection detail" in (label or "") for label in expander_labels
+    )
+
+
 def test_cache_renders(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     at = _at("cache")

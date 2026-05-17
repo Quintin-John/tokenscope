@@ -937,6 +937,86 @@ def token_flow_sankey(
     return fig
 
 
+def live_spend_trajectory(
+    block: BlockEntry,
+    samples: list[tuple[str, float]],
+    *,
+    now_iso: str,
+) -> go.Figure | None:
+    """Cumulative cost across the active 5-hour block.
+
+    Two traces:
+
+    * "Actual" — solid line tracking cost from the block's start
+      (cost=$0) through every recorded ``samples`` point up to the
+      "now" point at ``block.cost_usd``. Without persisted samples
+      this collapses to a two-point line (start → now); with samples
+      it shows the real intra-session trajectory.
+    * "Projected" — dashed continuation from the "now" point to the
+      block's end at ``block.projection.total_cost`` (if a projection
+      exists).
+
+    Both traces use ``PALETTE["7-day avg"]`` — near-black neutral, the
+    same hue used for reference / overlay lines on the Overview cost
+    chart. No new palette entry needed; this is a single-series
+    trajectory, not a categorical breakdown.
+
+    Returns ``None`` if the block has no projection (gap block,
+    finished block) — the caller renders an empty-state caption
+    instead.
+    """
+    if block.projection is None:
+        return None
+
+    color = PALETTE["7-day avg"]
+    actual_x: list[str] = [block.start_time]
+    actual_y: list[float] = [0.0]
+    for sample_t, sample_cost in samples:
+        actual_x.append(sample_t)
+        actual_y.append(sample_cost)
+    # Always anchor the actual line on the current "now" point so the
+    # solid trace ends at the latest snapshot regardless of sample
+    # cadence.
+    if actual_x[-1] != now_iso:
+        actual_x.append(now_iso)
+        actual_y.append(block.cost_usd)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=actual_x,
+            y=actual_y,
+            mode="lines",
+            name="Actual",
+            legendgroup="Actual",
+            line=dict(color=color, width=2.5),
+            hovertemplate=(
+                "<b>Actual</b><br>%{x}<br>$%{y:,.2f}<extra></extra>"
+            ),
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=[now_iso, block.end_time],
+            y=[block.cost_usd, block.projection.total_cost],
+            mode="lines",
+            name="Projected",
+            legendgroup="Projected",
+            line=dict(color=color, width=2.5, dash="dot"),
+            hovertemplate=(
+                "<b>Projected</b><br>%{x}<br>$%{y:,.2f}<extra></extra>"
+            ),
+        )
+    )
+
+    return apply_enterprise_style(fig).update_layout(
+        yaxis_tickprefix="$",
+        xaxis_type="date",
+        xaxis_tickformat="%H:%M",
+    )
+
+
 def session_blocks_timeline(
     blocks: list[BlockEntry],
     tz: str | None = None,
