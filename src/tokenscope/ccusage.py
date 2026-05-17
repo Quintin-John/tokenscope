@@ -16,16 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from tokenscope.models import (
-    BlocksReport,
-    DailyByProjectReport,
-    DailyReport,
-    MonthlyByProjectReport,
-    MonthlyReport,
-    SessionReport,
-    WeeklyByProjectReport,
-    WeeklyReport,
-)
+from tokenscope.models import BlocksReport, DailyReport
 from tokenscope.query import Query
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -118,57 +109,22 @@ def _coerce_empty(raw, key: str, *, container_type=list):
 
 
 def daily(query: Query | None = None) -> DailyReport:
+    """Uncached daily report. Used only by the live ccusage integration
+    tests; production code goes through `tokenscope.data.daily` for the
+    Streamlit cache layer."""
     raw = _coerce_empty(_run_json(["daily", *_q(query)]), "daily")
     return DailyReport.model_validate(raw)
 
 
-def weekly(query: Query | None = None) -> WeeklyReport:
-    raw = _coerce_empty(_run_json(["weekly", *_q(query)]), "weekly")
-    return WeeklyReport.model_validate(raw)
-
-
-def monthly(query: Query | None = None) -> MonthlyReport:
-    raw = _coerce_empty(_run_json(["monthly", *_q(query)]), "monthly")
-    return MonthlyReport.model_validate(raw)
-
-
-def session(query: Query | None = None) -> SessionReport:
-    raw = _coerce_empty(_run_json(["session", *_q(query)]), "sessions")
-    return SessionReport.model_validate(raw)
-
-
 def blocks(active: bool = False, query: Query | None = None) -> BlocksReport:
+    """Uncached blocks report. Used only by the live ccusage integration
+    tests; production code goes through `tokenscope.data.blocks`.
+
+    `blocks` already returns a proper `{"blocks": [], "message": "..."}`
+    shape for empty ranges, so no _coerce_empty wrapping is needed.
+    """
     args: list[str] = []
     if active:
         args.append("--active")
     args += _q(query)
-    # blocks already returns a proper `{"blocks": [], "message": "..."}`
-    # shape for empty ranges, so no coercion needed.
     return BlocksReport.model_validate(_run_json(["blocks", *args]))
-
-
-def daily_by_project(query: Query | None = None) -> DailyByProjectReport:
-    raw = _coerce_empty(
-        _run_json(["daily", "--instances", *_q(query)]),
-        "projects",
-        container_type=dict,
-    )
-    return DailyByProjectReport.model_validate(raw)
-
-
-def weekly_by_project(query: Query | None = None) -> WeeklyByProjectReport:
-    raw = _coerce_empty(
-        _run_json(["weekly", "--instances", *_q(query)]),
-        "projects",
-        container_type=dict,
-    )
-    return WeeklyByProjectReport.model_validate(raw)
-
-
-def monthly_by_project(query: Query | None = None) -> MonthlyByProjectReport:
-    raw = _coerce_empty(
-        _run_json(["monthly", "--instances", *_q(query)]),
-        "projects",
-        container_type=dict,
-    )
-    return MonthlyByProjectReport.model_validate(raw)

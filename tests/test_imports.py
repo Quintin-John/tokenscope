@@ -42,20 +42,32 @@ def test_app_public_surface() -> None:
 
 
 def test_ccusage_public_surface() -> None:
+    """ccusage.py exposes only the two uncached wrappers used by the
+    live integration tests plus `get_ccusage_version`. The
+    weekly/monthly/session/*_by_project variants live in
+    `tokenscope.data` (cached) — having two parallel surfaces was
+    dead duplication and was removed. Re-adding any of them is
+    a 3-line function when an integration test actually needs it.
+    """
     from tokenscope import ccusage
 
-    for name in (
-        "daily",
+    public = {"daily", "blocks", "get_ccusage_version"}
+    for name in public:
+        assert callable(getattr(ccusage, name)), name
+
+    # Negative assertion: the dead duplicates must not creep back.
+    for removed in (
         "weekly",
         "monthly",
         "session",
-        "blocks",
         "daily_by_project",
         "weekly_by_project",
         "monthly_by_project",
-        "get_ccusage_version",
     ):
-        assert callable(getattr(ccusage, name)), name
+        assert not hasattr(ccusage, removed), (
+            f"ccusage.{removed} was removed as dead duplication of "
+            f"data.{removed}; do not re-add without a concrete caller."
+        )
 
 
 def test_data_layer_public_surface() -> None:
