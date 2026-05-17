@@ -1599,6 +1599,74 @@ def test_models_renders_per_model_token_kind_chart(
     assert "Drill into a family" in md
 
 
+# ---------- page selector: user-driven radio clicks ----------
+
+
+@pytest.mark.parametrize(
+    "from_view,to_view",
+    [
+        ("overview", "live"),
+        ("overview", "cache"),
+        ("overview", "models"),
+        ("live", "overview"),
+        ("live", "cache"),
+        ("live", "models"),
+        ("cache", "overview"),
+        ("cache", "live"),
+        ("cache", "models"),
+        ("models", "overview"),
+        ("models", "live"),
+        ("models", "cache"),
+    ],
+)
+def test_top_level_page_selector_click_navigates(
+    mock_ccusage, mock_ccusage_version, from_view, to_view
+) -> None:
+    """User clicks a top-level radio option (Live / Cache / Models /
+    Overview) → the page selector's `chosen_view != nav.view` branch
+    fires `route_to(target)` and the destination view renders on the
+    next rerun.
+
+    Regression: a prior version of `_render_page_selector` synced
+    the radio's session_state from the URL on EVERY render — which
+    overwrote the user's click before the route_to branch could see
+    it. Result: every top-level → top-level click bounced back to
+    the origin view (most visibly: every click went back to
+    Overview because that's the URL view at first load).
+
+    Parametrised across every top-level pair so a future regression
+    on any single transition trips the test immediately."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at(from_view)
+    at.run()
+    _assert_clean(at)
+    # Sanity: starting on the right view.
+    assert at.query_params.get("view") in ([from_view], from_view), (
+        f"setup did not land on {from_view!r}: {dict(at.query_params)!r}"
+    )
+
+    # Find the top-page-selector radio. AppTest exposes radios as
+    # `at.radio`; there's also one in the sidebar (plan), so filter
+    # by key.
+    selectors = [r for r in at.radio if r.key == "top-page-selector"]
+    assert selectors, "top-page-selector radio not rendered"
+    selector = selectors[0]
+    label_for = {
+        "overview": "Overview",
+        "live": "Live",
+        "cache": "Cache",
+        "models": "Models",
+    }
+    selector.set_value(label_for[to_view]).run()
+    _assert_clean(at)
+
+    raw = at.query_params.get("view")
+    view = raw[0] if isinstance(raw, list) else raw
+    assert view == to_view, (
+        f"radio click {from_view}→{to_view} failed: view ended at {view!r}"
+    )
+
+
 def test_drill_into_family_does_not_raise(
     mock_ccusage, mock_ccusage_version
 ) -> None:

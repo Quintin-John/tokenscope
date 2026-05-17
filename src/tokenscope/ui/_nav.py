@@ -27,6 +27,28 @@ from tokenscope.navigation import Navigation
 _log = get_logger(__name__)
 
 
+# Session-state slot used to signal "this rerun was triggered by a
+# programmatic navigation (i.e. `route_to`), NOT by a user clicking
+# a navigation widget".
+#
+# The page-selector at `app.py:_render_page_selector` consumes this
+# flag to decide whether the URL or the widget's persisted
+# `session_state` slot is the source of truth on this run:
+#
+#   * Flag set  → URL wins. The radio's session_state is
+#     overwritten BEFORE the widget instantiates so the drill
+#     destination sticks (otherwise the radio's prior label
+#     resurrects and bounces the user back).
+#   * Flag clear → widget wins. A user-driven radio click delivers
+#     the new value via `session_state` and must NOT be clobbered
+#     by a URL-based sync on the same run.
+#
+# Lives next to `route_to` because the contract is "every
+# `route_to` call MUST set this flag" — keeping the constant and
+# the writer co-located prevents drift between them.
+PROGRAMMATIC_NAV_FLAG = "_tokenscope_programmatic_nav_pending"
+
+
 def route_to(
     target: Navigation,
     extra_params: dict[str, str] | None = None,
@@ -39,6 +61,11 @@ def route_to(
     `extra_params` is for non-Navigation URL state that the destination
     relies on — e.g. the Models view's "drill into a family" button
     seeds the sidebar's `models=` filter while routing to Overview.
+
+    Sets `PROGRAMMATIC_NAV_FLAG` in `st.session_state` so the
+    page-selector knows on the next render to sync its widget slot
+    from the URL (programmatic nav) rather than from any
+    user-click state (the radio's own click handling).
     """
     _log.info("nav.route target=%s extra_params=%s", target, extra_params or {})
     st.query_params.clear()
@@ -47,6 +74,7 @@ def route_to(
     if extra_params:
         for key, value in extra_params.items():
             st.query_params[key] = value
+    st.session_state[PROGRAMMATIC_NAV_FLAG] = True
     st.rerun()
 
 

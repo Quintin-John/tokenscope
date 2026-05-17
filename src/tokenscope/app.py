@@ -27,6 +27,7 @@ from tokenscope.ui import live as live_view
 from tokenscope.ui import models as models_view
 from tokenscope.ui import overview, sidebar
 from tokenscope.ui import session as session_view
+from tokenscope.ui._nav import PROGRAMMATIC_NAV_FLAG
 
 # Hardcoded module name: app.py is launched as `__main__` by both
 # `streamlit run` and pytest's AppTest (runpy semantics), so
@@ -170,23 +171,37 @@ def _render_page_selector(nav: Navigation) -> Navigation:
     drill — that re-populates session_state and routes via the normal
     `chosen_view != nav.view` path.
     """
-    if nav.view not in TOP_LEVEL_VIEWS:
+    # URL-as-source-of-truth applies ONLY when this run was triggered
+    # by a programmatic navigation (e.g. the Models view's "View opus
+    # in Overview →" drill calls `route_to`). The flag is set inside
+    # `route_to` and consumed (popped) here BEFORE the radio widget
+    # instantiates — that's the one moment we can legally assign to a
+    # widget-keyed session_state slot.
+    #
+    # When the flag is NOT set, the rerun was triggered by the user
+    # clicking the radio itself: Streamlit has already written the
+    # chosen label into `session_state[_PAGE_SELECTOR_KEY]`, and the
+    # `chosen_view != nav.view` branch below picks that up and routes
+    # there. Touching `session_state` on that path would CLOBBER the
+    # click (which is exactly the regression the previous version of
+    # this code introduced).
+    programmatic_nav = st.session_state.pop(PROGRAMMATIC_NAV_FLAG, False)
+    if programmatic_nav:
+        if nav.view in TOP_LEVEL_VIEWS:
+            st.session_state[_PAGE_SELECTOR_KEY] = _VIEW_LABELS[nav.view]
+        else:
+            # Programmatic nav into a drill view — clear the persisted
+            # top-level label so the radio renders with no selection,
+            # otherwise a subsequent click would bounce back to a
+            # stale top-level.
+            st.session_state.pop(_PAGE_SELECTOR_KEY, None)
+    elif nav.view not in TOP_LEVEL_VIEWS:
+        # Arrived at a drill view via URL (paste, bookmark) with a
+        # stale top-level label still in session_state. Clear so the
+        # radio shows no selection. The user can re-click any
+        # top-level option to leave the drill via the normal
+        # `chosen_view != nav.view` path below.
         st.session_state.pop(_PAGE_SELECTOR_KEY, None)
-    elif st.session_state.get(_PAGE_SELECTOR_KEY) != _VIEW_LABELS[nav.view]:
-        # URL-as-source-of-truth for top-level transitions driven by
-        # `route_to` (e.g. the Models view's "View opus in Overview →"
-        # drill). The radio widget's persisted `session_state` slot
-        # holds the LABEL chosen on a previous render. When `route_to`
-        # mutates `st.query_params["view"]` and reruns, the parsed
-        # `nav.view` reflects the new destination — but without this
-        # sync, the radio would still resurrect its prior label, the
-        # `chosen_view != nav.view` branch below would route BACK to
-        # the old view, and the drill would silently fail.
-        #
-        # The assignment is safe because it runs BEFORE the radio
-        # widget is instantiated (line 179 below). Same pattern the
-        # sidebar uses for its models multiselect URL sync.
-        st.session_state[_PAGE_SELECTOR_KEY] = _VIEW_LABELS[nav.view]
 
     label_to_view = {v: k for k, v in _VIEW_LABELS.items()}
     options = [_VIEW_LABELS[v] for v in TOP_LEVEL_VIEWS]
