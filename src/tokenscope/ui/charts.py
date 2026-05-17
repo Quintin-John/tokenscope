@@ -1345,86 +1345,127 @@ def live_spend_trajectory(
     return styled
 
 
-def live_token_throughput(
+_LABEL_VISIBLE_SHARE_PCT = 3.0
+
+
+def live_token_kind_composition_bar(
     block: BlockEntry,
-    rows: list[dict],
-    *,
-    now_iso: str,
-    tz: str | None = None,
 ) -> go.Figure | None:
-    """Percent-stacked area of token-kind throughput across the
-    active block.
+    """Horizontal stacked bar of the block's aggregate token-kind
+    composition.
 
-    Each x-position is the end of one fragment-refresh interval;
-    the y-value of each band is the percentage of tokens added
-    during that interval attributable to that kind. The four
-    kinds (input / output / cache_create / cache_read) always
-    appear in the same legend order with their PALETTE colours
-    so the user's category-to-color mapping is invariant across
-    every chart in the app.
+    Replaces the prior `live_token_throughput` time-series. The
+    time-series was conceptually a per-interval percent-stacked
+    area, but ccusage's `blocks --active --json` only exposes
+    aggregate `tokenCounts` for the block — no per-entry
+    timestamps. So the chart could only ever show buckets gathered
+    AFTER the user opened the page; the block's actual history
+    was unrecoverable.
 
-    Hand-builds one `go.Scatter` per known kind (no
-    `px.area(color=...)`) so Plotly Express's auto-trace path
-    can't introduce a phantom legend entry from a NaN / None /
-    empty-string row — same defensive contract as
-    `token_mix_percent_bar`.
+    The honest chart for the data we have: one horizontal bar with
+    four PALETTE-coloured segments (input / output / cache_create /
+    cache_read) summing to `block.totalTokens`. Width of each
+    segment is proportional to that kind's share of total tokens.
+    No X-axis time, no `now` reference, no buckets — just the
+    block's composition snapshot at render time.
 
-    The `now_iso` parameter drives the vertical dotted reference
-    line via `_add_now_reference` so the user reads where "now"
-    falls in the 5-hour window — same visual contract as the
-    spend trajectory chart.
+    Hand-builds one `go.Bar` per kind (no `px.bar(color=...)`)
+    using `TOKEN_KIND_COLORS[kind]` — same defensive contract as
+    every other token-kind chart in the app. Trace names are the
+    four kinds, in input → output → cache_create → cache_read
+    order so the bar segments stack left-to-right by their
+    typical-cost ranking.
 
-    Returns ``None`` when ``rows`` is empty (no token activity
-    yet, or block-snapshot sequence had no positive deltas) so
-    the caller renders an empty-state caption instead of an
-    empty chart frame.
+    Segments whose share is at least ``_LABEL_VISIBLE_SHARE_PCT``
+    render an in-bar label with the abbreviated count + percent
+    (`"1.6M · 28.7%"`); narrower slivers omit the label (it would
+    overlap an adjacent segment) and surface the same data on
+    hover.
+
+    Returns ``None`` when the block has zero tokens (the caller
+    renders an empty-state caption).
     """
-    if not rows:
-        return None
-    df = pd.DataFrame(rows)
-    # Localise every X-value so Plotly's date axis renders ticks in
-    # the user's wall-clock time instead of UTC. Pure string
-    # transformation — no impact on `total_tokens` / `*_pct` columns.
-    df = df.assign(t=df["t"].map(lambda iso: _localize_iso(iso, tz)))
-    kind_order = ["input", "output", "cache_create", "cache_read"]
+    from tokenscope.analytics import format_compact_int
 
+    counts = {
+        "input": block.token_counts.input_tokens,
+        "output": block.token_counts.output_tokens,
+        "cache_create": block.token_counts.cache_creation_input_tokens,
+        "cache_read": block.token_counts.cache_read_input_tokens,
+    }
+    total = sum(counts.values())
+    if total == 0:
+        return None
+
+    kind_order = ["input", "output", "cache_create", "cache_read"]
     fig = go.Figure()
     for kind in kind_order:
-        col = f"{kind}_pct"
-        if col not in df.columns:
-            continue
+        tokens = counts[kind]
+        share = tokens / total * 100
+        # In-bar label only for visually distinguishable segments;
+        # below the threshold the text would overlap a neighbour and
+        # the hover still surfaces the values.
+        if share >= _LABEL_VISIBLE_SHARE_PCT:
+            label = f"{format_compact_int(tokens)} · {share:.1f}%"
+        else:
+            label = ""
         fig.add_trace(
-            go.Scatter(
-                x=df["t"],
-                y=df[col],
-                customdata=df["total_tokens"].astype("int64").to_numpy().reshape(-1, 1),
-                mode="lines",
+            go.Bar(
+                x=[tokens],
+                y=["block"],
                 name=kind,
                 legendgroup=kind,
-                stackgroup="throughput",
-                fillcolor=TOKEN_KIND_COLORS[kind],
-                line=dict(color=TOKEN_KIND_COLORS[kind], width=1.5),
+                orientation="h",
+                marker_color=TOKEN_KIND_COLORS[kind],
+                text=[label],
+                textposition="inside",
+                insidetextanchor="middle",
+                textfont=dict(
+                    family=_ENTERPRISE_FONT_FAMILY,
+                    size=11,
+                    color="white",
+                ),
+                customdata=[[share]],
                 hovertemplate=(
-                    f"<b>{kind}</b><br>%{{x}}<br>"
-                    "%{y:.1f}% of bucket · %{customdata[0]:,d} tokens"
-                    "<extra></extra>"
+                    f"<b>{kind}</b><br>"
+                    "%{x:,d} tokens (%{customdata[0]:.1f}%)<extra></extra>"
                 ),
             )
         )
     fig.update_layout(
-        yaxis_ticksuffix="%",
-        yaxis_range=[0, 100],
+        barmode="stack",
+        height=110,
+        showlegend=True,
     )
     styled = apply_enterprise_style(fig).update_layout(
-        xaxis_type="date",
-        xaxis_tickformat="%H:%M",
+        xaxis=dict(
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+        ),
+        yaxis=dict(
+            visible=False,
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+        ),
     )
-    _apply_block_window_xaxis(styled, block, tz)
-    _add_now_reference(styled, _localize_iso(now_iso, tz))
+    # Cache-hit ratio uses the same formula `analytics.block_cache_hit_ratio`
+    # exposes — compute inline so the log line is self-contained and
+    # doesn't require the caller to compute it twice. Identical
+    # denominator (input + cache_create + cache_read).
+    cache_eligible = (
+        counts["input"] + counts["cache_create"] + counts["cache_read"]
+    )
+    cache_hit_ratio = (
+        counts["cache_read"] / cache_eligible if cache_eligible else 0.0
+    )
     _log.info(
-        "chart.live_throughput.built trace_names=%s buckets=%d",
+        "chart.live_token_mix.built trace_names=%s total_tokens=%d "
+        "cache_hit_ratio=%.4f",
         [t.name for t in styled.data],
-        len(df),
+        total,
+        cache_hit_ratio,
     )
     return styled
 

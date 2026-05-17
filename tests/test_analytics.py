@@ -21,7 +21,6 @@ from tokenscope.analytics import (
     block_cost_by_kind,
     blocks_for_session,
     blocks_on_day,
-    build_intra_block_token_throughput,
     cache_data_range,
     cache_hit_ratio,
     cache_savings,
@@ -1809,92 +1808,6 @@ def test_block_cost_by_kind_no_tokens_returns_zero_shares(_stub_rates) -> None:
     assert rows is not None
     assert [r["share"] for r in rows] == [0.0, 0.0, 0.0, 0.0]
     assert [r["est_cost"] for r in rows] == [0.0, 0.0, 0.0, 0.0]
-
-
-# ---------- build_intra_block_token_throughput ----------
-
-
-def test_build_intra_block_token_throughput_empty_samples_anchors_on_block_start() -> None:
-    """No persisted samples: the function still emits ONE row by
-    treating the block's start (at zero tokens) as the prior point
-    and `now_iso` as the current cumulative snapshot. The user gets
-    a meaningful chart from the first page load."""
-    block = _block_with_counts(
-        input_tokens=100, output_tokens=200,
-        cache_create=300, cache_read=400,
-    )
-    rows = build_intra_block_token_throughput(
-        block, samples=[], now_iso="2026-05-16T13:30:00Z"
-    )
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["t"] == "2026-05-16T13:30:00Z"
-    assert row["total_tokens"] == 1000
-    assert row["input_pct"] == pytest.approx(10.0)
-    assert row["output_pct"] == pytest.approx(20.0)
-    assert row["cache_create_pct"] == pytest.approx(30.0)
-    assert row["cache_read_pct"] == pytest.approx(40.0)
-
-
-def test_build_intra_block_token_throughput_emits_per_interval_deltas() -> None:
-    """Two persisted snapshots → two intervals (block_start→s1 and
-    s1→s2). Each interval's percent split reflects ONLY the tokens
-    added during that interval, NOT the cumulative composition. So
-    the user sees mix CHANGES across the block, not the smoothed
-    average."""
-    block = _block_with_counts(
-        input_tokens=300, output_tokens=600,
-        cache_create=900, cache_read=1200,
-    )
-    samples = [
-        ("2026-05-16T13:30:00Z", {"input": 100, "output": 200, "cache_create": 300, "cache_read": 400}),
-    ]
-    rows = build_intra_block_token_throughput(
-        block, samples=samples, now_iso="2026-05-16T14:00:00Z"
-    )
-    assert len(rows) == 2
-    # Interval 1: block_start (0/0/0/0) → s1 (100/200/300/400)
-    assert rows[0]["total_tokens"] == 1000
-    assert rows[0]["input_pct"] == pytest.approx(10.0)
-    # Interval 2: s1 → now (block.token_counts: 300/600/900/1200)
-    # Deltas: 200/400/600/800 → total 2000
-    assert rows[1]["total_tokens"] == 2000
-    assert rows[1]["input_pct"] == pytest.approx(10.0)
-    assert rows[1]["output_pct"] == pytest.approx(20.0)
-
-
-def test_build_intra_block_token_throughput_skips_intervals_with_no_activity() -> None:
-    """An interval where no tokens were added carries no signal —
-    drop it. Otherwise the percent-stacked area would emit a
-    division-by-zero or a phantom 100% band of one kind."""
-    block = _block_with_counts(
-        input_tokens=0, output_tokens=0,
-        cache_create=0, cache_read=0,
-    )
-    rows = build_intra_block_token_throughput(
-        block, samples=[], now_iso="2026-05-16T13:30:00Z"
-    )
-    assert rows == []
-
-
-def test_build_intra_block_token_throughput_each_row_sums_to_100_pct() -> None:
-    """Per-interval percentages always sum to 100 (within float
-    tolerance). The chart layer relies on this invariant when
-    drawing the percent-stacked area — a row that drifts to 99% or
-    101% would create a visible "gap" or "overflow" in the stack."""
-    block = _block_with_counts(
-        input_tokens=1, output_tokens=2,
-        cache_create=4, cache_read=8,
-    )
-    rows = build_intra_block_token_throughput(
-        block, samples=[], now_iso="2026-05-16T13:30:00Z"
-    )
-    for row in rows:
-        kind_sum = sum(
-            row[f"{k}_pct"]
-            for k in ("input", "output", "cache_create", "cache_read")
-        )
-        assert kind_sum == pytest.approx(100.0)
 
 
 # ---------- cache_savings ----------

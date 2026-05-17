@@ -646,21 +646,21 @@ def test_live_renders_token_kind_kpi_cards(
         assert color in md, f"missing PALETTE color {color!r} in card swatches"
 
 
-def test_live_token_throughput_chart_has_four_kinds_no_undefined(
+def test_live_token_mix_chart_renders_with_four_kinds(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """The Live view renders a `live-token-throughput` Plotly chart
-    keyed for the second chart card. The chart key is the
-    unambiguous marker that the percent-stacked area is in the
-    output. Existing `tests/test_undefined_regression.py` walks the
-    full app's figure JSON for the literal `undefined`; this test
-    locks the chart's PRESENCE on the Live view specifically."""
+    """The Live view renders a `live-token-mix` Plotly chart (the
+    honest replacement for the prior time-series throughput chart).
+    The chart key is the unambiguous marker that the composition
+    stacked bar is in the output. The prior throughput chart was
+    structurally impossible from ccusage's block-level-aggregate
+    data; the composition snapshot is what the data supports."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("live")
     at.run()
     _assert_clean(at)
     chart_keys = _plotly_chart_keys(at)
-    assert "live-token-throughput" in chart_keys
+    assert "live-token-mix" in chart_keys
 
 
 def test_live_renders_cost_unavailable_caption_when_rates_missing(
@@ -686,15 +686,14 @@ def test_live_renders_cost_unavailable_caption_when_rates_missing(
     )
 
 
-def test_live_renders_empty_throughput_caption_when_no_token_activity(
+def test_live_renders_empty_token_mix_caption_when_block_has_no_tokens(
     mock_ccusage, mock_ccusage_version
 ) -> None:
     """When the active block has zero tokens (a brand-new block
-    captured immediately after start), the throughput chart has
-    no positive-delta intervals to render. `live_token_throughput`
-    returns None and the UI shows an empty-state caption instead
-    of an empty chart frame. Locks the defensive empty-throughput
-    fallback path on the Live view."""
+    captured immediately after start), the composition bar has
+    nothing to render. `live_token_kind_composition_bar` returns
+    `None` and the UI shows a `Block has no token activity yet.`
+    caption instead of an empty chart frame."""
     blocks_payload = {
         "blocks": [
             {
@@ -731,8 +730,8 @@ def test_live_renders_empty_throughput_caption_when_no_token_activity(
         getattr(c, "value", "") for c in at.caption
     ) if hasattr(at, "caption") else ""
     md = "\n".join(m.value for m in at.markdown) + "\n" + captions
-    assert "No intra-block intervals with token activity yet" in md, (
-        f"expected empty-throughput caption; got: {md!r}"
+    assert "Block has no token activity yet" in md, (
+        f"expected empty-block caption; got: {md!r}"
     )
 
 

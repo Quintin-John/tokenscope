@@ -250,11 +250,11 @@ def test_live_view_renders_with_no_undefined(
     charts = _walk_plotly_charts(at)
     keys = {c["key"] for c in charts}
     assert "live-spend-trajectory" in keys
-    assert "live-token-throughput" in keys
+    assert "live-token-mix" in keys
     _assert_no_undefined(charts)
 
-    throughput = next(c for c in charts if c["key"] == "live-token-throughput")
-    assert set(throughput["trace_names"]) == {
+    token_mix = next(c for c in charts if c["key"] == "live-token-mix")
+    assert set(token_mix["trace_names"]) == {
         "input", "output", "cache_create", "cache_read"
     }
 
@@ -263,8 +263,8 @@ def test_live_view_renders_with_no_undefined(
         for r in _capture_chart_logs.records
         if "chart." in r.message and ".built" in r.message
     ]
-    assert any("chart.live_throughput.built" in m for m in build_logs), (
-        f"expected `chart.live_throughput.built` log; got: {build_logs!r}"
+    assert any("chart.live_token_mix.built" in m for m in build_logs), (
+        f"expected `chart.live_token_mix.built` log; got: {build_logs!r}"
     )
 
 

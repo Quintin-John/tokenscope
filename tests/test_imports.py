@@ -157,7 +157,6 @@ def test_analytics_public_surface() -> None:
         "cost_by_kind",
         "block_cache_hit_ratio",
         "block_cost_by_kind",
-        "build_intra_block_token_throughput",
         "cache_savings",
         "daily_cache_savings",
         "per_model_cache_performance",

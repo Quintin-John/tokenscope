@@ -36,7 +36,7 @@ from tokenscope.ui.charts import (
     donut_cost_by_model,
     family_color_map,
     live_spend_trajectory,
-    live_token_throughput,
+    live_token_kind_composition_bar,
     per_model_cache_bar,
     per_model_token_kind_bar,
     session_blocks_timeline,
@@ -758,21 +758,8 @@ def _palette_consistency_cases() -> list[tuple]:
             {"input", "output", "cache_create"},
         ),
         (
-            "live_token_throughput",
-            lambda: live_token_throughput(
-                _block_with_burn(),
-                [
-                    {
-                        "t": "2026-05-16T13:30:00Z",
-                        "total_tokens": 1000,
-                        "input_pct": 25.0,
-                        "output_pct": 25.0,
-                        "cache_create_pct": 25.0,
-                        "cache_read_pct": 25.0,
-                    }
-                ],
-                now_iso="2026-05-16T13:30:00Z",
-            ),
+            "live_token_kind_composition_bar",
+            lambda: live_token_kind_composition_bar(_block_with_burn()),
             {"input", "output", "cache_create", "cache_read"},
         ),
     ]
@@ -1732,47 +1719,16 @@ def test_session_blocks_timeline_tz_label() -> None:
     assert "Los_Angeles" in (fig.layout.xaxis.title.text or "")
 
 
-# ---------- live_token_throughput ----------
+# ---------- live_token_kind_composition_bar ----------
 
 
-def _throughput_rows() -> list[dict]:
-    """Two-interval percent-stacked sample, one row per fragment
-    refresh interval. Used by the live_token_throughput tests so
-    each test exercises the chart with realistic input shape."""
-    return [
-        {
-            "t": "2026-05-16T13:30:00Z",
-            "total_tokens": 1000,
-            "input_pct": 10.0,
-            "output_pct": 20.0,
-            "cache_create_pct": 30.0,
-            "cache_read_pct": 40.0,
-        },
-        {
-            "t": "2026-05-16T14:00:00Z",
-            "total_tokens": 2000,
-            "input_pct": 5.0,
-            "output_pct": 15.0,
-            "cache_create_pct": 30.0,
-            "cache_read_pct": 50.0,
-        },
-    ]
-
-
-def test_live_token_throughput_chart_has_four_kinds_no_undefined() -> None:
-    """The chart emits EXACTLY four named traces (one per known
-    token kind) — no auto-introduced phantom trace from a NaN /
-    None / empty category. And the figure's serialised JSON
-    contains no literal `undefined` token anywhere in trace names,
-    titles, or layout properties.
-
-    Same defensive contract as the Overview token-mix charts. Any
-    schema drift or Plotly internal that would have leaked an
-    `undefined` legend entry trips this regression."""
+def test_live_token_kind_composition_bar_has_four_kinds_no_undefined() -> None:
+    """Replaces the prior `live_token_throughput` time-series test.
+    The composition bar emits EXACTLY four named traces (one per
+    known token kind) — same defensive contract as every other
+    token-kind chart. No `undefined` anywhere in the figure JSON."""
     block = _block_with_burn()
-    fig = live_token_throughput(
-        block, _throughput_rows(), now_iso="2026-05-16T14:00:00Z"
-    )
+    fig = live_token_kind_composition_bar(block)
     assert fig is not None
     trace_names = [t.name for t in fig.data]
     assert sorted(trace_names) == [
@@ -1784,70 +1740,95 @@ def test_live_token_throughput_chart_has_four_kinds_no_undefined() -> None:
     )
 
 
-def test_live_token_throughput_skips_kinds_with_missing_columns() -> None:
-    """Defensive: a row dict missing a `<kind>_pct` column drops
-    THAT kind's band rather than crashing. Real data always carries
-    all four (the analytics helper emits them together), but the
-    chart layer can't trust upstream contracts without enforcement."""
+def test_live_token_kind_composition_bar_segments_sum_to_block_total() -> None:
+    """Segment widths sum to `block.totalTokens` — the bar is an
+    honest visual of the cumulative composition, not a percent-
+    rebased view that could mask the magnitude."""
     block = _block_with_burn()
-    incomplete_rows = [
-        {
-            "t": "2026-05-16T13:30:00Z",
-            "total_tokens": 200,
-            "input_pct": 50.0,
-            "output_pct": 50.0,
-            # cache_create_pct + cache_read_pct intentionally omitted
-        }
-    ]
-    fig = live_token_throughput(
-        block, incomplete_rows, now_iso="2026-05-16T13:30:00Z"
+    fig = live_token_kind_composition_bar(block)
+    total = sum(list(t.x)[0] for t in fig.data)
+    expected_total = (
+        block.token_counts.input_tokens
+        + block.token_counts.output_tokens
+        + block.token_counts.cache_creation_input_tokens
+        + block.token_counts.cache_read_input_tokens
     )
-    assert fig is not None
-    trace_names = {t.name for t in fig.data}
-    assert trace_names == {"input", "output"}
+    assert total == expected_total
 
 
-def test_live_token_throughput_returns_none_for_empty_rows() -> None:
-    """No throughput data → no chart frame. The caller renders an
-    empty-state caption instead of a blank figure that would look
-    like a broken chart."""
+def test_live_token_kind_composition_bar_uses_palette_token_kind_colors() -> None:
+    """Each segment is painted with `PALETTE[kind]` — same hue as
+    Overview's token mix, same as the Cache view's reads-vs-writes.
+    Invariant across every token-kind chart in the app."""
     block = _block_with_burn()
-    assert (
-        live_token_throughput(block, [], now_iso="2026-05-16T14:00:00Z")
-        is None
-    )
-
-
-def test_live_token_throughput_uses_palette_token_kind_colors() -> None:
-    """Each kind's band is painted with `PALETTE[kind]` — same hue
-    as the matching token-mix chart on the Overview. The user's
-    category-to-color mapping is invariant across every chart in
-    the app: input is always pink, output always blue, etc."""
-    block = _block_with_burn()
-    fig = live_token_throughput(
-        block, _throughput_rows(), now_iso="2026-05-16T14:00:00Z"
-    )
+    fig = live_token_kind_composition_bar(block)
     by_name = {t.name: t for t in fig.data}
     for kind in ("input", "output", "cache_create", "cache_read"):
-        trace = by_name[kind]
-        assert trace.line.color == PALETTE[kind]
-        assert trace.fillcolor == PALETTE[kind]
+        assert by_name[kind].marker.color == PALETTE[kind]
 
 
-def test_live_token_throughput_renders_now_reference_line() -> None:
-    """The chart draws a vertical dotted reference line at `now_iso`
-    spanning the full y-axis range — same visual contract as the
-    spend trajectory chart so the user reads both charts against
-    the same "now" anchor."""
-    block = _block_with_burn()
-    now = "2026-05-16T14:00:00Z"
-    fig = live_token_throughput(block, _throughput_rows(), now_iso=now)
-    now_lines = [
-        s for s in fig.layout.shapes
-        if s.type == "line" and s.x0 == now and s.x1 == now
-    ]
-    assert len(now_lines) == 1
-    assert now_lines[0].line.dash == "dot"
+def test_live_token_kind_composition_bar_returns_none_for_zero_tokens() -> None:
+    """A brand-new block with no tokens has nothing to composition.
+    Return None so the caller renders an empty-state caption."""
+    zero_block = BlockEntry(
+        id="2026-05-16T13:00:00.000Z",
+        startTime="2026-05-16T13:00:00.000Z",
+        endTime="2026-05-16T18:00:00.000Z",
+        actualEndTime=None,
+        isActive=True,
+        isGap=False,
+        entries=0,
+        tokenCounts=BlockTokenCounts(
+            inputTokens=0, outputTokens=0,
+            cacheCreationInputTokens=0, cacheReadInputTokens=0,
+        ),
+        totalTokens=0,
+        costUSD=0.0,
+        models=["claude-opus-4-7"],
+        burnRate=None,
+        projection=None,
+    )
+    assert live_token_kind_composition_bar(zero_block) is None
+
+
+def test_live_token_kind_composition_bar_hides_labels_below_threshold() -> None:
+    """Segments with share < 3% omit the inline text label (it
+    would overlap the neighbour). Counts + percents still surface
+    via the hovertemplate. Locks the readability contract the user
+    spec'd for this chart."""
+    # Set counts so cache_read dominates (>97%) and the other
+    # three are well below 3% each.
+    block = BlockEntry(
+        id="2026-05-16T13:00:00.000Z",
+        startTime="2026-05-16T13:00:00.000Z",
+        endTime="2026-05-16T18:00:00.000Z",
+        actualEndTime=None,
+        isActive=True,
+        isGap=False,
+        entries=200,
+        tokenCounts=BlockTokenCounts(
+            inputTokens=10, outputTokens=20,
+            cacheCreationInputTokens=30,
+            cacheReadInputTokens=10_000,
+        ),
+        totalTokens=10_060,
+        costUSD=1.0,
+        models=["claude-opus-4-7"],
+        burnRate=BurnRate(
+            tokensPerMinute=1.0,
+            tokensPerMinuteForIndicator=1.0,
+            costPerHour=1.0,
+        ),
+        projection=None,
+    )
+    fig = live_token_kind_composition_bar(block)
+    by_name = {t.name: t for t in fig.data}
+    # cache_read >> 3% → label present
+    cache_read_label = list(by_name["cache_read"].text)[0]
+    assert cache_read_label != ""
+    # input is ~0.1% → label suppressed
+    input_label = list(by_name["input"].text)[0]
+    assert input_label == ""
 
 
 def test_live_spend_trajectory_renders_now_reference_line() -> None:

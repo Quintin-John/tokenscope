@@ -824,69 +824,6 @@ def block_cost_by_kind(block: BlockEntry) -> list[dict] | None:
     return rows
 
 
-def build_intra_block_token_throughput(
-    block: BlockEntry,
-    samples: list[tuple[str, dict[str, int]]],
-    *,
-    now_iso: str,
-) -> list[dict]:
-    """Per-interval token-kind throughput across the active block.
-
-    Each output row carries:
-
-      * ``t`` — ISO timestamp marking the end of the interval
-      * ``input_pct`` / ``output_pct`` / ``cache_create_pct`` /
-        ``cache_read_pct`` — share (0–100) of tokens added during
-        the interval attributable to each kind. Each row sums to
-        100 (within float tolerance).
-      * ``total_tokens`` — absolute tokens added in the interval
-        (surfaced in hover so the magnitude question is one tooltip
-        away from the percent-stacked composition).
-
-    Intervals are derived from consecutive cumulative snapshots:
-    ``tokens_added[kind] = sample[i][kind] - sample[i-1][kind]``.
-    The series anchors on ``block.start_time`` at zero tokens for
-    every kind so the first real interval has a baseline, and ends
-    at ``now_iso`` using the current ``block.token_counts``
-    snapshot so the chart's right edge is the live moment.
-
-    Returns an empty list when no interval has any token activity
-    (a brand-new block with zero tokens, or a block whose snapshot
-    sequence is all-equal). The chart layer falls back to an
-    empty-state caption.
-
-    Note on bucketing: the function uses the sample cadence the
-    caller already produces (one snapshot per fragment refresh)
-    rather than imposing its own fixed-minute buckets. The live
-    panel runs the same fragment every `LIVE_REFRESH_SECONDS`, so
-    the effective bucket size is that cadence. A second
-    bucket-resampling layer would add complexity without
-    information — there's no sub-cadence data to resolve.
-    """
-    KINDS = ("input", "output", "cache_create", "cache_read")
-
-    points: list[tuple[str, dict[str, int]]] = [
-        (block.start_time, {k: 0 for k in KINDS}),
-    ]
-    points.extend(samples)
-    if not samples or samples[-1][0] != now_iso:
-        points.append((now_iso, _block_token_counts_by_kind(block)))
-
-    rows: list[dict] = []
-    for i in range(1, len(points)):
-        _, prev_counts = points[i - 1]
-        cur_t, cur_counts = points[i]
-        added = {k: max(0, cur_counts[k] - prev_counts[k]) for k in KINDS}
-        total = sum(added.values())
-        if total == 0:
-            continue
-        row: dict = {"t": cur_t, "total_tokens": total}
-        for k in KINDS:
-            row[f"{k}_pct"] = added[k] / total * 100
-        rows.append(row)
-    return rows
-
-
 def cache_savings(daily_report: DailyReport) -> dict | None:
     """Estimated dollar savings from caching `cache_read` tokens
     vs. paying the full input rate for the same tokens.

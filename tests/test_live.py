@@ -40,7 +40,10 @@ from tokenscope.models import (
     BurnRate,
     Projection,
 )
-from tokenscope.ui.charts import live_spend_trajectory, live_token_throughput
+from tokenscope.ui.charts import (
+    live_spend_trajectory,
+    live_token_kind_composition_bar,
+)
 
 
 APP_PATH = "src/tokenscope/app.py"
@@ -202,31 +205,21 @@ def test_live_spend_trajectory_x_axis_range_spans_full_block_window() -> None:
     assert xrange[1] == "2026-05-16T14:00:00"
 
 
-def test_live_token_throughput_x_axis_spans_full_block_window() -> None:
-    """Same X-axis contract as the spend trajectory chart — both
-    charts share the helper `_apply_block_window_xaxis` so the
-    visual window is invariant between them."""
+def test_live_token_kind_composition_bar_builds_quickly() -> None:
+    """The honest composition bar replaces the prior throughput
+    time-series. There is no fetch, no bucketing, no sample
+    history — just four `go.Bar` traces built from one
+    `block.token_counts` dict. Server-side build must be
+    well under the 200ms budget the user named for this
+    surface."""
     block = _active_block()
-    rows = [
-        {
-            "t": "2026-05-16T14:00:00Z",
-            "total_tokens": 1000,
-            "input_pct": 25.0, "output_pct": 25.0,
-            "cache_create_pct": 25.0, "cache_read_pct": 25.0,
-        },
-        {
-            "t": "2026-05-16T15:00:00Z",
-            "total_tokens": 2000,
-            "input_pct": 25.0, "output_pct": 25.0,
-            "cache_create_pct": 25.0, "cache_read_pct": 25.0,
-        },
-    ]
-    fig = live_token_throughput(
-        block, rows, now_iso="2026-05-16T15:00:00Z", tz="America/New_York"
+    start = time.perf_counter()
+    fig = live_token_kind_composition_bar(block)
+    elapsed = time.perf_counter() - start
+    assert fig is not None
+    assert elapsed < 0.2, (
+        f"composition bar build exceeded 200ms budget: {elapsed * 1000:.1f}ms"
     )
-    xrange = fig.layout.xaxis.range
-    assert xrange[0] == "2026-05-16T09:00:00"
-    assert xrange[1] == "2026-05-16T14:00:00"
 
 
 def test_live_spend_trajectory_now_reference_is_localized() -> None:
@@ -262,7 +255,7 @@ def test_live_charts_fall_back_to_utc_when_tz_none() -> None:
     assert list(actual.x)[0] == "2026-05-16T13:00:00.000Z"
 
 
-# --- Bug 2a: throughput chart empty state when block too new ------------
+# --- helpers + Live-page smoke ------------------------------------------
 
 
 def _wire_live_fixtures(mock_ccusage, blocks_payload: dict) -> None:
@@ -329,115 +322,48 @@ def _make_active_block_payload(
     }
 
 
-def test_live_throughput_chart_empty_state_when_block_just_started(
+def test_live_token_mix_chart_renders_on_live_view(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """A block in its first few minutes can have at most one
-    cumulative-snapshot bucket, which Plotly's percent-stacked
-    area renders as a degenerate column with multiple identical
-    ticks. The Live view detects this case via wall-clock
-    elapsed time and renders an explicit empty-state panel
-    instead of the chart."""
-    # Pin "now" so the test isn't time-dependent. Block started
-    # 3 minutes ago — well below the default threshold
-    # (bucket=5, min_buckets=2 → 10 minutes).
-    frozen_now = datetime(2026, 5, 16, 13, 3, tzinfo=timezone.utc)
+    """The composition bar is unconditional — no elapsed-time gate
+    (the prior throughput chart's gate is gone because the
+    composition snapshot is meaningful from the very first
+    refresh: it's just `block.token_counts` rendered as four
+    coloured segments). Locks the chart's presence on the Live
+    view by key."""
     payload = _make_active_block_payload("2026-05-16T13:00:00.000Z")
     _wire_live_fixtures(mock_ccusage, payload)
-
-    real_dt = datetime
-
-    class _FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            if tz is None:
-                return frozen_now.replace(tzinfo=None)
-            return frozen_now.astimezone(tz)
-
-    with patch("tokenscope.ui.live.datetime", _FrozenDatetime):
-        at = AppTest.from_file(APP_PATH, default_timeout=30)
-        at.query_params["view"] = "live"
-        at.run()
-
-    assert not at.exception, [str(e.value)[:200] for e in at.exception]
-    md = "\n".join(m.value for m in at.markdown)
-    assert "tokenscope-live-throughput-empty" in md, (
-        "expected empty-state panel markup when block too new"
-    )
-    assert "Block started" in md
-    assert "10 minutes" in md or "10 min" in md, (
-        "empty-state copy should name the threshold"
-    )
-    # The plotly chart itself must NOT be rendered when the panel
-    # is up — the key absence is the unambiguous marker.
-    chart_keys = _plotly_chart_keys(at)
-    assert "live-token-throughput" not in chart_keys
-
-
-def test_live_throughput_chart_renders_when_block_has_enough_elapsed(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """Counterpart to the empty-state test: a block that's been
-    running past the threshold renders the throughput chart."""
-    # Block started 30 min ago — well past the 10-min threshold.
-    frozen_now = datetime(2026, 5, 16, 13, 30, tzinfo=timezone.utc)
-    payload = _make_active_block_payload("2026-05-16T13:00:00.000Z")
-    _wire_live_fixtures(mock_ccusage, payload)
-
-    class _FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            if tz is None:
-                return frozen_now.replace(tzinfo=None)
-            return frozen_now.astimezone(tz)
-
-    with patch("tokenscope.ui.live.datetime", _FrozenDatetime):
-        at = AppTest.from_file(APP_PATH, default_timeout=30)
-        at.query_params["view"] = "live"
-        at.run()
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "live"
+    at.run()
 
     assert not at.exception, [str(e.value)[:200] for e in at.exception]
     chart_keys = _plotly_chart_keys(at)
-    assert "live-token-throughput" in chart_keys, (
-        f"throughput chart not rendered with sufficient elapsed time; "
-        f"keys: {chart_keys!r}"
+    assert "live-token-mix" in chart_keys, (
+        f"composition bar not rendered on Live view; keys: {chart_keys!r}"
     )
 
 
-# --- Bug 2c: perf budget ------------------------------------------------
+# --- perf budget --------------------------------------------------------
 
 
-def test_live_throughput_chart_renders_within_perf_budget(
+def test_live_page_renders_within_perf_budget(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Server-side render budget for the Live page (including the
-    throughput chart). The user reported the throughput chart
-    "lagging compared to the rest of the page"; the 30s refresh
-    cadence imposes a budget of well under 30s but a 2s budget
-    leaves comfortable headroom AND catches a future regression
-    that would push the bucketing/chart build into multi-second
-    territory."""
+    """Server-side render budget for the entire Live page. The user
+    reported the prior token-throughput chart "lagging compared
+    to the rest of the page"; with the composition bar (one
+    `block.token_counts` dict, no fetch, no bucketing) the whole
+    page should land well under 2s."""
     _wire_live_fixtures(
         mock_ccusage,
         _make_active_block_payload("2026-05-16T13:00:00.000Z"),
     )
-    # Push "now" past the gating threshold so the chart actually
-    # renders and the bucketing function runs.
-    frozen_now = datetime(2026, 5, 16, 14, 0, tzinfo=timezone.utc)
-
-    class _FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            if tz is None:
-                return frozen_now.replace(tzinfo=None)
-            return frozen_now.astimezone(tz)
-
-    with patch("tokenscope.ui.live.datetime", _FrozenDatetime):
-        at = AppTest.from_file(APP_PATH, default_timeout=30)
-        at.query_params["view"] = "live"
-        start = time.perf_counter()
-        at.run()
-        elapsed = time.perf_counter() - start
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "live"
+    start = time.perf_counter()
+    at.run()
+    elapsed = time.perf_counter() - start
 
     assert not at.exception, [str(e.value)[:200] for e in at.exception]
     assert elapsed < 2.0, (
@@ -462,24 +388,14 @@ def test_live_no_utc_strings_in_rendered_html(
         "tokenscope.tz.detect_local_iana",
         lambda: "America/New_York",
     )
-    # Past the throughput gate so the chart renders.
-    frozen_now = datetime(2026, 5, 16, 14, 0, tzinfo=timezone.utc)
     _wire_live_fixtures(
         mock_ccusage,
         _make_active_block_payload("2026-05-16T13:00:00.000Z"),
     )
 
-    class _FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            if tz is None:
-                return frozen_now.replace(tzinfo=None)
-            return frozen_now.astimezone(tz)
-
-    with patch("tokenscope.ui.live.datetime", _FrozenDatetime):
-        at = AppTest.from_file(APP_PATH, default_timeout=30)
-        at.query_params["view"] = "live"
-        at.run()
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "live"
+    at.run()
 
     assert not at.exception, [str(e.value)[:200] for e in at.exception]
     md = "\n".join(m.value for m in at.markdown)
