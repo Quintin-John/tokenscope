@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from tests.conftest import FIXTURES
@@ -618,24 +619,491 @@ def test_live_does_not_render_projection_detail_expander(
     )
 
 
+def test_live_renders_token_kind_kpi_cards(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Second KPI row: four cards (one per token kind) under the
+    cost KPI strip. Each card carries:
+      - the kind label as HTML (the actual `<div>` markup is what
+        Streamlit ends up rendering — Streamlit's `at.metric`
+        introspection doesn't surface custom-HTML cards),
+      - the PALETTE color as a swatch (the hex literal appears in
+        the inline style),
+      - an abbreviated token count.
+    Locks both the structure (four kinds present) and the visual
+    contract (PALETTE hexes appear, swatch class is rendered)."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    for label in ("Input", "Output", "Cache create", "Cache read"):
+        assert label in md, f"missing kind label {label!r}; got md: {md!r}"
+    # PALETTE-driven swatch markup is on the page (the class plus
+    # each kind's hex literal).
+    assert "tokenscope-kind-swatch" in md
+    for color in ("#ec4899", "#1e40af", "#f59e0b", "#14b8a6"):
+        assert color in md, f"missing PALETTE color {color!r} in card swatches"
+
+
+def test_live_token_throughput_chart_has_four_kinds_no_undefined(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The Live view renders a `live-token-throughput` Plotly chart
+    keyed for the second chart card. The chart key is the
+    unambiguous marker that the percent-stacked area is in the
+    output. Existing `tests/test_undefined_regression.py` walks the
+    full app's figure JSON for the literal `undefined`; this test
+    locks the chart's PRESENCE on the Live view specifically."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    chart_keys = _plotly_chart_keys(at)
+    assert "live-token-throughput" in chart_keys
+
+
+def test_live_renders_cost_unavailable_caption_when_rates_missing(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When LiteLLM rates can't be resolved (offline + no cache),
+    `block_cost_by_kind` returns None. The token-kind KPI cards
+    render an `cost estimate unavailable` caption instead of fake
+    dollar amounts. Locks the defensive UI fallback path."""
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model", lambda _name: None
+    )
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    captions = "\n".join(
+        getattr(c, "value", "") for c in at.caption
+    ) if hasattr(at, "caption") else ""
+    md = "\n".join(m.value for m in at.markdown) + "\n" + captions
+    assert "cost estimate unavailable" in md, (
+        f"expected fallback caption when rates unresolvable; got: {md!r}"
+    )
+
+
+def test_live_renders_empty_throughput_caption_when_no_token_activity(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When the active block has zero tokens (a brand-new block
+    captured immediately after start), the throughput chart has
+    no positive-delta intervals to render. `live_token_throughput`
+    returns None and the UI shows an empty-state caption instead
+    of an empty chart frame. Locks the defensive empty-throughput
+    fallback path on the Live view."""
+    blocks_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 0,
+                "tokenCounts": {
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                    "cacheReadInputTokens": 0,
+                },
+                "totalTokens": 0,
+                "costUSD": 0.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": None,
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=blocks_payload)
+    mock_ccusage("blocks", "--active", response=blocks_payload)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+    captions = "\n".join(
+        getattr(c, "value", "") for c in at.caption
+    ) if hasattr(at, "caption") else ""
+    md = "\n".join(m.value for m in at.markdown) + "\n" + captions
+    assert "No intra-block intervals with token activity yet" in md, (
+        f"expected empty-throughput caption; got: {md!r}"
+    )
+
+
+def test_live_cache_hit_ratio_matches_token_counts(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The cache-hit-ratio callout renders the formula result that
+    `block_cache_hit_ratio` would produce from the active block's
+    token counts. Computed against the fixture: locks both that the
+    callout is on the page AND that the number reflects the same
+    formula the analytics layer applies."""
+    from tokenscope.analytics import block_cache_hit_ratio
+    from tokenscope.models import BlocksReport
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+
+    blocks_path = FIXTURES / "blocks.json"
+    report = BlocksReport.model_validate_json(blocks_path.read_text())
+    active = next(b for b in report.blocks if b.is_active)
+    expected_pct = block_cache_hit_ratio(active) * 100
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "tokenscope-cache-ratio-callout" in md, (
+        "cache hit ratio callout markup not on the page"
+    )
+    assert f"{expected_pct:.1f}%" in md, (
+        f"expected cache hit ratio {expected_pct:.1f}% to appear in markdown"
+    )
+
+
+def test_cache_renders_savings_hero(mock_ccusage, mock_ccusage_version) -> None:
+    """Cache view's headline is the savings hero — the `$X saved`
+    figure is the largest stat on the page. Locks the framing
+    change from `cache_hit_ratio` 99.5% (a vanity metric — caching
+    works) to savings (caching's monetary value)."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    assert "tokenscope-cache-hero" in md, (
+        f"expected savings hero markup; got md: {md!r}"
+    )
+    assert "Estimated savings from caching" in md
+    # The hero card carries either a real `$X.XX` figure or the
+    # explicit "—" fallback. Either way it lands on the page.
+    assert "tokenscope-cache-hero-value" in md
+
+
+def test_cache_reads_vs_writes_chart_renders(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Cache reads vs writes chart is keyed `cache-reads-vs-writes`
+    and renders inside its card."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+    chart_keys = _plotly_chart_keys(at)
+    assert "cache-reads-vs-writes" in chart_keys
+
+
+def test_cache_renders_savings_unavailable_fallback_when_no_rates(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When LiteLLM rates aren't reachable, every savings-derived
+    surface on the Cache view falls back to its no-rates copy:
+    the hero shows `—` + the offline-pricing explanation, the
+    daily savings card shows the offline caption."""
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model", lambda _name: None
+    )
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    captions = "\n".join(
+        getattr(c, "value", "") for c in at.caption
+    ) if hasattr(at, "caption") else ""
+    combined = md + "\n" + captions
+    assert "Pricing rates from LiteLLM aren't reachable" in combined
+    assert "Savings unavailable" in combined
+
+
+def test_cache_renders_data_range_banner_when_cache_starts_after_since(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When the sidebar's `since` is older than the first day with
+    cache activity, the Cache view surfaces the gap explicitly.
+
+    Uses a daily fixture whose only entry is mid-window relative
+    to the sidebar's since query param; the banner explains the
+    chart's narrower X-axis."""
+    late_cache_daily = {
+        "daily": [
+            {
+                "date": "2026-05-15",
+                "inputTokens": 100, "outputTokens": 200,
+                "cacheCreationTokens": 300, "cacheReadTokens": 400,
+                "totalTokens": 1000, "totalCost": 5.0,
+                "modelsUsed": ["claude-opus-4-7"],
+                "modelBreakdowns": [
+                    {
+                        "modelName": "claude-opus-4-7",
+                        "inputTokens": 100, "outputTokens": 200,
+                        "cacheCreationTokens": 300, "cacheReadTokens": 400,
+                        "cost": 5.0,
+                    }
+                ],
+            }
+        ],
+        "totals": {
+            "inputTokens": 100, "outputTokens": 200,
+            "cacheCreationTokens": 300, "cacheReadTokens": 400,
+            "totalTokens": 1000, "totalCost": 5.0,
+        },
+    }
+    mock_ccusage("daily", response=late_cache_daily)
+    # Match the daily entry to the daily-by-project entry — sidebar reads
+    # both, and using stale fixtures here can cross-pollinate banners.
+    mock_ccusage(
+        "daily", "--instances",
+        response={
+            "projects": {"-project-a": late_cache_daily["daily"]},
+            "totals": late_cache_daily["totals"],
+        },
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("cache", since="2026-04-18", until="2026-05-17")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    assert "tokenscope-cache-range-banner" in md, (
+        f"expected data-range banner; got: {md!r}"
+    )
+    assert "Cache data available from 2026-05-15" in md
+
+
+def test_cache_renders_reads_vs_writes_fallback_when_no_cache_activity(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When the window has daily entries but every entry has zero
+    `cache_create` AND zero `cache_read`, the reads-vs-writes
+    panel falls back to its empty-state caption rather than
+    rendering an empty bar chart."""
+    no_cache_daily = {
+        "daily": [
+            {
+                "date": "2026-05-15",
+                "inputTokens": 100, "outputTokens": 200,
+                "cacheCreationTokens": 0, "cacheReadTokens": 0,
+                "totalTokens": 300, "totalCost": 1.0,
+                "modelsUsed": ["claude-opus-4-7"],
+                "modelBreakdowns": [
+                    {
+                        "modelName": "claude-opus-4-7",
+                        "inputTokens": 100, "outputTokens": 200,
+                        "cacheCreationTokens": 0, "cacheReadTokens": 0,
+                        "cost": 1.0,
+                    }
+                ],
+            }
+        ],
+        "totals": {
+            "inputTokens": 100, "outputTokens": 200,
+            "cacheCreationTokens": 0, "cacheReadTokens": 0,
+            "totalTokens": 300, "totalCost": 1.0,
+        },
+    }
+    mock_ccusage("daily", response=no_cache_daily)
+    mock_ccusage(
+        "daily", "--instances",
+        response={"projects": {"p1": no_cache_daily["daily"]}, "totals": no_cache_daily["totals"]},
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+    captions = "\n".join(
+        getattr(c, "value", "") for c in at.caption
+    ) if hasattr(at, "caption") else ""
+    assert "No cache activity in the window." in captions
+
+
+def test_cache_suppresses_per_model_when_only_one_model_has_activity(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Two models in the window but only one carries cache
+    activity → the per-model section is still suppressed
+    (`rows_with_activity` has <2 entries). The comparison framing
+    requires at least two models to compare."""
+    two_models_only_one_caches = {
+        "daily": [
+            {
+                "date": "2026-05-15",
+                "inputTokens": 200, "outputTokens": 400,
+                "cacheCreationTokens": 300, "cacheReadTokens": 400,
+                "totalTokens": 1300, "totalCost": 6.0,
+                "modelsUsed": [
+                    "claude-opus-4-7",
+                    "claude-haiku-4-5-20251001",
+                ],
+                "modelBreakdowns": [
+                    {
+                        "modelName": "claude-opus-4-7",
+                        "inputTokens": 100, "outputTokens": 200,
+                        "cacheCreationTokens": 300, "cacheReadTokens": 400,
+                        "cost": 5.0,
+                    },
+                    {
+                        "modelName": "claude-haiku-4-5-20251001",
+                        "inputTokens": 100, "outputTokens": 200,
+                        "cacheCreationTokens": 0, "cacheReadTokens": 0,
+                        "cost": 1.0,
+                    },
+                ],
+            }
+        ],
+        "totals": {
+            "inputTokens": 200, "outputTokens": 400,
+            "cacheCreationTokens": 300, "cacheReadTokens": 400,
+            "totalTokens": 1300, "totalCost": 6.0,
+        },
+    }
+    mock_ccusage("daily", response=two_models_only_one_caches)
+    mock_ccusage(
+        "daily", "--instances",
+        response={
+            "projects": {"p1": two_models_only_one_caches["daily"]},
+            "totals": two_models_only_one_caches["totals"],
+        },
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Per-model cache performance" not in md
+
+
+def test_cache_renders_empty_window_info_banner(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """An empty daily report → the empty-window info banner. No
+    crash, no half-rendered hero, no broken charts."""
+    empty_daily = {
+        "daily": [],
+        "totals": {
+            "inputTokens": 0, "outputTokens": 0,
+            "cacheCreationTokens": 0, "cacheReadTokens": 0,
+            "totalTokens": 0, "totalCost": 0.0,
+        },
+    }
+    mock_ccusage("daily", response=empty_daily)
+    mock_ccusage(
+        "daily", "--instances",
+        response={"projects": {}, "totals": empty_daily["totals"]},
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+    info_texts = "\n".join(i.value for i in at.info)
+    assert "No usage in the selected window" in info_texts
+
+
+def test_cache_handles_single_model_gracefully(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """A single-model window suppresses the per-model breakdown
+    section entirely (no empty table, no single-row chart). Lock
+    the contract that the section is conditional on >1 model."""
+    single_model_daily = {
+        "daily": [
+            {
+                "date": "2026-05-15",
+                "inputTokens": 100,
+                "outputTokens": 200,
+                "cacheCreationTokens": 300,
+                "cacheReadTokens": 400,
+                "totalTokens": 1000,
+                "totalCost": 5.0,
+                "modelsUsed": ["claude-opus-4-7"],
+                "modelBreakdowns": [
+                    {
+                        "modelName": "claude-opus-4-7",
+                        "inputTokens": 100,
+                        "outputTokens": 200,
+                        "cacheCreationTokens": 300,
+                        "cacheReadTokens": 400,
+                        "cost": 5.0,
+                    }
+                ],
+            }
+        ],
+        "totals": {
+            "inputTokens": 100, "outputTokens": 200,
+            "cacheCreationTokens": 300, "cacheReadTokens": 400,
+            "totalTokens": 1000, "totalCost": 5.0,
+        },
+    }
+    mock_ccusage("daily", response=single_model_daily)
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    # Per-model section header is the unambiguous marker — it
+    # ONLY renders when len(rows) > 1.
+    assert "Per-model cache performance" not in md
+    chart_keys = _plotly_chart_keys(at)
+    assert "cache-per-model-bar" not in chart_keys
+
+
 def test_cache_renders(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     at = _at("cache")
     at.run()
     _assert_clean(at)
+    # The Cache view's H1 + headline (savings hero) + supporting KPI row.
+    md = "\n".join(m.value for m in at.markdown)
+    assert "# Cache" in md
+    assert "Estimated savings from caching" in md
+    assert "Cache hit ratio" in md
     labels = {m.label for m in at.metric}
-    assert "Cache hit ratio (window)" in labels
-    assert "Effective rate ($ / 1M tokens)" in labels
+    assert "Effective $ / 1M tokens" in labels
 
 
 def test_models_renders(mock_ccusage, mock_ccusage_version) -> None:
+    """Models view boots cleanly with the new H1 + 4-card KPI strip.
+    Asserts the surface shape: H1 present, Total cost card present,
+    Top model card replaces the prior `Models in window: N` count."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("models")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    assert "# Models" in md
+    labels = {m.label for m in at.metric}
+    assert "Total cost" in labels
+    assert "Top model" in labels
+
+
+def test_models_kpi_strip_no_useless_count(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Locks the framing change: the prior `Models in window: N`
+    KPI was a count of table rows the user can see directly below,
+    not a useful stat. The 4th slot now carries cost-concentration
+    framing (`Top model`) instead."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("models")
     at.run()
     _assert_clean(at)
     labels = {m.label for m in at.metric}
-    assert "Total cost" in labels
-    assert "Models in window" in labels
+    assert "Models in window" not in labels
 
 
 # ---------- drill views ----------
@@ -1107,21 +1575,97 @@ def test_live_handles_no_active_block(mock_ccusage, mock_ccusage_version) -> Non
     _assert_clean(at)
 
 
-# ---------- Sankey controls (slice 13) ----------
+# ---------- Models per-model token-kind chart ----------
 
 
-def test_models_renders_multi_family_sankey(
+def test_models_renders_per_model_token_kind_chart(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """When the fixture has multiple families, Models renders the Sankey
-    with the width-mode segmented control."""
+    """The Sankey + donut + Top-N controls are gone. The replacement
+    is a per-model horizontal stacked bar keyed `models-token-kind`,
+    which carries the per-model token-kind composition with PALETTE
+    colors. Locks both the new chart's presence and the absence of
+    the old controls."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("models")
     at.run()
     _assert_clean(at)
-    # Fixture has both opus and haiku, so Sankey + controls render.
-    markdown = [m.value for m in at.markdown]
-    assert any("Token flow:" in m for m in markdown)
+    chart_keys = _plotly_chart_keys(at)
+    assert "models-token-kind" in chart_keys
+    md = "\n".join(m.value for m in at.markdown)
+    # Old surface artefacts: section header + control labels.
+    assert "Token flow:" not in md
+    assert "Width represents" not in md
+    assert "Drill into a family" in md
+
+
+def test_drill_into_family_does_not_raise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Regression for the crash: the prior code assigned
+    `st.session_state["sidebar-models"] = fam_models` from inside
+    the Models view AFTER the sidebar widget had instantiated.
+    Streamlit's session-state guard turned that into a
+    `StreamlitAPIException` on every drill click. The new flow
+    routes through `st.query_params` only; the sidebar's
+    unconditional URL → session_state sync picks up the change."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("models")
+    at.run()
+    _assert_clean(at)
+    drill_buttons = [
+        b for b in at.button
+        if "View" in (b.label or "") and "Overview" in (b.label or "")
+    ]
+    assert drill_buttons, (
+        "no drill buttons rendered on Models view — fixture must produce "
+        "at least one family in the breakdown"
+    )
+    drill_buttons[0].click().run()
+    # No exception fell out of the rerun.
+    assert not at.exception, [str(e.value)[:200] for e in at.exception]
+    # The drill routed to Overview with the family's models seeded.
+    # AppTest exposes query_params as `list[str]` (Streamlit's
+    # multi-value semantics) — unwrap before string comparison.
+    def _qp(key: str) -> str | None:
+        raw = at.query_params.get(key)
+        if isinstance(raw, list):
+            return raw[0] if raw else None
+        return raw
+    assert _qp("view") == "overview"
+    models_param = _qp("models") or ""
+    # The clicked button was the FIRST family in sorted order — the
+    # `models` URL param now carries that family's model ids.
+    assert models_param, "models param missing from drill destination"
+
+
+def test_share_of_cost_calculation(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The breakdown table displays share as a proper percent
+    (0–100), not the raw 0–1 fraction the prior code accidentally
+    passed through `%.1f%%` (which rendered 99.96% as `1.0%`).
+
+    Locks the analytics contract: shares sum to 1.0 across all
+    models in the window (assumption the ProgressColumn relies on
+    for max_value=100)."""
+    from tokenscope.analytics import model_breakdown
+    from tokenscope.models import DailyReport
+
+    _wire_default_fixtures(mock_ccusage)
+    daily = json.loads((FIXTURES / "daily.json").read_text())
+    report = DailyReport.model_validate(daily)
+    rows = model_breakdown(report)
+    total_share = sum(row["share"] for row in rows)
+    assert total_share == pytest.approx(1.0, abs=1e-9)
+    # Every row's share is `cost / total_cost` directly — NOT
+    # divided by 100 anywhere along the path.
+    total_cost = sum(row["cost"] for row in rows)
+    for row in rows:
+        expected_share = (
+            row["cost"] / total_cost if total_cost else 0.0
+        )
+        assert row["share"] == pytest.approx(expected_share)
 
 
 # ---------- ccusage bare `[]` coercion (slice 13 bug fix) ----------

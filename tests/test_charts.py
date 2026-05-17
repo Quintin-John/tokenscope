@@ -29,15 +29,18 @@ from tokenscope.ui.charts import (
     _daily_metric_figure,
     apply_enterprise_style,
     burn_gauge,
-    cache_hit_ratio_line,
+    cache_hit_sparkline,
+    cache_reads_vs_writes_bar,
     cost_trend_with_rolling,
+    daily_cache_savings_bar,
     donut_cost_by_model,
     family_color_map,
     live_spend_trajectory,
+    live_token_throughput,
+    per_model_cache_bar,
+    per_model_token_kind_bar,
     session_blocks_timeline,
     session_token_mix,
-    single_family_token_bar,
-    token_flow_sankey,
     token_mix_non_cache_percent_bar,
     token_mix_percent_bar,
 )
@@ -754,6 +757,24 @@ def _palette_consistency_cases() -> list[tuple]:
             lambda r=single_day_token_report: token_mix_non_cache_percent_bar(r),
             {"input", "output", "cache_create"},
         ),
+        (
+            "live_token_throughput",
+            lambda: live_token_throughput(
+                _block_with_burn(),
+                [
+                    {
+                        "t": "2026-05-16T13:30:00Z",
+                        "total_tokens": 1000,
+                        "input_pct": 25.0,
+                        "output_pct": 25.0,
+                        "cache_create_pct": 25.0,
+                        "cache_read_pct": 25.0,
+                    }
+                ],
+                now_iso="2026-05-16T13:30:00Z",
+            ),
+            {"input", "output", "cache_create", "cache_read"},
+        ),
     ]
 
 
@@ -1339,94 +1360,327 @@ def test_burn_gauge_no_burn_rate_returns_none() -> None:
     assert burn_gauge(block) is None
 
 
-# ---------- cache_hit_ratio_line ----------
+# ---------- cache_hit_sparkline ----------
 
 
-def test_cache_hit_ratio_line_returns_figure() -> None:
+def test_cache_hit_sparkline_returns_figure_with_line_and_now_dot() -> None:
+    """Sparkline emits exactly two traces: the ratio line and a
+    single accent dot at the latest sample. The dot is what the
+    user reads as `now` inside the KPI card."""
     report = _report(
         [
             _entry("2026-05-15", cost=1.0, model="claude-opus-4-7"),
             _entry("2026-05-16", cost=2.0, model="claude-opus-4-7"),
         ]
     )
-    fig = cache_hit_ratio_line(report)
+    fig = cache_hit_sparkline(report)
     assert isinstance(fig, go.Figure)
-    assert len(fig.data) == 1
-    # 2 points, ratio in [0,1].
-    assert len(fig.data[0].x) == 2
-    assert all(0.0 <= r <= 1.0 for r in fig.data[0].y)
+    assert len(fig.data) == 2
+    # Trace 0 is the line; trace 1 is the single "now" marker.
+    line, now_dot = fig.data
+    assert line.mode == "lines"
+    assert now_dot.mode == "markers"
+    assert len(now_dot.x) == 1
 
 
-def test_cache_hit_ratio_line_empty_returns_none() -> None:
-    assert cache_hit_ratio_line(_report([])) is None
+def test_cache_hit_sparkline_auto_scales_y_axis_to_data_range() -> None:
+    """Y-axis fits the ACTUAL ratio range, not a hard 0-100% range.
+    Locks the regression the user flagged: the prior chart pinned
+    Y to 0-1.0 and rendered a flat line in a sea of whitespace
+    because real data sits at 99-100%."""
+    report = _report(
+        [
+            _entry("2026-05-15", cost=1.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=2.0, model="claude-opus-4-7"),
+        ]
+    )
+    fig = cache_hit_sparkline(report)
+    y_range = fig.layout.yaxis.range
+    # Y range should be much narrower than [0, 1].
+    assert y_range[1] - y_range[0] < 0.5, (
+        f"sparkline Y range too wide; saw {y_range!r}"
+    )
 
 
-# ---------- token_flow_sankey ----------
+def test_cache_hit_sparkline_returns_none_with_fewer_than_two_points() -> None:
+    """One data point is not a trend. The sparkline returns None
+    so the caller falls back to a static caption rather than
+    rendering a single marker."""
+    assert cache_hit_sparkline(_report([])) is None
+    one_day = _report([_entry("2026-05-15", cost=1.0, model="claude-opus-4-7")])
+    assert cache_hit_sparkline(one_day) is None
 
 
-def test_token_flow_sankey_returns_figure() -> None:
-    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
-    fig = token_flow_sankey(report)
-    assert isinstance(fig, go.Figure)
-    # Single Sankey trace.
-    assert len(fig.data) == 1
-    trace = fig.data[0]
-    # 4 token kinds + 1 family = 5 nodes.
-    assert len(trace.node.label) == 5
+# ---------- cache_reads_vs_writes_bar ----------
 
 
-def test_token_flow_sankey_empty_returns_none() -> None:
-    assert token_flow_sankey(_report([])) is None
+def test_cache_reads_vs_writes_chart_has_two_traces() -> None:
+    """The reads-vs-writes stacked bar emits EXACTLY two named
+    traces: `cache_create` and `cache_read`. Same defensive
+    contract as the Overview token-mix charts — no auto-introduced
+    phantom legend entry from a NaN / None / empty category."""
+    report = _report(
+        [
+            _entry("2026-05-15", cost=1.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=2.0, model="claude-opus-4-7"),
+        ]
+    )
+    fig = cache_reads_vs_writes_bar(report)
+    assert fig is not None
+    trace_names = sorted(t.name for t in fig.data)
+    assert trace_names == ["cache_create", "cache_read"]
+    body = fig.to_json()
+    assert "undefined" not in body
 
 
-# ---------- single_family_token_bar ----------
+def test_cache_reads_vs_writes_bar_uses_palette_token_kind_colors() -> None:
+    """Bands use `PALETTE[cache_create]` (amber) and
+    `PALETTE[cache_read]` (teal) — same hues as the Overview
+    token-mix chart. The user's category-to-color mapping is
+    invariant across the dashboard."""
+    report = _report(
+        [_entry("2026-05-15", cost=1.0, model="claude-opus-4-7")]
+    )
+    fig = cache_reads_vs_writes_bar(report)
+    by_name = {t.name: t for t in fig.data}
+    assert by_name["cache_create"].marker.color == PALETTE["cache_create"]
+    assert by_name["cache_read"].marker.color == PALETTE["cache_read"]
 
 
-def test_single_family_token_bar_returns_horizontal_log_bar() -> None:
-    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
-    fig = single_family_token_bar(report)
-    assert isinstance(fig, go.Figure)
-    # Coloured by kind → one trace per category (4 total) so each bar gets
-    # a distinct colour from Plotly's qualitative palette.
-    assert len(fig.data) == 4
-    trace_names = {t.name for t in fig.data}
-    assert trace_names == {"cache_read", "cache_create", "output", "input"}
-    # Log x so cache_read doesn't drown input.
-    assert fig.layout.xaxis.type == "log"
-    # Distinct colours: every trace has a different marker color.
-    colors = {t.marker.color for t in fig.data if t.marker.color is not None}
-    assert len(colors) == 4
+def test_cache_reads_vs_writes_bar_empty_returns_none() -> None:
+    """No data → no chart frame. Lock the empty-state contract."""
+    assert cache_reads_vs_writes_bar(_report([])) is None
 
 
-def test_single_family_token_bar_empty_returns_none() -> None:
-    assert single_family_token_bar(_report([])) is None
-
-
-def test_single_family_token_bar_all_zero_tokens_returns_none() -> None:
-    """A report with entries but every token count == 0 (e.g. cost-only
-    accounting glitches) would render four zero-width bars. Bail and
-    let the UI render an empty-state caption instead."""
-    zero_entry = DailyEntry(
-        date="2026-05-16",
-        inputTokens=0,
-        outputTokens=0,
-        cacheCreationTokens=0,
-        cacheReadTokens=0,
-        totalTokens=0,
-        totalCost=0.0,
+def test_cache_reads_vs_writes_bar_skips_zero_cache_days() -> None:
+    """Days where both `cache_create` and `cache_read` are zero
+    are dropped from the chart entirely. When EVERY day in the
+    window is zero-cache, the function returns None."""
+    no_cache_entry = DailyEntry(
+        date="2026-05-15",
+        inputTokens=100, outputTokens=200,
+        cacheCreationTokens=0, cacheReadTokens=0,
+        totalTokens=300, totalCost=1.0,
         modelsUsed=["claude-opus-4-7"],
         modelBreakdowns=[
             ModelBreakdown(
                 modelName="claude-opus-4-7",
-                inputTokens=0,
-                outputTokens=0,
-                cacheCreationTokens=0,
-                cacheReadTokens=0,
-                cost=0.0,
+                inputTokens=100, outputTokens=200,
+                cacheCreationTokens=0, cacheReadTokens=0,
+                cost=1.0,
             )
         ],
     )
-    assert single_family_token_bar(_report([zero_entry])) is None
+    report = DailyReport(
+        daily=[no_cache_entry],
+        totals=Totals(
+            inputTokens=100, outputTokens=200,
+            cacheCreationTokens=0, cacheReadTokens=0,
+            totalTokens=300, totalCost=1.0,
+        ),
+    )
+    assert cache_reads_vs_writes_bar(report) is None
+
+
+def test_daily_cache_savings_bar_returns_none_when_savings_sum_is_zero(
+    monkeypatch,
+) -> None:
+    """Rates resolve but every breakdown has zero `cache_read`
+    tokens → daily savings sum to 0.0 → the chart returns None so
+    the caller doesn't render zero-height bars across the window."""
+    fake_rates = {
+        "claude-opus-4-7": {
+            "input": 15.0, "output": 75.0,
+            "cache_create": 18.75, "cache_read": 1.50,
+        }
+    }
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model",
+        lambda name: fake_rates.get(name),
+    )
+    entry = DailyEntry(
+        date="2026-05-15",
+        inputTokens=100, outputTokens=200,
+        cacheCreationTokens=0, cacheReadTokens=0,
+        totalTokens=300, totalCost=1.0,
+        modelsUsed=["claude-opus-4-7"],
+        modelBreakdowns=[
+            ModelBreakdown(
+                modelName="claude-opus-4-7",
+                inputTokens=100, outputTokens=200,
+                cacheCreationTokens=0, cacheReadTokens=0,
+                cost=1.0,
+            )
+        ],
+    )
+    report = DailyReport(
+        daily=[entry],
+        totals=Totals(
+            inputTokens=100, outputTokens=200,
+            cacheCreationTokens=0, cacheReadTokens=0,
+            totalTokens=300, totalCost=1.0,
+        ),
+    )
+    assert daily_cache_savings_bar(report) is None
+
+
+def test_per_model_cache_bar_returns_none_for_empty_report() -> None:
+    """No model breakdowns at all → `per_model_cache_performance`
+    returns None → `per_model_cache_bar` returns None too."""
+    assert per_model_cache_bar(_report([])) is None
+
+
+# ---------- daily_cache_savings_bar ----------
+
+
+def test_daily_cache_savings_bar_returns_figure_when_rates_resolve(monkeypatch) -> None:
+    """With a stubbed rate table, the savings bar renders a single
+    `Savings` trace with positive y-values per day."""
+    fake_rates = {
+        "claude-opus-4-7": {
+            "input": 15.0, "output": 75.0,
+            "cache_create": 18.75, "cache_read": 1.50,
+        }
+    }
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model",
+        lambda name: fake_rates.get(name),
+    )
+    report = _report(
+        [
+            _entry("2026-05-15", cost=1.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=2.0, model="claude-opus-4-7"),
+        ]
+    )
+    fig = daily_cache_savings_bar(report)
+    assert fig is not None
+    assert len(fig.data) == 1
+    assert fig.data[0].name == "Savings"
+    assert all(y > 0 for y in fig.data[0].y)
+
+
+def test_daily_cache_savings_bar_returns_none_when_no_rates(monkeypatch) -> None:
+    """No resolvable rates → no chart. Caller hides the panel."""
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model", lambda _name: None
+    )
+    report = _report(
+        [_entry("2026-05-15", cost=1.0, model="claude-opus-4-7")]
+    )
+    assert daily_cache_savings_bar(report) is None
+
+
+# ---------- per_model_cache_bar ----------
+
+
+def test_per_model_cache_bar_returns_none_for_single_model() -> None:
+    """A single-model window has no comparison to make — the bar
+    is suppressed entirely (caller hides the whole section)."""
+    report = _report(
+        [_entry("2026-05-15", cost=1.0, model="claude-opus-4-7")]
+    )
+    assert per_model_cache_bar(report) is None
+
+
+def test_per_model_cache_bar_returns_figure_for_multiple_models() -> None:
+    """Multiple models → horizontal stacked bar with two traces
+    (cache_create + cache_read), one row per model."""
+    opus_bd = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=100, outputTokens=200,
+        cacheCreationTokens=300, cacheReadTokens=400,
+        cost=1.0,
+    )
+    haiku_bd = ModelBreakdown(
+        modelName="claude-haiku-4-5-20251001",
+        inputTokens=50, outputTokens=100,
+        cacheCreationTokens=150, cacheReadTokens=200,
+        cost=0.5,
+    )
+    entry = DailyEntry(
+        date="2026-05-15",
+        inputTokens=150, outputTokens=300,
+        cacheCreationTokens=450, cacheReadTokens=600,
+        totalTokens=1500,
+        totalCost=1.5,
+        modelsUsed=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+        modelBreakdowns=[opus_bd, haiku_bd],
+    )
+    report = DailyReport(
+        daily=[entry],
+        totals=Totals(
+            inputTokens=150, outputTokens=300,
+            cacheCreationTokens=450, cacheReadTokens=600,
+            totalTokens=1500, totalCost=1.5,
+        ),
+    )
+    fig = per_model_cache_bar(report)
+    assert fig is not None
+    trace_names = sorted(t.name for t in fig.data)
+    assert trace_names == ["cache_create", "cache_read"]
+
+
+# ---------- per_model_token_kind_bar ----------
+
+
+def test_per_model_token_kind_chart_uses_palette() -> None:
+    """The per-model token-kind bar emits EXACTLY four traces
+    (one per known kind) and each carries `PALETTE[kind]` as its
+    marker color. Locks the Sankey replacement's color contract."""
+    opus_bd = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=100, outputTokens=200,
+        cacheCreationTokens=300, cacheReadTokens=400,
+        cost=5.0,
+    )
+    haiku_bd = ModelBreakdown(
+        modelName="claude-haiku-4-5-20251001",
+        inputTokens=50, outputTokens=100,
+        cacheCreationTokens=150, cacheReadTokens=200,
+        cost=0.5,
+    )
+    entry = DailyEntry(
+        date="2026-05-15",
+        inputTokens=150, outputTokens=300,
+        cacheCreationTokens=450, cacheReadTokens=600,
+        totalTokens=1500,
+        totalCost=5.5,
+        modelsUsed=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+        modelBreakdowns=[opus_bd, haiku_bd],
+    )
+    report = DailyReport(
+        daily=[entry],
+        totals=Totals(
+            inputTokens=150, outputTokens=300,
+            cacheCreationTokens=450, cacheReadTokens=600,
+            totalTokens=1500, totalCost=5.5,
+        ),
+    )
+    fig = per_model_token_kind_bar(report)
+    assert fig is not None
+    trace_names = sorted(t.name for t in fig.data)
+    assert trace_names == ["cache_create", "cache_read", "input", "output"]
+    for trace in fig.data:
+        assert trace.name in PALETTE, (
+            f"trace {trace.name!r} is not a PALETTE-named kind"
+        )
+        assert trace.marker.color == PALETTE[trace.name]
+
+
+def test_per_model_token_kind_bar_empty_returns_none() -> None:
+    """Empty report → no bar."""
+    assert per_model_token_kind_bar(_report([])) is None
+
+
+def test_per_model_token_kind_bar_no_undefined_in_figure() -> None:
+    """End-to-end defensive: every string in the figure spec is free
+    of the literal `undefined`. Same regression contract as the
+    other token-kind charts in the app."""
+    report = _report(
+        [_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")]
+    )
+    fig = per_model_token_kind_bar(report)
+    assert "undefined" not in fig.to_json()
 
 
 # ---------- session_blocks_timeline (slice 17) ----------
@@ -1476,3 +1730,135 @@ def test_session_blocks_timeline_tz_label() -> None:
     fig = session_blocks_timeline(blocks, tz="America/Los_Angeles")
     # The x-axis title shows the user's zone so they're not guessing UTC.
     assert "Los_Angeles" in (fig.layout.xaxis.title.text or "")
+
+
+# ---------- live_token_throughput ----------
+
+
+def _throughput_rows() -> list[dict]:
+    """Two-interval percent-stacked sample, one row per fragment
+    refresh interval. Used by the live_token_throughput tests so
+    each test exercises the chart with realistic input shape."""
+    return [
+        {
+            "t": "2026-05-16T13:30:00Z",
+            "total_tokens": 1000,
+            "input_pct": 10.0,
+            "output_pct": 20.0,
+            "cache_create_pct": 30.0,
+            "cache_read_pct": 40.0,
+        },
+        {
+            "t": "2026-05-16T14:00:00Z",
+            "total_tokens": 2000,
+            "input_pct": 5.0,
+            "output_pct": 15.0,
+            "cache_create_pct": 30.0,
+            "cache_read_pct": 50.0,
+        },
+    ]
+
+
+def test_live_token_throughput_chart_has_four_kinds_no_undefined() -> None:
+    """The chart emits EXACTLY four named traces (one per known
+    token kind) — no auto-introduced phantom trace from a NaN /
+    None / empty category. And the figure's serialised JSON
+    contains no literal `undefined` token anywhere in trace names,
+    titles, or layout properties.
+
+    Same defensive contract as the Overview token-mix charts. Any
+    schema drift or Plotly internal that would have leaked an
+    `undefined` legend entry trips this regression."""
+    block = _block_with_burn()
+    fig = live_token_throughput(
+        block, _throughput_rows(), now_iso="2026-05-16T14:00:00Z"
+    )
+    assert fig is not None
+    trace_names = [t.name for t in fig.data]
+    assert sorted(trace_names) == [
+        "cache_create", "cache_read", "input", "output"
+    ]
+    body = fig.to_json()
+    assert "undefined" not in body, (
+        f"undefined leaked into figure JSON; trace_names={trace_names!r}"
+    )
+
+
+def test_live_token_throughput_skips_kinds_with_missing_columns() -> None:
+    """Defensive: a row dict missing a `<kind>_pct` column drops
+    THAT kind's band rather than crashing. Real data always carries
+    all four (the analytics helper emits them together), but the
+    chart layer can't trust upstream contracts without enforcement."""
+    block = _block_with_burn()
+    incomplete_rows = [
+        {
+            "t": "2026-05-16T13:30:00Z",
+            "total_tokens": 200,
+            "input_pct": 50.0,
+            "output_pct": 50.0,
+            # cache_create_pct + cache_read_pct intentionally omitted
+        }
+    ]
+    fig = live_token_throughput(
+        block, incomplete_rows, now_iso="2026-05-16T13:30:00Z"
+    )
+    assert fig is not None
+    trace_names = {t.name for t in fig.data}
+    assert trace_names == {"input", "output"}
+
+
+def test_live_token_throughput_returns_none_for_empty_rows() -> None:
+    """No throughput data → no chart frame. The caller renders an
+    empty-state caption instead of a blank figure that would look
+    like a broken chart."""
+    block = _block_with_burn()
+    assert (
+        live_token_throughput(block, [], now_iso="2026-05-16T14:00:00Z")
+        is None
+    )
+
+
+def test_live_token_throughput_uses_palette_token_kind_colors() -> None:
+    """Each kind's band is painted with `PALETTE[kind]` — same hue
+    as the matching token-mix chart on the Overview. The user's
+    category-to-color mapping is invariant across every chart in
+    the app: input is always pink, output always blue, etc."""
+    block = _block_with_burn()
+    fig = live_token_throughput(
+        block, _throughput_rows(), now_iso="2026-05-16T14:00:00Z"
+    )
+    by_name = {t.name: t for t in fig.data}
+    for kind in ("input", "output", "cache_create", "cache_read"):
+        trace = by_name[kind]
+        assert trace.line.color == PALETTE[kind]
+        assert trace.fillcolor == PALETTE[kind]
+
+
+def test_live_token_throughput_renders_now_reference_line() -> None:
+    """The chart draws a vertical dotted reference line at `now_iso`
+    spanning the full y-axis range — same visual contract as the
+    spend trajectory chart so the user reads both charts against
+    the same "now" anchor."""
+    block = _block_with_burn()
+    now = "2026-05-16T14:00:00Z"
+    fig = live_token_throughput(block, _throughput_rows(), now_iso=now)
+    now_lines = [
+        s for s in fig.layout.shapes
+        if s.type == "line" and s.x0 == now and s.x1 == now
+    ]
+    assert len(now_lines) == 1
+    assert now_lines[0].line.dash == "dot"
+
+
+def test_live_spend_trajectory_renders_now_reference_line() -> None:
+    """The spend trajectory chart gains the same now-reference line
+    so the spend and throughput charts share one visual anchor."""
+    block = _block_with_burn()
+    now = "2026-05-16T15:30:00Z"
+    fig = live_spend_trajectory(block, samples=[], now_iso=now)
+    now_lines = [
+        s for s in fig.layout.shapes
+        if s.type == "line" and s.x0 == now and s.x1 == now
+    ]
+    assert len(now_lines) == 1
+    assert now_lines[0].line.dash == "dot"

@@ -42,6 +42,9 @@ import streamlit as st
 from tokenscope import ccusage, config
 from tokenscope.analytics import (
     UNKNOWN_MODEL_FAMILY,
+    block_cache_hit_ratio,
+    block_cost_by_kind,
+    build_intra_block_token_throughput,
     format_compact_int,
     format_timezone_for_display,
     typical_burn_rate,
@@ -50,8 +53,28 @@ from tokenscope.ccusage import CcusageError
 from tokenscope.models import BlockEntry
 from tokenscope.navigation import Navigation
 from tokenscope.query import Query
-from tokenscope.ui.charts import live_spend_trajectory
+from tokenscope.ui.charts import (
+    PALETTE,
+    live_spend_trajectory,
+    live_token_throughput,
+)
 from tokenscope.ui.sidebar import SidebarState
+
+# Display labels for the four token kinds. Match the PALETTE keys so
+# the swatch lookup is the same string used to colour every other
+# chart trace named for that kind.
+_TOKEN_KIND_LABELS: dict[str, str] = {
+    "input": "Input",
+    "output": "Output",
+    "cache_create": "Cache create",
+    "cache_read": "Cache read",
+}
+_TOKEN_KIND_ORDER: tuple[str, ...] = (
+    "input",
+    "output",
+    "cache_create",
+    "cache_read",
+)
 
 REFRESH_SECONDS = config.LIVE_REFRESH_SECONDS
 
@@ -94,7 +117,12 @@ def _live_panel(offline: bool, tz: str | None = None) -> None:
     typical = typical_burn_rate(report)
     _render_window_banner(active, tz=tz)
     _render_kpis(active, typical=typical)
-    _render_spend_trajectory(active, now_utc=now_utc)
+    cost_samples, kind_samples = _record_sample(active, now_utc)
+    _render_token_kind_kpis(active)
+    _render_cache_hit_callout(active)
+    now_iso = _now_iso(now_utc)
+    _render_spend_trajectory(active, cost_samples=cost_samples, now_iso=now_iso)
+    _render_token_throughput(active, kind_samples=kind_samples, now_iso=now_iso)
 
 
 # --- refresh indicator ---------------------------------------------------
@@ -245,27 +273,62 @@ def _render_kpis(active: BlockEntry, *, typical: float | None) -> None:
 # --- spend trajectory chart ---------------------------------------------
 
 
-def _record_sample(active: BlockEntry, now_utc: datetime) -> list[tuple[str, float]]:
-    """Append the current cost snapshot to session_state, keyed by
-    block id so a new billing block starts the history fresh.
+def _now_iso(now_utc: datetime) -> str:
+    """ISO-8601 "now" string in the format the chart layer expects
+    (`...Z` suffix, second precision). Centralised so the spend and
+    throughput charts get the same string for their now-reference
+    line — drift between the two would put the dotted line at
+    slightly different x values."""
+    return now_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
 
-    Returns the post-update sample list as `(iso_timestamp, cost)`
-    tuples — what the chart builder expects.
+
+def _record_sample(
+    active: BlockEntry, now_utc: datetime
+) -> tuple[list[tuple[str, float]], list[tuple[str, dict[str, int]]]]:
+    """Append the current snapshot to session_state, keyed by block
+    id so a new billing block starts the history fresh.
+
+    Each sample carries BOTH the cumulative cost (drives the spend
+    trajectory chart) and the cumulative per-kind token counts
+    (drive the token throughput chart). Storing both in one record
+    means the two charts share a single sample cadence — no risk
+    of the spend line and the throughput area disagreeing about
+    which "now" point they end at.
+
+    Returns ``(cost_samples, kind_samples)`` as the tuple shapes
+    each chart builder expects:
+
+      * ``cost_samples`` — `(iso_timestamp, cost)` tuples
+      * ``kind_samples`` — `(iso_timestamp, {kind: count})` tuples
     """
     samples_by_block: dict[str, list[dict]] = st.session_state.setdefault(
         _SAMPLES_KEY, {}
     )
     block_samples = samples_by_block.setdefault(active.id, [])
-    now_iso = now_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
-    # Append only when cost has actually changed — otherwise the
-    # chart accumulates a horizontal cluster of identical y-values.
-    if not block_samples or block_samples[-1]["cost"] != active.cost_usd:
-        block_samples.append({"t": now_iso, "cost": active.cost_usd})
+    now_iso = _now_iso(now_utc)
+    counts = {
+        "input": active.token_counts.input_tokens,
+        "output": active.token_counts.output_tokens,
+        "cache_create": active.token_counts.cache_creation_input_tokens,
+        "cache_read": active.token_counts.cache_read_input_tokens,
+    }
+    last = block_samples[-1] if block_samples else None
+    if last is None or last["cost"] != active.cost_usd or last["counts"] != counts:
+        block_samples.append(
+            {"t": now_iso, "cost": active.cost_usd, "counts": counts}
+        )
         samples_by_block[active.id] = block_samples
-    return [(s["t"], s["cost"]) for s in block_samples]
+    cost_samples = [(s["t"], s["cost"]) for s in block_samples]
+    kind_samples = [(s["t"], s["counts"]) for s in block_samples]
+    return cost_samples, kind_samples
 
 
-def _render_spend_trajectory(active: BlockEntry, *, now_utc: datetime) -> None:
+def _render_spend_trajectory(
+    active: BlockEntry,
+    *,
+    cost_samples: list[tuple[str, float]],
+    now_iso: str,
+) -> None:
     """Cumulative-spend line with dashed projection to window end.
 
     Replaces the gauge. The chart shows where we are in the block
@@ -276,17 +339,15 @@ def _render_spend_trajectory(active: BlockEntry, *, now_utc: datetime) -> None:
     Wrapped in a bordered container so the chart reads as a card
     matching the KPI strip + the Overview chart cards.
     """
-    samples = _record_sample(active, now_utc)
-    now_iso = now_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
-
     with st.container(border=True):
         st.markdown("### Spend in this block")
         st.caption(
             "Cumulative cost from the start of the window. Solid line "
             "is actual; dotted line is the projection to window end "
-            "at the current rate."
+            "at the current rate. The vertical dotted reference line "
+            "marks where 'now' falls inside the block."
         )
-        fig = live_spend_trajectory(active, samples, now_iso=now_iso)
+        fig = live_spend_trajectory(active, cost_samples, now_iso=now_iso)
         if fig is None:
             st.caption("No projection available for this block yet.")
             return
@@ -299,3 +360,135 @@ def _render_spend_trajectory(active: BlockEntry, *, now_utc: datetime) -> None:
                 f"{format_compact_int(active.projection.total_tokens)} "
                 f"({active.projection.total_tokens:,})"
             )
+
+
+# --- token-kind KPIs ----------------------------------------------------
+
+
+def _render_token_kind_kpis(active: BlockEntry) -> None:
+    """Second KPI row — four cards, one per token kind.
+
+    Each card carries:
+
+      * The kind's PALETTE colour as a 12×12 swatch beside the
+        label, so the visual category (input is pink, output is
+        blue, ...) is established BEFORE the user reads the
+        throughput chart below. The same swatch hue paints the
+        matching band in `live_token_throughput`, so the cards
+        and the chart share one mental mapping.
+      * Abbreviated token count (`format_compact_int`) — the
+        magnitudes span 5+ orders of magnitude (cache_read in
+        the millions, input in the thousands), so full integers
+        would dominate the card.
+      * Estimated cost contribution, derived by `block_cost_by_kind`
+        from LiteLLM pricing rates. The per-kind costs always sum
+        to `block.cost_usd` (the actual cost ccusage reported);
+        only the split between kinds is an approximation. Hidden
+        as `—` when rates aren't resolvable (offline + no cache).
+    """
+    cost_rows = block_cost_by_kind(active)
+    cost_by_kind = (
+        {row["kind"]: row["est_cost"] for row in cost_rows}
+        if cost_rows is not None
+        else None
+    )
+    counts = {
+        "input": active.token_counts.input_tokens,
+        "output": active.token_counts.output_tokens,
+        "cache_create": active.token_counts.cache_creation_input_tokens,
+        "cache_read": active.token_counts.cache_read_input_tokens,
+    }
+
+    cols = st.columns(len(_TOKEN_KIND_ORDER))
+    for col, kind in zip(cols, _TOKEN_KIND_ORDER):
+        label = _TOKEN_KIND_LABELS[kind]
+        color = PALETTE[kind]
+        token_count = counts[kind]
+        est_cost = cost_by_kind.get(kind) if cost_by_kind is not None else None
+
+        with col, st.container(border=True):
+            st.markdown(
+                f"""
+                <div class="tokenscope-kind-card-header">
+                  <span class="tokenscope-kind-swatch"
+                        style="background:{color};"></span>
+                  <span class="tokenscope-kind-card-label">{label}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='tokenscope-kind-card-value'>"
+                f"{format_compact_int(token_count)} tokens"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if est_cost is not None:
+                st.caption(f"≈ ${est_cost:,.2f} of block cost")
+            else:
+                st.caption("cost estimate unavailable")
+
+
+def _render_cache_hit_callout(active: BlockEntry) -> None:
+    """Cache hit ratio rendered as a composite / derived stat,
+    visually distinct from the four token-kind KPI cards.
+
+    Slate-tinted background + teal left border (same hue as
+    `cache_read` in PALETTE — visual breadcrumb that this stat is
+    derived from cache_read divided by cache-eligible total) so
+    the eye reads it as "derived from the four kinds", not "a
+    fifth raw count".
+    """
+    ratio = block_cache_hit_ratio(active)
+    pct = ratio * 100
+    st.markdown(
+        f"""
+        <div class="tokenscope-cache-ratio-callout">
+          <div class="tokenscope-cache-ratio-value">{pct:.1f}%</div>
+          <div class="tokenscope-cache-ratio-label">
+            Cache hit ratio · cache_read ÷ (input + cache_create + cache_read)
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_token_throughput(
+    active: BlockEntry,
+    *,
+    kind_samples: list[tuple[str, dict[str, int]]],
+    now_iso: str,
+) -> None:
+    """Percent-stacked area of per-interval token-kind throughput.
+
+    Visually paired with the spend trajectory above: same X-axis
+    window, same now-reference line. Where spend tells you "how
+    much"; throughput tells you "of what kind".
+
+    When no intra-block intervals carry token activity (a very
+    new block, or one that hasn't moved since the page opened),
+    `build_intra_block_token_throughput` returns an empty list
+    and we render an empty-state caption instead of a frame.
+    """
+    with st.container(border=True):
+        st.markdown("### Token throughput in this block")
+        st.caption(
+            "Per-interval mix of input / output / cache_create / "
+            "cache_read tokens. Each column sums to 100%; hover for "
+            "absolute counts."
+        )
+        rows = build_intra_block_token_throughput(
+            active, kind_samples, now_iso=now_iso
+        )
+        fig = live_token_throughput(active, rows, now_iso=now_iso)
+        if fig is None:
+            st.caption(
+                "No intra-block intervals with token activity yet — "
+                "keep the page open and the chart populates as the "
+                "block accrues."
+            )
+            return
+        st.plotly_chart(
+            fig, width="stretch", key="live-token-throughput"
+        )

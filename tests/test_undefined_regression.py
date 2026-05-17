@@ -227,6 +227,120 @@ def test_overview_at_users_reproduction_url_has_no_undefined(
     )
 
 
+def test_live_view_renders_with_no_undefined(
+    mock_ccusage, mock_ccusage_version, _capture_chart_logs
+) -> None:
+    """Same end-to-end contract as the Overview reproduction test,
+    but for the Live view. Walks every rendered chart's full figure
+    spec (spend trajectory + token throughput) and asserts no
+    `undefined` appears anywhere.
+
+    Locks the regression at the rendered-figure level for the Live
+    view's two charts so any future schema drift or Plotly Express
+    auto-trace path that leaks an `undefined` is caught here, not
+    only at the chart-builder unit level."""
+    _wire_fixtures(mock_ccusage)
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "live"
+    at.run()
+
+    assert len(at.exception) == 0, [str(e.value)[:200] for e in at.exception]
+    assert len(at.error) == 0, [e.value[:200] for e in at.error]
+
+    charts = _walk_plotly_charts(at)
+    keys = {c["key"] for c in charts}
+    assert "live-spend-trajectory" in keys
+    assert "live-token-throughput" in keys
+    _assert_no_undefined(charts)
+
+    throughput = next(c for c in charts if c["key"] == "live-token-throughput")
+    assert set(throughput["trace_names"]) == {
+        "input", "output", "cache_create", "cache_read"
+    }
+
+    build_logs = [
+        r.message
+        for r in _capture_chart_logs.records
+        if "chart." in r.message and ".built" in r.message
+    ]
+    assert any("chart.live_throughput.built" in m for m in build_logs), (
+        f"expected `chart.live_throughput.built` log; got: {build_logs!r}"
+    )
+
+
+def test_cache_view_renders_with_no_undefined(
+    mock_ccusage, mock_ccusage_version, _capture_chart_logs
+) -> None:
+    """End-to-end Cache view regression: boots the actual app, walks
+    every rendered chart's figure spec (sparkline + reads-vs-writes
+    + daily savings + per-model bar), asserts no `undefined` appears
+    anywhere. Same defensive contract as the Overview / Live
+    regression tests."""
+    _wire_fixtures(mock_ccusage)
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "cache"
+    at.run()
+
+    assert len(at.exception) == 0, [str(e.value)[:200] for e in at.exception]
+    assert len(at.error) == 0, [e.value[:200] for e in at.error]
+
+    charts = _walk_plotly_charts(at)
+    keys = {c["key"] for c in charts}
+    assert "cache-reads-vs-writes" in keys
+    _assert_no_undefined(charts)
+
+    reads_vs_writes = next(
+        c for c in charts if c["key"] == "cache-reads-vs-writes"
+    )
+    assert set(reads_vs_writes["trace_names"]) == {
+        "cache_create", "cache_read"
+    }
+
+    build_logs = [
+        r.message
+        for r in _capture_chart_logs.records
+        if "chart." in r.message and ".built" in r.message
+    ]
+    assert any("chart.cache_reads_vs_writes.built" in m for m in build_logs), (
+        f"expected `chart.cache_reads_vs_writes.built` log; got: {build_logs!r}"
+    )
+
+
+def test_models_view_renders_with_no_undefined(
+    mock_ccusage, mock_ccusage_version, _capture_chart_logs
+) -> None:
+    """End-to-end Models view regression: boots the actual app,
+    walks the per-model token-kind chart's figure spec, asserts no
+    `undefined` appears anywhere. Same defensive contract as the
+    Overview / Live / Cache regression tests."""
+    _wire_fixtures(mock_ccusage)
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "models"
+    at.run()
+
+    assert len(at.exception) == 0, [str(e.value)[:200] for e in at.exception]
+    assert len(at.error) == 0, [e.value[:200] for e in at.error]
+
+    charts = _walk_plotly_charts(at)
+    keys = {c["key"] for c in charts}
+    assert "models-token-kind" in keys
+    _assert_no_undefined(charts)
+
+    token_kind = next(c for c in charts if c["key"] == "models-token-kind")
+    assert set(token_kind["trace_names"]) == {
+        "input", "output", "cache_create", "cache_read"
+    }
+
+    build_logs = [
+        r.message
+        for r in _capture_chart_logs.records
+        if "chart." in r.message and ".built" in r.message
+    ]
+    assert any("chart.per_model_token_kind.built" in m for m in build_logs), (
+        f"expected `chart.per_model_token_kind.built` log; got: {build_logs!r}"
+    )
+
+
 # ---------- end-to-end against pathological data ----------
 
 

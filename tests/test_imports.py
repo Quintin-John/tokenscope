@@ -145,7 +145,6 @@ def test_analytics_public_surface() -> None:
         "filter_daily_by_models",
         "available_models",
         "daily_cache_hit_ratio",
-        "token_flow_sankey_data",
         "window_cost",
         "last_day_cost",
         "model_breakdown",
@@ -156,6 +155,14 @@ def test_analytics_public_surface() -> None:
         "typical_burn_rate",
         "blocks_for_session",
         "cost_by_kind",
+        "block_cache_hit_ratio",
+        "block_cost_by_kind",
+        "build_intra_block_token_throughput",
+        "cache_savings",
+        "daily_cache_savings",
+        "per_model_cache_performance",
+        "cache_data_range",
+        "cost_concentration_summary",
     ):
         assert callable(getattr(analytics, name)), name
 
@@ -220,11 +227,17 @@ def test_overview_render_cost_composition_param_type_resolves() -> None:
     assert _resolved_hint(_render_cost_composition, "daily_report") is DailyReport
 
 
-def test_models_view_render_composition_param_type_resolves() -> None:
+def test_models_view_render_token_kind_composition_param_type_resolves() -> None:
+    """The Models view's chart-card helper carries an annotated
+    `daily_report` so static type checks catch any future
+    misroute to a non-DailyReport caller."""
     from tokenscope.models import DailyReport
-    from tokenscope.ui.models import _render_composition
+    from tokenscope.ui.models import _render_token_kind_composition
 
-    assert _resolved_hint(_render_composition, "daily_report") is DailyReport
+    assert (
+        _resolved_hint(_render_token_kind_composition, "daily_report")
+        is DailyReport
+    )
 
 
 def test_day_view_row_entity_param_types_resolve() -> None:

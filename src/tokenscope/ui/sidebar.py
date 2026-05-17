@@ -231,9 +231,31 @@ def _seed_session_from_url() -> None:
         st.session_state[_KEY_OFFLINE] = params["offline"] == "true"
     if _KEY_PROJECT not in st.session_state and "project" in params:
         st.session_state[_KEY_PROJECT] = params["project"]
-    if _KEY_MODELS not in st.session_state and "models" in params:
+    # Models has an unconditional URL → session_state sync (not the
+    # "seed only on first render" pattern used by every other widget
+    # here). Reason: the Models view's "View [family] in Overview →"
+    # drill button writes `?models=<family-ids>` to `st.query_params`
+    # and reruns. By that point the sidebar's session_state already
+    # holds the PRIOR selection from this session — without an
+    # unconditional sync, the seeded URL value would be ignored and
+    # the drill would silently fail (sidebar widget still shows the
+    # old selection).
+    #
+    # Writing to `_KEY_MODELS` here is safe because this function
+    # runs at the TOP of the sidebar render — strictly before the
+    # multiselect widget is instantiated. The "no assignment after
+    # widget instantiation" Streamlit guard doesn't trip.
+    #
+    # The previous attempt (set `st.session_state["sidebar-models"]
+    # = fam_models` from inside the Models view, AFTER the sidebar
+    # had already rendered) is exactly what crashes — handled here
+    # at the only point in the script run where the assignment is
+    # legal.
+    if "models" in params:
         raw = params["models"]
-        st.session_state[_KEY_MODELS] = [m for m in raw.split(",") if m]
+        new_value = [m for m in raw.split(",") if m]
+        if st.session_state.get(_KEY_MODELS) != new_value:
+            st.session_state[_KEY_MODELS] = new_value
     if _KEY_PLAN not in st.session_state and "plan" in params:
         if params["plan"] in plan_names():
             st.session_state[_KEY_PLAN] = params["plan"]

@@ -172,6 +172,21 @@ def _render_page_selector(nav: Navigation) -> Navigation:
     """
     if nav.view not in TOP_LEVEL_VIEWS:
         st.session_state.pop(_PAGE_SELECTOR_KEY, None)
+    elif st.session_state.get(_PAGE_SELECTOR_KEY) != _VIEW_LABELS[nav.view]:
+        # URL-as-source-of-truth for top-level transitions driven by
+        # `route_to` (e.g. the Models view's "View opus in Overview →"
+        # drill). The radio widget's persisted `session_state` slot
+        # holds the LABEL chosen on a previous render. When `route_to`
+        # mutates `st.query_params["view"]` and reruns, the parsed
+        # `nav.view` reflects the new destination — but without this
+        # sync, the radio would still resurrect its prior label, the
+        # `chosen_view != nav.view` branch below would route BACK to
+        # the old view, and the drill would silently fail.
+        #
+        # The assignment is safe because it runs BEFORE the radio
+        # widget is instantiated (line 179 below). Same pattern the
+        # sidebar uses for its models multiselect URL sync.
+        st.session_state[_PAGE_SELECTOR_KEY] = _VIEW_LABELS[nav.view]
 
     label_to_view = {v: k for k, v in _VIEW_LABELS.items()}
     options = [_VIEW_LABELS[v] for v in TOP_LEVEL_VIEWS]

@@ -27,14 +27,15 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from tokenscope.analytics import (
-    KNOWN_MODEL_FAMILIES,
     UNKNOWN_MODEL_FAMILY,
     cost_share_by_model,
     daily_cache_hit_ratio,
+    daily_cache_savings,
     daily_cost_by_model,
     daily_token_mix,
+    model_breakdown,
+    per_model_cache_performance,
     rolling_cost_average,
-    token_flow_sankey_data,
 )
 from tokenscope.models import BlockEntry, DailyEntry, DailyReport, SessionEntry
 
@@ -821,120 +822,387 @@ def burn_gauge(
     return fig
 
 
-def cache_hit_ratio_line(daily_report: DailyReport) -> go.Figure | None:
-    """Per-day cache hit ratio line chart (y-axis 0–100%)."""
+def cache_hit_sparkline(daily_report: DailyReport) -> go.Figure | None:
+    """Compact sparkline of cache hit ratio over time, sized to
+    embed inside the `Cache hit ratio` KPI card.
+
+    Replaces the prior full-page `cache_hit_ratio_line` chart. The
+    old chart pinned its Y-axis to 0–100% with the real data
+    sitting at 99–100%, so the entire plot read as a flat line
+    against a sea of whitespace — exactly the auto-scaling problem
+    the user flagged six redesigns ago, regressed.
+
+    This builder:
+
+      * Auto-scales Y to the data range with a small breathing
+        margin so the actual variation is visible (a dip from
+        99.5% to 95% reads as a real swing, not a flat line).
+      * Drops the axes, gridlines, and labels (no titles, no
+        tickmarks) — it's a card-embedded sparkline, not a stand-
+        alone chart.
+      * Paints the line with the brand-accent dark slate (same hue
+        used for the spend-trajectory line on Live) and a single
+        accent dot at the latest sample so the eye reads "this is
+        where we are now".
+
+    Returns ``None`` when the report has fewer than two data points
+    — a sparkline of one point is meaningless, and the caller falls
+    back to a static caption.
+    """
     series = daily_cache_hit_ratio(daily_report)
-    if not series:
+    if len(series) < 2:
         return None
     df = pd.DataFrame(series, columns=["date", "ratio"])
-    fig = px.line(
-        df,
-        x="date",
-        y="ratio",
-        labels={"date": "Date", "ratio": "Cache hit ratio"},
+    accent = PALETTE["7-day avg"]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=df["date"],
+            y=df["ratio"],
+            mode="lines",
+            name="Cache hit ratio",
+            line=dict(color=accent, width=1.8),
+            hovertemplate="<b>%{x}</b><br>%{y:.1%}<extra></extra>",
+        )
     )
-    fig.update_traces(mode="lines+markers")
+    # Single accent dot at the latest sample — the eye reads "this
+    # is where we are now".
+    fig.add_trace(
+        go.Scatter(
+            x=[df["date"].iloc[-1]],
+            y=[df["ratio"].iloc[-1]],
+            mode="markers",
+            name="now",
+            marker=dict(color=accent, size=8),
+            hovertemplate="<b>now %{x}</b><br>%{y:.1%}<extra></extra>",
+            showlegend=False,
+        )
+    )
+
+    # Auto-scaled Y range with breathing room. Pin to [0, 1] only
+    # when data dips below ~90% (in which case the floor matters);
+    # otherwise zoom to the variation actually present.
+    y_min = float(df["ratio"].min())
+    y_max = float(df["ratio"].max())
+    span = max(y_max - y_min, 0.005)
+    y_floor = max(0.0, y_min - span * 0.35)
+    y_ceiling = min(1.0, y_max + span * 0.35)
+
     fig.update_layout(
-        margin=dict(l=10, r=10, t=30, b=10),
-        yaxis=dict(tickformat=".0%", range=[0, 1]),
+        height=68,
+        margin=dict(l=0, r=0, t=2, b=2),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        showlegend=False,
+        xaxis=dict(
+            visible=False,
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+        ),
+        yaxis=dict(
+            visible=False,
+            range=[y_floor, y_ceiling],
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+        ),
+        hoverlabel=dict(
+            bgcolor="white",
+            bordercolor=_BORDER_COLOR,
+            font=dict(
+                family=_ENTERPRISE_FONT_FAMILY, size=11, color=_TEXT_PRIMARY
+            ),
+        ),
     )
-    return fig
+    # Sparkline doesn't go through `apply_enterprise_style` — the
+    # enterprise style adds gridlines + margins + a legend which
+    # would all fight the "embedded inside a KPI card" use case.
+    # Still scrub defensively so a NaN-named trace can't sneak through.
+    return _scrub_undefined_traces(fig)
 
 
-def single_family_token_bar(daily_report: DailyReport) -> go.Figure | None:
-    """Horizontal bar of total tokens per kind, for a window where only
-    one model family is present.
+def cache_reads_vs_writes_bar(daily_report: DailyReport) -> go.Figure | None:
+    """Per-day stacked bar of cache_create vs cache_read tokens.
 
-    A Sankey with one right-side node is just a four-strand comb feeding
-    one label — adds visual ceremony without insight. This bar gives the
-    same information honestly. Uses log x-axis for the same reason the
-    daily token-mix bar does (cache_read swamps everything else). Each
-    kind gets its own colour from Plotly's default qualitative palette
-    so the four bars read as distinct categories at a glance.
+    Tells the user *when the cache was being built up vs paying off*:
+    a healthy cache shows mostly reads with periodic write spikes
+    when new contexts are introduced; a write-heavy chart says the
+    cache isn't being reused, the read-heavy chart says caching is
+    earning its keep.
+
+    Hand-builds one `go.Bar` per kind (no `px.bar(..., color=...)`)
+    using `TOKEN_KIND_COLORS[kind]` so the cache_create amber and
+    cache_read teal are the same hues as the Overview token-mix
+    chart — the user's category-to-color mapping is invariant
+    across the dashboard.
+
+    Returns ``None`` when no day has any cache activity (the caller
+    falls back to an empty-state caption).
     """
     if not daily_report.daily:
         return None
-    totals = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0}
-    for entry in daily_report.daily:
-        totals["input"] += entry.input_tokens
-        totals["output"] += entry.output_tokens
-        totals["cache_create"] += entry.cache_creation_tokens
-        totals["cache_read"] += entry.cache_read_tokens
-    if not any(totals.values()):
+    rows = []
+    for entry in sorted(daily_report.daily, key=lambda e: e.date):
+        if entry.cache_creation_tokens == 0 and entry.cache_read_tokens == 0:
+            continue
+        rows.append(
+            {
+                "date": entry.date,
+                "cache_create": entry.cache_creation_tokens,
+                "cache_read": entry.cache_read_tokens,
+            }
+        )
+    if not rows:
         return None
-    kinds = ["cache_read", "cache_create", "output", "input"]
-    df = pd.DataFrame({"kind": kinds, "tokens": [totals[k] for k in kinds]})
-    fig = px.bar(
-        df,
-        x="tokens",
-        y="kind",
-        color="kind",
-        orientation="h",
-        category_orders={"kind": kinds},
-        labels={"tokens": "Tokens", "kind": ""},
+    df = pd.DataFrame(rows)
+
+    kind_order = ["cache_create", "cache_read"]
+    fig = go.Figure()
+    for kind in kind_order:
+        fig.add_trace(
+            go.Bar(
+                x=df["date"],
+                y=df[kind],
+                name=kind,
+                legendgroup=kind,
+                marker_color=TOKEN_KIND_COLORS[kind],
+                hovertemplate=(
+                    f"<b>{kind}</b><br>%{{x}}<br>"
+                    "%{y:,d} tokens<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(barmode="stack")
+    styled = apply_enterprise_style(fig).update_layout(
+        xaxis_type="date",
+        xaxis_tickformat="%b %d",
     )
-    fig.update_traces(
-        hovertemplate="<b>%{y}</b><br>%{x:,.0f} tokens<extra></extra>",
+    _log.info(
+        "chart.cache_reads_vs_writes.built trace_names=%s rows=%d",
+        [t.name for t in styled.data],
+        len(df),
     )
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=30, b=10),
-        xaxis_type="log",
-        height=260,
-        showlegend=False,
-    )
-    return fig
+    return styled
 
 
-def token_flow_sankey(
-    daily_report: DailyReport,
-    *,
-    value_mode: str = "tokens",
-    top_n: int | None = None,
-) -> go.Figure | None:
-    """Sankey: token-kind → model family.
+def daily_cache_savings_bar(daily_report: DailyReport) -> go.Figure | None:
+    """Per-day $ saved by caching reads instead of paying full input
+    rate — bar chart with brand-accent color.
 
-    ``value_mode``:
-      * ``"tokens"`` — link widths proportional to token counts.
-      * ``"cost"``  — link widths proportional to per-family cost,
-        proportionally attributed across kinds. Total Sankey width then
-        equals total window cost.
+    Sits below the Cache reads vs writes chart on the Cache view.
+    Where the volume chart shows "how much is being cached"; the
+    savings chart shows "what's the financial payoff each day".
 
-    ``top_n`` collapses smaller families into an "Others" node.
-
-    Family labels always carry the family's aggregate cost. Hover detail
-    shows both the raw token count and the family's total cost so the
-    user reads both dimensions regardless of which mode is active.
+    Returns ``None`` when LiteLLM rates aren't resolvable at all
+    (offline + no cache) so the caller hides the panel rather than
+    rendering zero-height bars.
     """
-    data_ = token_flow_sankey_data(daily_report, value_mode=value_mode, top_n=top_n)
-    if not data_["values"]:
+    rows = daily_cache_savings(daily_report)
+    if not rows:
         return None
-    customdata = data_["customdata"]
-    value_label = "Cost share" if value_mode == "cost" else "Tokens"
-    value_format = "$,.2f" if value_mode == "cost" else ",d"
-    link_hover = (
-        "<b>%{source.label}</b> → <b>%{target.label}</b><br>"
-        f"{value_label}: %{{value:{value_format}}}<br>"
-        "Tokens (absolute): %{customdata[0]:,d}<br>"
-        "Family total cost: $%{customdata[1]:,.2f}<extra></extra>"
-    )
+    df = pd.DataFrame(rows)
+    if df["savings_usd"].sum() == 0:
+        return None
+    accent = PALETTE["7-day avg"]
+
     fig = go.Figure(
-        go.Sankey(
-            node=dict(
-                label=data_["labels"],
-                pad=18,
-                thickness=18,
-            ),
-            link=dict(
-                source=data_["sources"],
-                target=data_["targets"],
-                value=data_["values"],
-                customdata=customdata,
-                hovertemplate=link_hover,
+        go.Bar(
+            x=df["date"],
+            y=df["savings_usd"],
+            name="Savings",
+            marker_color=accent,
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Saved $%{y:,.2f}<extra></extra>"
             ),
         )
     )
-    fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=520)
-    return fig
+    styled = apply_enterprise_style(fig).update_layout(
+        yaxis_tickprefix="$",
+        xaxis_type="date",
+        xaxis_tickformat="%b %d",
+    )
+    _log.info(
+        "chart.daily_cache_savings.built rows=%d total_savings=%.2f",
+        len(df),
+        float(df["savings_usd"].sum()),
+    )
+    return styled
+
+
+def per_model_token_kind_bar(daily_report: DailyReport) -> go.Figure | None:
+    """Horizontal stacked bar of token-kind composition per model.
+
+    One row per model in the window; the bar's overall length is
+    the per-model token footprint, the four segments show the
+    input / output / cache_create / cache_read split using the
+    PALETTE token-kind hues (same colour every chart in the app
+    uses for the same kind — user's mental mapping is invariant).
+
+    Replaces the Sankey on the Models view: the Sankey's right-
+    side node became the per-model row, the left-side kind nodes
+    became coloured segments, and the legibility problem (cache_read
+    dominating, slivers of other kinds being unreadable) is solved
+    by stacking horizontally with consistent X-axis scaling per row.
+
+    Hand-builds one `go.Bar` per known kind (no `px.bar` with
+    auto-trace generation) so the four kinds are the ONLY traces
+    that can appear — no phantom `undefined` from schema drift.
+
+    Returns ``None`` when the report has no model breakdowns at
+    all so the caller hides the panel.
+    """
+    rows = model_breakdown(daily_report)
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows)
+    kind_order = ["input", "output", "cache_create", "cache_read"]
+
+    fig = go.Figure()
+    for kind in kind_order:
+        fig.add_trace(
+            go.Bar(
+                x=df[kind],
+                y=df["model"],
+                name=kind,
+                legendgroup=kind,
+                orientation="h",
+                marker_color=TOKEN_KIND_COLORS[kind],
+                hovertemplate=(
+                    f"<b>{kind}</b><br>%{{y}}<br>"
+                    "%{x:,d} tokens<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        barmode="stack",
+        height=max(120, 56 * len(df) + 60),
+    )
+    styled = apply_enterprise_style(fig)
+    # Y-axis is categorical (model names) — keep ticks visible so the
+    # user reads which bar belongs to which model. Reversed so the
+    # top-cost model sits at the top (matches the breakdown table's
+    # descending order).
+    styled.update_layout(
+        yaxis=dict(
+            autorange="reversed",
+            showticklabels=True,
+            tickfont=dict(size=11, color=_TEXT_PRIMARY),
+        ),
+    )
+    _log.info(
+        "chart.per_model_token_kind.built model_count=%d trace_names=%s",
+        len(df),
+        [t.name for t in styled.data],
+    )
+    return styled
+
+
+def per_model_cache_bar(daily_report: DailyReport) -> go.Figure | None:
+    """Horizontal stacked bar: cache_create vs cache_read tokens
+    per model. One bar per model in the window; the bar length
+    surfaces the per-model cache footprint while the segments
+    show the read/write split.
+
+    Returns ``None`` when only one model is in the window (the
+    Cache view's caller hides the per-model section entirely
+    rather than rendering a single-row chart) or when no models
+    have any cache activity.
+    """
+    rows = per_model_cache_performance(daily_report)
+    if rows is None:
+        return None
+    rows = [
+        r for r in rows
+        if r["cache_read_tokens"] > 0 or r["cache_create_tokens"] > 0
+    ]
+    if len(rows) < 2:
+        return None
+    df = pd.DataFrame(rows)
+    fig = go.Figure()
+    for kind, col in (
+        ("cache_create", "cache_create_tokens"),
+        ("cache_read", "cache_read_tokens"),
+    ):
+        fig.add_trace(
+            go.Bar(
+                x=df[col],
+                y=df["model"],
+                name=kind,
+                legendgroup=kind,
+                orientation="h",
+                marker_color=TOKEN_KIND_COLORS[kind],
+                hovertemplate=(
+                    f"<b>{kind}</b><br>%{{y}}<br>"
+                    "%{x:,d} tokens<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        barmode="stack",
+        height=max(120, 48 * len(df) + 60),
+    )
+    styled = apply_enterprise_style(fig)
+    # The Y-axis here is categorical (model names) — leave its
+    # tick labels visible so the user reads which bar is which.
+    styled.update_layout(
+        yaxis=dict(
+            autorange="reversed",
+            showticklabels=True,
+            tickfont=dict(size=11, color=_TEXT_PRIMARY),
+        ),
+    )
+    _log.info(
+        "chart.per_model_cache.built model_count=%d trace_names=%s",
+        len(df),
+        [t.name for t in styled.data],
+    )
+    return styled
+
+
+def _add_now_reference(fig: go.Figure, now_iso: str) -> None:
+    """Vertical dotted reference line at `now_iso` spanning the full
+    chart height. Single visual contract for "where 'now' falls
+    inside the 5-hour block" — used by both the spend trajectory
+    and the token throughput charts so the user reads the same
+    timestamp across both surfaces.
+
+    Uses `add_shape` with `yref="paper"` (and `xref="x"`) so the
+    line tracks the data axis horizontally but spans 0–100% of the
+    plot area vertically regardless of the y-axis range. The
+    matching annotation sits just above the chart frame so it
+    doesn't overlap any trace.
+
+    Idempotent intent — callers add it once per figure.
+    """
+    fig.add_shape(
+        type="line",
+        xref="x",
+        yref="paper",
+        x0=now_iso,
+        x1=now_iso,
+        y0=0,
+        y1=1,
+        line=dict(color=PALETTE["7-day avg"], width=1, dash="dot"),
+        layer="above",
+    )
+    fig.add_annotation(
+        x=now_iso,
+        y=1.0,
+        xref="x",
+        yref="paper",
+        text="now",
+        showarrow=False,
+        yanchor="bottom",
+        xanchor="left",
+        xshift=2,
+        font=dict(
+            family=_ENTERPRISE_FONT_FAMILY, size=10, color=PALETTE["7-day avg"]
+        ),
+    )
 
 
 def live_spend_trajectory(
@@ -1010,11 +1278,91 @@ def live_spend_trajectory(
         )
     )
 
-    return apply_enterprise_style(fig).update_layout(
+    styled = apply_enterprise_style(fig).update_layout(
         yaxis_tickprefix="$",
         xaxis_type="date",
         xaxis_tickformat="%H:%M",
     )
+    _add_now_reference(styled, now_iso)
+    return styled
+
+
+def live_token_throughput(
+    block: BlockEntry,
+    rows: list[dict],
+    *,
+    now_iso: str,
+) -> go.Figure | None:
+    """Percent-stacked area of token-kind throughput across the
+    active block.
+
+    Each x-position is the end of one fragment-refresh interval;
+    the y-value of each band is the percentage of tokens added
+    during that interval attributable to that kind. The four
+    kinds (input / output / cache_create / cache_read) always
+    appear in the same legend order with their PALETTE colours
+    so the user's category-to-color mapping is invariant across
+    every chart in the app.
+
+    Hand-builds one `go.Scatter` per known kind (no
+    `px.area(color=...)`) so Plotly Express's auto-trace path
+    can't introduce a phantom legend entry from a NaN / None /
+    empty-string row — same defensive contract as
+    `token_mix_percent_bar`.
+
+    The `now_iso` parameter drives the vertical dotted reference
+    line via `_add_now_reference` so the user reads where "now"
+    falls in the 5-hour window — same visual contract as the
+    spend trajectory chart.
+
+    Returns ``None`` when ``rows`` is empty (no token activity
+    yet, or block-snapshot sequence had no positive deltas) so
+    the caller renders an empty-state caption instead of an
+    empty chart frame.
+    """
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    kind_order = ["input", "output", "cache_create", "cache_read"]
+
+    fig = go.Figure()
+    for kind in kind_order:
+        col = f"{kind}_pct"
+        if col not in df.columns:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=df["t"],
+                y=df[col],
+                customdata=df["total_tokens"].astype("int64").to_numpy().reshape(-1, 1),
+                mode="lines",
+                name=kind,
+                legendgroup=kind,
+                stackgroup="throughput",
+                fillcolor=TOKEN_KIND_COLORS[kind],
+                line=dict(color=TOKEN_KIND_COLORS[kind], width=1.5),
+                hovertemplate=(
+                    f"<b>{kind}</b><br>%{{x}}<br>"
+                    "%{y:.1f}% of bucket · %{customdata[0]:,d} tokens"
+                    "<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        yaxis_ticksuffix="%",
+        yaxis_range=[0, 100],
+    )
+    styled = apply_enterprise_style(fig).update_layout(
+        xaxis_type="date",
+        xaxis_tickformat="%H:%M",
+    )
+    _add_now_reference(styled, now_iso)
+    _log.info(
+        "chart.live_throughput.built trace_names=%s buckets=%d",
+        [t.name for t in styled.data],
+        len(df),
+    )
+    return styled
 
 
 def session_blocks_timeline(
