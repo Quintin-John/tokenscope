@@ -2,16 +2,15 @@
 
 The sidebar's full render flow is exercised via AppTest in
 `tests/test_ui_smoke.py`. This file holds focused tests on the
-section renderers extracted in slice 6 — the pure-Python helpers
-that don't touch Streamlit's widget runtime.
-
-`_fetch_discovery_options` is the only helper with non-trivial
-behaviour (silent-swallow of CcusageError); the rest are
-Streamlit-widget wrappers covered by the smoke tests.
+pure-Python helpers that don't touch Streamlit's widget runtime —
+date-preset range builders, the preset registry, and the CSS
+resource.
 """
 
 from __future__ import annotations
 
+from datetime import date as _date
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -129,3 +128,132 @@ def test_fetch_discovery_options_does_not_swallow_unrelated_errors(monkeypatch) 
 
     with pytest.raises(RuntimeError, match="programmer error"):
         sidebar._fetch_discovery_options(_q())
+
+
+# ---------- date-range preset helpers ----------
+
+
+def test_last_n_days_range_is_inclusive_of_today() -> None:
+    """`7d` conventionally means seven days *including* today. The
+    off-by-one (`days=n-1`) belongs in the helper, not at call sites."""
+    today = _date(2026, 5, 17)
+    since, until = sidebar._last_n_days_range(today, 7)
+    assert since == _date(2026, 5, 11)
+    assert until == today
+    assert (until - since).days + 1 == 7
+
+
+def test_last_n_days_range_thirty_days() -> None:
+    today = _date(2026, 5, 17)
+    since, until = sidebar._last_n_days_range(today, 30)
+    assert since == _date(2026, 4, 18)
+    assert (until - since).days + 1 == 30
+
+
+def test_last_n_days_range_single_day_collapses() -> None:
+    """n=1 collapses to (today, today)."""
+    today = _date(2026, 5, 17)
+    since, until = sidebar._last_n_days_range(today, 1)
+    assert since == until == today
+
+
+def test_month_to_date_range_starts_on_day_one() -> None:
+    since, until = sidebar._month_to_date_range(_date(2026, 5, 17))
+    assert since == _date(2026, 5, 1)
+    assert until == _date(2026, 5, 17)
+
+
+def test_month_to_date_range_on_first_of_month() -> None:
+    since, until = sidebar._month_to_date_range(_date(2026, 5, 1))
+    assert since == until == _date(2026, 5, 1)
+
+
+def test_custom_range_marker_returns_none() -> None:
+    """The `Custom` preset is the passive choice — its builder returns
+    None so the dispatch handler can leave the date range untouched."""
+    assert sidebar._custom_range_marker(_date(2026, 5, 17)) is None
+
+
+def test_date_presets_registry_covers_expected_labels() -> None:
+    """The registry is the single source of truth for the preset row.
+    Adding or renaming a preset is one tuple entry; the smoke tests
+    that assert on labels would fail loudly if the contract drifted."""
+    labels = [p.label for p in sidebar._DATE_PRESETS]
+    assert labels == ["7d", "30d", "MTD", "Custom"]
+
+
+def test_date_presets_builders_produce_consistent_shapes() -> None:
+    """Every preset's builder accepts `today` and returns either a
+    `(since, until)` tuple or `None` (Custom). The dispatch handler
+    relies on this binary."""
+    today = _date(2026, 5, 17)
+    for preset in sidebar._DATE_PRESETS:
+        result = preset.builder(today)
+        if preset.label == "Custom":
+            assert result is None
+        else:
+            assert isinstance(result, tuple) and len(result) == 2
+            since, until = result
+            assert isinstance(since, _date) and isinstance(until, _date)
+            assert since <= until <= today
+
+
+# ---------- _resolve_date_preset (pure dispatch) ----------
+
+
+def test_resolve_date_preset_none_label_returns_none() -> None:
+    """Segmented control returns `None` until the user clicks — the
+    callback fires with no label, the resolver returns None, the
+    handler no-ops."""
+    today = _date(2026, 5, 17)
+    assert sidebar._resolve_date_preset(None, today) is None
+    assert sidebar._resolve_date_preset("", today) is None
+
+
+def test_resolve_date_preset_unknown_label_returns_none() -> None:
+    """Defensive — a forged URL or stale session_state value can't
+    crash the handler."""
+    today = _date(2026, 5, 17)
+    assert sidebar._resolve_date_preset("99d", today) is None
+
+
+def test_resolve_date_preset_active_preset_returns_range() -> None:
+    today = _date(2026, 5, 17)
+    result = sidebar._resolve_date_preset("7d", today)
+    assert result is not None
+    since, until = result
+    assert (until - since).days + 1 == 7
+    assert until == today
+
+
+def test_resolve_date_preset_custom_returns_none() -> None:
+    """Custom is the passive sentinel — the resolver returns None so
+    the handler leaves the date range untouched."""
+    today = _date(2026, 5, 17)
+    assert sidebar._resolve_date_preset("Custom", today) is None
+
+
+# ---------- CSS resource ----------
+
+
+def test_sidebar_css_resource_is_loaded() -> None:
+    """The sibling `.css` file is read at import time. If the file
+    drifts out of the package or the read fails silently, the
+    constant would still be a string — verify it's a real CSS
+    document by checking for known selectors."""
+    css = sidebar._SIDEBAR_CSS
+    assert isinstance(css, str) and css.strip()
+    # Section heading rule (the visual-hierarchy fix).
+    assert "[data-testid=\"stSidebar\"] h3" in css
+    # Chip color override (the red-chip fix).
+    assert "[data-baseweb=\"tag\"]" in css
+    # Backtick / code-pill suppression (defensive against regressions).
+    assert "[data-testid=\"stSidebar\"] code" in css
+
+
+def test_sidebar_css_file_lives_next_to_module() -> None:
+    """The CSS file must live in the same directory as sidebar.py so
+    it ships in the wheel build (Hatch includes everything under
+    `packages = ["src/tokenscope"]`)."""
+    css_path = Path(sidebar.__file__).parent / "_sidebar_styles.css"
+    assert css_path.is_file()

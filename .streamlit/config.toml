@@ -16,3 +16,17 @@ showErrorDetails = "stacktrace"
 [browser]
 # Belt-and-braces against ever leaking telemetry from a local-only dashboard.
 gatherUsageStats = false
+
+[theme]
+# Streamlit's default `primaryColor` is a saturated red (`#FF4B4B`).
+# That bleeds into the multiselect tag fill, segmented-control active
+# state, toggle accent, and the page-selector radio — making the
+# sidebar's selected filter chips read as "error" / "destructive
+# action". Red is reserved for warnings and errors throughout the
+# product.
+#
+# The accent is a calm slate-indigo (`#475569`, slate-600). It carries
+# the brand for active/selected states; chip backgrounds are styled
+# separately to a neutral slate-100 via `src/tokenscope/ui/_sidebar_styles.css`
+# so chips don't compete with active controls for visual weight.
+primaryColor = "#475569"

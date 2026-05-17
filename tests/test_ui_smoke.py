@@ -259,6 +259,212 @@ def test_reset_filters_button_present(mock_ccusage, mock_ccusage_version) -> Non
     assert btn is not None
 
 
+# ---------- Sidebar polish: removed surfaces ----------
+
+
+def test_sidebar_no_version_footer(mock_ccusage, mock_ccusage_version) -> None:
+    """The `ccusage X.Y.Z` footer was moved out of the sidebar entirely.
+    Version surfaces via Streamlit's hamburger About menu instead — the
+    sidebar shouldn't carry CLI-tool fingerprints."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    captions = [c.value for c in at.sidebar.caption]
+    for caption in captions:
+        assert "ccusage" not in caption.lower(), (
+            f"unexpected ccusage reference in sidebar caption: {caption!r}"
+        )
+
+
+def test_sidebar_timezone_caption_is_plain_text(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Timezone caption is plain prose — no inline-code backticks
+    around the zone identifier, no `TZ` env-var instruction (which
+    was CLI documentation leaking into the product UI). README still
+    documents the override; the sidebar isn't the place for it."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    tz_caption = next(
+        (c.value for c in at.sidebar.caption if "Times shown in" in c.value),
+        None,
+    )
+    assert tz_caption is not None
+    assert "`" not in tz_caption, (
+        f"timezone caption still contains code-pill backticks: {tz_caption!r}"
+    )
+    assert "TZ" not in tz_caption, (
+        f"timezone caption still mentions the TZ env var: {tz_caption!r}"
+    )
+
+
+# ---------- Sidebar polish: help icons (kept only where they earn it) ----------
+
+
+def test_sidebar_offline_toggle_keeps_help(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Offline pricing isn't self-explanatory in product language — the
+    `?` icon stays on this toggle and its tooltip explains what cached
+    pricing means."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    toggle = next(
+        (t for t in at.sidebar.toggle if t.label == "Offline pricing"),
+        None,
+    )
+    assert toggle is not None
+    assert toggle.help, "Offline pricing toggle should retain its help tooltip"
+
+
+def test_sidebar_plan_selector_keeps_help(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The plan selector flips the headline KPI from pay-per-token to
+    flat-rate; the behavior isn't obvious from `Subscription` alone.
+    Help text explains the headline-flip in product language."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    plan = next(
+        (s for s in at.sidebar.selectbox if s.label == "Subscription"),
+        None,
+    )
+    assert plan is not None
+    assert plan.help, "Subscription selectbox should retain its help tooltip"
+    # Tooltip should mention both billing models so the user knows
+    # what they're picking between.
+    assert "Enterprise" in plan.help and "flat-rate" in plan.help.lower()
+
+
+def test_sidebar_self_explanatory_widgets_drop_help(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Date range / Project / Models dropped their `?` icons — five
+    identical question marks per panel was visual noise, not signal."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    for w in at.sidebar.date_input:
+        assert not w.help, f"date_input {w.label!r} retains help={w.help!r}"
+    # Project selectbox shouldn't have help; Subscription should.
+    project = next(
+        s for s in at.sidebar.selectbox if s.label == "Project"
+    )
+    assert not project.help
+    for w in at.sidebar.multiselect:
+        assert not w.help, f"multiselect {w.label!r} retains help={w.help!r}"
+
+
+# ---------- Sidebar polish: added affordances ----------
+
+
+def test_sidebar_date_preset_chips_present(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Preset chips sit above the date input as a segmented control,
+    not as bare buttons — segmented_control gives the brand-accent
+    "active preset" affordance for free."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    seg = next(
+        (s for s in at.sidebar.segmented_control if s.key == "sidebar-date-preset"),
+        None,
+    )
+    assert seg is not None
+    assert seg.options == ["7d", "30d", "MTD", "Custom"]
+
+
+def test_sidebar_date_preset_7d_seeds_inclusive_seven_day_range(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Selecting the 7d preset fires the `on_change` callback, which
+    seeds `_KEY_DATE_RANGE` with an inclusive 7-day range."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    seg = next(
+        s for s in at.sidebar.segmented_control if s.key == "sidebar-date-preset"
+    )
+    seg.set_value("7d")
+    at.run()
+    _assert_clean(at)
+    since, until = at.session_state["sidebar-date-range"]
+    assert (until - since).days + 1 == 7
+
+
+def test_sidebar_date_preset_mtd_starts_on_first_of_month(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    seg = next(
+        s for s in at.sidebar.segmented_control if s.key == "sidebar-date-preset"
+    )
+    seg.set_value("MTD")
+    at.run()
+    _assert_clean(at)
+    since, _until = at.session_state["sidebar-date-range"]
+    assert since.day == 1
+
+
+def test_sidebar_date_preset_custom_is_passive(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Clicking Custom records the choice in segmented-control state
+    but leaves `_KEY_DATE_RANGE` untouched — the user is signalling
+    "I'll drive the date input directly"."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    # Pre-seed a custom range; verify Custom click doesn't overwrite it.
+    from datetime import date as _date
+
+    custom_range = (_date(2026, 3, 1), _date(2026, 3, 15))
+    at.session_state["sidebar-date-range"] = custom_range
+    at.run()
+    seg = next(
+        s for s in at.sidebar.segmented_control if s.key == "sidebar-date-preset"
+    )
+    seg.set_value("Custom")
+    at.run()
+    _assert_clean(at)
+    assert at.session_state["sidebar-date-range"] == custom_range
+
+
+def test_sidebar_clear_all_models_button_present(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """`Clear all` sits beside `Select all` — symmetric batch actions
+    for the Models filter."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    labels = {b.label for b in at.sidebar.button}
+    assert "Clear all" in labels
+
+
+def test_sidebar_clear_all_empties_models_selection(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Clicking Clear all sets session_state to `[]` (the empty
+    selection) — distinct from Select-all's `pop`, which lets the
+    multiselect default re-seed every available model."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at(models="claude-opus-4-7")
+    at.run()
+    _assert_clean(at)
+    btn = next(b for b in at.sidebar.button if b.label == "Clear all")
+    btn.click()
+    at.run()
+    _assert_clean(at)
+    assert at.session_state["sidebar-models"] == []
+    assert "models" not in at.query_params
+
+
 def test_models_select_all_button_present(mock_ccusage, mock_ccusage_version) -> None:
     """Slice 25: scoped escape hatch sits next to the Models multiselect."""
     _wire_default_fixtures(mock_ccusage)

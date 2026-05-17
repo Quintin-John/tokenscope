@@ -1,0 +1,68 @@
+/*
+ * Sidebar visual overrides.
+ *
+ * Every rule is scoped to `[data-testid="stSidebar"]` so main-page
+ * styling is unaffected. The point is to suppress Streamlit's defaults
+ * (red primaryColor bleed, inline-code pill rendering of backticked
+ * strings, flat heading hierarchy, redundant clear-all affordance) and
+ * replace them with an enterprise-SaaS sidebar look (Linear / Vercel /
+ * Stripe Dashboard reference).
+ *
+ * Color tokens are inline because CSS values belong in CSS files. The
+ * accent color is sourced from `.streamlit/config.toml [theme]
+ * primaryColor` — neutral chip backgrounds here intentionally do NOT
+ * use the accent, so the chip color stays calm while the segmented
+ * control's active state inherits the brand accent.
+ */
+
+/* Section heading: small uppercase label, muted gray, breathing room
+   above. `st.markdown("### Filters")` renders as h3 by default, which
+   was the same visual weight as field labels below it — flattening the
+   panel into one undifferentiated list. */
+[data-testid="stSidebar"] h3 {
+    font-size: 0.72rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.06em !important;
+    color: #64748b !important;
+    margin: 2rem 0 0.75rem 0 !important;
+    font-weight: 600 !important;
+}
+[data-testid="stSidebar"] h3:first-of-type {
+    margin-top: 0.5rem !important;
+}
+
+/* Multiselect chip: neutral pill, not the brand accent.
+   - Streamlit's default chip uses primaryColor (red by default; muted
+     in our config). We want chips to read as "selected filter value",
+     not as the loudest element on the panel. A calm slate fill keeps
+     attention on the active filter set without competing with the
+     segmented-control active state for visual weight. */
+[data-testid="stSidebar"] [data-baseweb="tag"] {
+    background-color: #f1f5f9 !important;
+    color: #1e293b !important;
+    border: 1px solid #e2e8f0 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="tag"] svg {
+    fill: #475569 !important;
+}
+
+/* Suppress the redundant global "clear all" × that `st.multiselect`
+   renders to the right of the chips. The paired Select all / Clear all
+   buttons below the field are the canonical batch-action affordance. */
+[data-testid="stSidebar"] [data-baseweb="select"]
+    [role="button"][aria-label*="Clear value"] {
+    display: none !important;
+}
+
+/* Defensive: kill inline-code (backtick) rendering inside the sidebar.
+   We've stripped backticks from sidebar strings, but Streamlit may
+   re-introduce code-pill styling on any future caption that contains
+   backticks. This rule keeps that from regressing into a green pill. */
+[data-testid="stSidebar"] code {
+    background: transparent !important;
+    color: inherit !important;
+    font-family: inherit !important;
+    padding: 0 !important;
+    border: none !important;
+    font-size: inherit !important;
+}

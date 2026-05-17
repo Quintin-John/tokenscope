@@ -43,9 +43,36 @@ _VIEW_LABELS: dict[ViewName, str] = {
 }
 
 
+def _build_about_text() -> str:
+    """Markdown for the About entry in Streamlit's hamburger menu.
+
+    Surfaces the upstream ccusage version (previously in a sidebar
+    footer with code-pill styling — moved out so the panel can stop
+    looking like CLI documentation) plus the timezone-override note
+    that used to live as an inline caption in the sidebar.
+
+    `get_ccusage_version` raises on bridge failure; we render a
+    fallback rather than let the page-config call propagate the error.
+    """
+    try:
+        version_line = f"ccusage version: {get_ccusage_version()}"
+    except CcusageError:
+        version_line = "ccusage version: unavailable"
+    return (
+        "**tokenscope** — local-only dashboard for Claude Code spend.\n\n"
+        f"{version_line}\n\n"
+        "Times shown in your auto-detected system timezone. To override, "
+        "set the `TZ` environment variable before launching."
+    )
+
+
 def render() -> None:
     setup_logging()
-    st.set_page_config(page_title="tokenscope", layout="wide")
+    st.set_page_config(
+        page_title="tokenscope",
+        layout="wide",
+        menu_items={"About": _build_about_text()},
+    )
     # CSS injections:
     #  - Hide the "Made with Streamlit vX.Y.Z" footer. This is a local-only
     #    dashboard; the upstream branding adds nothing for the user.
@@ -103,14 +130,6 @@ def render() -> None:
         live_view.render(state, nav)
     else:
         overview.render(state, nav)
-
-    with st.sidebar:
-        st.divider()
-        try:
-            version = get_ccusage_version()
-            st.caption(f"ccusage `{version}`")
-        except CcusageError as exc:
-            st.error(f"ccusage bridge unavailable:\n\n```\n{exc}\n```")
 
 
 _PAGE_SELECTOR_KEY = "top-page-selector"
