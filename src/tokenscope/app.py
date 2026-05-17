@@ -38,10 +38,35 @@ _VIEW_LABELS: dict[ViewName, str] = {
 
 def render() -> None:
     st.set_page_config(page_title="tokenscope", layout="wide")
-    # Hide the "Made with Streamlit vX.Y.Z" footer. This is a local-only
-    # dashboard; the upstream branding adds nothing for the user.
+    # CSS injections:
+    #  - Hide the "Made with Streamlit vX.Y.Z" footer. This is a local-only
+    #    dashboard; the upstream branding adds nothing for the user.
+    #  - Slice 16: force `st.columns(N)` rows to flex-wrap on narrow
+    #    viewports. By default columns shrink-to-fit at any width, which
+    #    crushes 4-card KPI rows into unreadable slivers on a half-screen
+    #    tab. Below 900px columns wrap to two per row; below 600px they
+    #    stack. The `min-width` floor stops a column from shrinking below
+    #    a readable threshold even on viewports we don't have a rule for.
     st.markdown(
-        "<style>footer {display: none !important;}</style>",
+        """
+        <style>
+        footer {display: none !important;}
+        [data-testid="stHorizontalBlock"] {flex-wrap: wrap !important;}
+        [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            min-width: 220px !important;
+        }
+        @media (max-width: 900px) {
+            [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+                flex: 1 1 240px !important;
+            }
+        }
+        @media (max-width: 600px) {
+            [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+                flex: 1 1 100% !important;
+            }
+        }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
     st.title("tokenscope")
