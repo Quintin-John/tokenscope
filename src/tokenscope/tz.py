@@ -61,6 +61,7 @@ def detect_local_iana() -> str:
     if tz_env:
         try:
             ZoneInfo(tz_env)
+            _log.info("tz.detected source=env_var zone=%s", tz_env)
             return tz_env
         except _ZONE_INVALID as exc:
             # TZ set to a POSIX-style string ("EST5EDT,M3.2.0,M11.1.0"),
@@ -68,11 +69,16 @@ def detect_local_iana() -> str:
             # to the other probes rather than confidently returning
             # garbage. Anything that isn't a zone-resolution failure
             # (e.g. an OSError from a corrupt tzdata file) surfaces.
-            _log.debug("tz.probe.env_invalid value=%r reason=%s", tz_env, exc)
+            _log.warning(
+                "tz.probe.env_invalid value=%r reason=%s — falling back to OS",
+                tz_env,
+                exc,
+            )
 
     tz = datetime.now().astimezone().tzinfo
     key = getattr(tz, "key", None)
     if isinstance(key, str) and "/" in key:
+        _log.info("tz.detected source=os_astimezone zone=%s", key)
         return key
 
     localtime = Path("/etc/localtime")
@@ -82,7 +88,9 @@ def detect_local_iana() -> str:
         except OSError:
             target = ""
         if _LOCALTIME_MARKER in target:
-            return target.rsplit(_LOCALTIME_MARKER, 1)[1]
+            resolved = target.rsplit(_LOCALTIME_MARKER, 1)[1]
+            _log.info("tz.detected source=etc_localtime zone=%s", resolved)
+            return resolved
     _log.warning(
         "tz.fallback_to_utc all_probes_failed — ccusage will bucket by UTC"
     )
