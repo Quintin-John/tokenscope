@@ -19,9 +19,15 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_FALLBACK = "UTC"
 _LOCALTIME_MARKER = "/zoneinfo/"
+# ZoneInfo(key) raises ZoneInfoNotFoundError for unknown IANA names and
+# ValueError for malformed keys (absolute paths, empty strings, etc.).
+# We catch both as "this isn't a usable zone, fall through" — anything
+# else is a genuine bug and must surface.
+_ZONE_INVALID = (ZoneInfoNotFoundError, ValueError)
 
 
 def detect_local_iana() -> str:
@@ -50,14 +56,14 @@ def detect_local_iana() -> str:
     tz_env = os.environ.get("TZ", "").strip()
     if tz_env:
         try:
-            from zoneinfo import ZoneInfo
-
             ZoneInfo(tz_env)
             return tz_env
-        except Exception:
-            # TZ set to a POSIX-style string ("EST5EDT") or junk — fall
-            # through to the other probes rather than confidently
-            # returning garbage.
+        except _ZONE_INVALID:
+            # TZ set to a POSIX-style string ("EST5EDT,M3.2.0,M11.1.0"),
+            # an absolute path, an empty string, or junk — fall through
+            # to the other probes rather than confidently returning
+            # garbage. Anything that isn't a zone-resolution failure
+            # (e.g. an OSError from a corrupt tzdata file) surfaces.
             pass
 
     tz = datetime.now().astimezone().tzinfo
@@ -95,11 +101,12 @@ def utc_iso_to_local(iso: str, zone: str) -> str | None:
     except ValueError:
         return None
     try:
-        from zoneinfo import ZoneInfo
-
         local_dt = utc_dt.astimezone(ZoneInfo(zone))
-    except (ImportError, Exception):
-        return iso  # Best-effort: fall back to the original
+    except _ZONE_INVALID:
+        # Unknown / malformed zone — caller passed something we can't
+        # resolve. Return the raw input rather than crashing the view.
+        # Any other exception (e.g. tzdata corruption) is a bug; surface it.
+        return iso
     return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
@@ -116,8 +123,8 @@ def utc_iso_to_local_date(iso: str, zone: str) -> str | None:
     except ValueError:
         return None
     try:
-        from zoneinfo import ZoneInfo
-
         return utc_dt.astimezone(ZoneInfo(zone)).strftime("%Y-%m-%d")
-    except (ImportError, Exception):
+    except _ZONE_INVALID:
+        # Unknown / malformed zone — return the UTC date-prefix as a
+        # last-resort label rather than crashing the view.
         return iso[:10]

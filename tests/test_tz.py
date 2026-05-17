@@ -132,6 +132,85 @@ def test_detect_local_iana_bare_utc_in_tz_returns_utc(monkeypatch) -> None:
     assert detect_local_iana() == "UTC"
 
 
+def test_detect_local_iana_uses_astimezone_key_when_tz_unset(monkeypatch) -> None:
+    """Probe 2: when TZ is unset and the host's stdlib resolves a
+    ZoneInfo-typed tzinfo with a ``.key`` containing a '/', that key
+    is returned. Covers the production path on macOS native runs."""
+    monkeypatch.delenv("TZ", raising=False)
+    import tokenscope.tz as tz_mod
+
+    class _ZoneInfoLikeTz:
+        key = "Europe/Paris"
+
+        def utcoffset(self, dt):
+            return None
+
+        def tzname(self, dt):
+            return "CET"
+
+        def dst(self, dt):
+            return None
+
+    class _FakeDatetime:
+        @staticmethod
+        def now():
+            class _D:
+                def astimezone(self):
+                    class _R:
+                        tzinfo = _ZoneInfoLikeTz()
+
+                    return _R()
+
+            return _D()
+
+    monkeypatch.setattr(tz_mod, "datetime", _FakeDatetime)
+    assert detect_local_iana() == "Europe/Paris"
+
+
+def test_detect_local_iana_readlink_oserror_falls_through_to_utc(
+    monkeypatch,
+) -> None:
+    """Probe 3 defensive path: if ``/etc/localtime`` is a symlink but
+    ``os.readlink`` raises OSError (corrupt symlink, EACCES, ELOOP),
+    swallow it and continue to the UTC fallback rather than crashing
+    the whole sidebar render."""
+    monkeypatch.delenv("TZ", raising=False)
+    import tokenscope.tz as tz_mod
+
+    class _NoKeyTzInfo:
+        def utcoffset(self, dt):
+            return None
+
+        def tzname(self, dt):
+            return "X"
+
+        def dst(self, dt):
+            return None
+
+    class _FakeDatetime:
+        @staticmethod
+        def now():
+            class _D:
+                def astimezone(self):
+                    class _R:
+                        tzinfo = _NoKeyTzInfo()
+
+                    return _R()
+
+            return _D()
+
+    monkeypatch.setattr(tz_mod, "datetime", _FakeDatetime)
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+
+    def _raise_oserror(_):
+        raise OSError("EACCES on /etc/localtime")
+
+    monkeypatch.setattr(tz_mod.os, "readlink", _raise_oserror)
+    assert detect_local_iana() == DEFAULT_FALLBACK
+
+
 def test_detect_local_iana_symlink_fallback(monkeypatch, tmp_path) -> None:
     """If `datetime.astimezone().tzinfo` doesn't have a `key` attr, we
     fall back to reading the `/etc/localtime` symlink target."""
@@ -214,6 +293,22 @@ def test_utc_iso_to_local_malformed_returns_none() -> None:
     assert utc_iso_to_local("not-a-timestamp", "America/Los_Angeles") is None
 
 
+def test_utc_iso_to_local_unknown_zone_returns_raw_iso() -> None:
+    """Unknown zone names raise ZoneInfoNotFoundError; we return the
+    raw input so the UI still has something to render. Narrow catch:
+    a corrupt-tzdata OSError would surface as a real bug, not get
+    swallowed silently."""
+    s = utc_iso_to_local("2026-05-16T13:00:00.000Z", "Atlantis/Lost_City")
+    assert s == "2026-05-16T13:00:00.000Z"
+
+
+def test_utc_iso_to_local_malformed_zone_returns_raw_iso() -> None:
+    """An absolute-path zone key raises ValueError, not
+    ZoneInfoNotFoundError. Must also fall back rather than crash."""
+    s = utc_iso_to_local("2026-05-16T13:00:00.000Z", "/etc/foo")
+    assert s == "2026-05-16T13:00:00.000Z"
+
+
 # ---------- utc_iso_to_local_date ----------
 
 
@@ -243,3 +338,15 @@ def test_utc_iso_to_local_date_empty() -> None:
 
 def test_utc_iso_to_local_date_malformed() -> None:
     assert utc_iso_to_local_date("garbage", "America/Los_Angeles") is None
+
+
+def test_utc_iso_to_local_date_unknown_zone_returns_iso_prefix() -> None:
+    """Unknown zone → return the UTC date-prefix as a last-resort label."""
+    d = utc_iso_to_local_date("2026-05-16T13:00:00.000Z", "Atlantis/Lost_City")
+    assert d == "2026-05-16"
+
+
+def test_utc_iso_to_local_date_malformed_zone_returns_iso_prefix() -> None:
+    """Malformed zone (ValueError) → same fall-back as unknown zone."""
+    d = utc_iso_to_local_date("2026-05-16T13:00:00.000Z", "/etc/foo")
+    assert d == "2026-05-16"

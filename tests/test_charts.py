@@ -367,6 +367,31 @@ def test_burn_gauge_returns_indicator_figure() -> None:
     assert fig.data[0].value == 8.83
 
 
+def test_burn_gauge_with_typical_renders_threshold_marker() -> None:
+    """When ``typical`` is provided and > 0, the gauge gets a red
+    threshold line at that value — visual cue for "above/below my usual
+    burn". Threshold structure: gauge.threshold = {"line": {"color":
+    "#d62728", ...}, "thickness": 0.85, "value": typical}."""
+    fig = burn_gauge(_block_with_burn(), typical=5.0)
+    assert isinstance(fig, go.Figure)
+    threshold = fig.data[0].gauge.threshold
+    assert threshold is not None
+    assert threshold.value == 5.0
+    assert threshold.line.color == "#d62728"
+
+
+def test_burn_gauge_typical_zero_does_not_set_threshold() -> None:
+    """A typical of 0 (or negative) is meaningless as a threshold — the
+    burn-rate axis starts at 0. Guard ``typical > 0`` so a defaulted-to-
+    zero historical-median doesn't paint a phantom red line at the axis."""
+    fig = burn_gauge(_block_with_burn(), typical=0.0)
+    assert isinstance(fig, go.Figure)
+    threshold = fig.data[0].gauge.threshold
+    # Plotly returns an unset threshold as a degenerate object whose
+    # `value` is None — that's the "no threshold drawn" shape.
+    assert threshold is None or threshold.value is None
+
+
 def test_burn_gauge_no_burn_rate_returns_none() -> None:
     block = _block_with_burn()
     block = BlockEntry(
@@ -448,6 +473,33 @@ def test_single_family_token_bar_returns_horizontal_log_bar() -> None:
 
 def test_single_family_token_bar_empty_returns_none() -> None:
     assert single_family_token_bar(_report([])) is None
+
+
+def test_single_family_token_bar_all_zero_tokens_returns_none() -> None:
+    """A report with entries but every token count == 0 (e.g. cost-only
+    accounting glitches) would render four zero-width bars. Bail and
+    let the UI render an empty-state caption instead."""
+    zero_entry = DailyEntry(
+        date="2026-05-16",
+        inputTokens=0,
+        outputTokens=0,
+        cacheCreationTokens=0,
+        cacheReadTokens=0,
+        totalTokens=0,
+        totalCost=0.0,
+        modelsUsed=["claude-opus-4-7"],
+        modelBreakdowns=[
+            ModelBreakdown(
+                modelName="claude-opus-4-7",
+                inputTokens=0,
+                outputTokens=0,
+                cacheCreationTokens=0,
+                cacheReadTokens=0,
+                cost=0.0,
+            )
+        ],
+    )
+    assert single_family_token_bar(_report([zero_entry])) is None
 
 
 # ---------- session_blocks_timeline (slice 17) ----------
