@@ -84,6 +84,30 @@ def render() -> None:
     )
     st.markdown(f"<style>{_APP_CSS}</style>", unsafe_allow_html=True)
 
+    # Defensive: Streamlit's PlotlyChart bundle has been observed to
+    # emit `Unhandled Promise Rejection: undefined` during the
+    # selection-event setup phase on charts that pass `on_select`.
+    # The rejection has no value (`reject()` called with no argument
+    # → `undefined`) and the wrapper renders the rejection into the
+    # chart legend as a phantom entry. The figure-side fix is
+    # `clickmode="event+select"` (set in `apply_enterprise_style`);
+    # this listener is the belt-and-braces backup — silently swallow
+    # any `undefined`/`null` promise rejection so it can't surface in
+    # the DOM. Real errors (rejections with a value) propagate
+    # normally so we don't mask actionable JS failures.
+    st.markdown(
+        """
+        <script>
+        window.addEventListener('unhandledrejection', function (event) {
+            if (event.reason === undefined || event.reason === null) {
+                event.preventDefault();
+            }
+        });
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
     # NB: no visible `st.title("tokenscope")`. The product wordmark
     # lives in the browser tab (`page_title`); the H1 on each page is
     # the *view name*, rendered by the view itself (`# Overview`,

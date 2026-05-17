@@ -66,101 +66,127 @@ BRAND_HUE_SHADES: tuple[str, ...] = (
 
 # --- categorical palettes -------------------------------------------------
 #
-# Categorical data needs distinguishable hues, not shades of one. The
-# palette below uses TWO disjoint hue families:
+# Pre-UI_Fixes (main branch) charts used Plotly Express's default
+# qualitative palette via `px.area(color=...)` and `px.bar(color=...)`
+# with no explicit color spec. The palette is
+# `px.colors.qualitative.Plotly`:
 #
-#   * Token kinds  — blue / emerald / amber / teal (cool + warm)
-#   * Model families — violet / pink / cyan / slate (cool, distinct from
-#                       the kind palette so two unrelated categories
-#                       across the dashboard never share a color)
+#   ['#636EFA',  # indigo
+#    '#EF553B',  # RED — excluded (reserved for warnings only)
+#    '#00CC96',  # green
+#    '#AB63FA',  # purple
+#    '#FFA15A',  # orange
+#    '#19D3F3',  # cyan
+#    '#FF6692',  # pink
+#    '#FECB52',  # yellow
+#    '#B6E880',  # light green
+#    '#FF97FF']  # light pink
 #
-# Red is deliberately absent throughout — reserved for warnings and
-# errors. Every hue is also distinguishable on a grayscale display
-# (different luminance), so users with color-vision deficiencies still
-# read the chart correctly.
+# These are the chart colors the user knows from earlier builds. We
+# keep them — with the one explicit exclusion of red (#EF553B), which
+# is reserved for warning / error states throughout the product.
+#
+# Token kinds and model families pull from DIFFERENT positions in the
+# palette so two unrelated categories across the dashboard never share
+# a color. `opus` is never confused with `input`.
 
-# Token-kind palette. Used as `color_discrete_map` in token-mix charts
-# so Plotly emits one trace per known kind with an explicit name + a
-# stable color. No `undefined` can sneak in.
-TOKEN_KIND_COLORS: dict[str, str] = {
-    "input": "#3B82F6",         # blue-500
-    "output": "#10B981",        # emerald-500
-    "cache_create": "#F59E0B",  # amber-500
-    "cache_read": "#14B8A6",    # teal-500
+# --- PALETTE — single source of truth for every chart color --------------
+#
+# Every chart in the app references `PALETTE` by category name. There
+# is no `color_discrete_sequence` anywhere — only
+# `color_discrete_map=...` (built from PALETTE slices) or direct
+# `marker_color=PALETTE[name]` / `line=dict(color=PALETTE[name])`.
+#
+# Guarantees:
+#   1. No two distinct categories across the dashboard share a color.
+#      The eye learns the mapping after one glance — opus is always
+#      violet, input is always pink, cache_create is always amber.
+#   2. Adding a new category requires a new PALETTE entry. Forgetting
+#      causes `family_color_map` / `TOKEN_KIND_COLORS` lookups to fall
+#      back to the documented `Other` sentinel rather than silently
+#      auto-picking a Plotly default color that could collide.
+#   3. Red is reserved for warnings / error states. NO data series
+#      anywhere in the app uses red.
+#
+# Disjoint hue families:
+#   * Model families (Daily cost): violet / emerald / cyan / slate
+#   * Token kinds (Token mix, Cost composition): pink / blue / amber / teal
+#   * Overlay reference line (7-day avg): near-black so it sits as a
+#     summary line over the colored bands.
+PALETTE: dict[str, str] = {
+    # Model families
+    "opus": "#8b5cf6",         # violet
+    "haiku": "#10b981",        # emerald
+    "sonnet": "#06b6d4",       # cyan
+    "Other": "#94a3b8",        # slate (unclassified-family sentinel)
+
+    # Token kinds
+    "input": "#ec4899",        # pink / magenta
+    "output": "#1e40af",       # dark blue
+    "cache_create": "#f59e0b", # amber
+    "cache_read": "#14b8a6",   # teal
+
+    # Overlay lines
+    "7-day avg": "#1f2937",    # near-black (dashed)
 }
 
-# The valid set of token-kind labels. Defensive filter: rows whose `kind`
-# falls outside this set are dropped before reaching Plotly, so an
-# upstream schema drift can't introduce a 5th legend entry.
+
+# Token-kind palette — slice of PALETTE so callers don't need to
+# remember which keys are kinds. Used as
+# `color_discrete_map=TOKEN_KIND_COLORS` in token-mix charts so
+# Plotly emits one trace per known kind with an explicit name + a
+# stable brand color.
+TOKEN_KIND_COLORS: dict[str, str] = {
+    kind: PALETTE[kind]
+    for kind in ("input", "output", "cache_create", "cache_read")
+}
+
+# The valid set of token-kind labels. Defensive filter: rows whose
+# `kind` falls outside this set are dropped before reaching Plotly,
+# so an upstream schema drift can't introduce a 5th legend entry.
 TOKEN_KIND_LABELS: frozenset[str] = frozenset(TOKEN_KIND_COLORS)
 
 
-# Canonical brand colors for the currently-known Anthropic model
-# families. Each family keeps the same hue across every render
-# regardless of which other families happen to be in the window —
-# users build muscle memory ("opus is the pink band"). Hues are
-# DISJOINT from the token-kind palette above so no two distinct
-# categories across the dashboard share a color.
+# Canonical colors for currently-known Anthropic families. Each
+# family keeps the same hue across every render regardless of input
+# ordering or which other families are present.
 _FAMILY_CANONICAL_COLORS: dict[str, str] = {
-    "opus": "#EC4899",     # pink-500 — most-capable
-    "sonnet": "#06B6D4",   # cyan-500
-    "haiku": "#8B5CF6",    # violet-500
+    family: PALETTE[family]
+    for family in ("opus", "sonnet", "haiku")
 }
 
-# Fallback colors for non-Claude / future families that aren't in
-# `_FAMILY_CANONICAL_COLORS`. Drawn from a separate slot so they don't
-# collide with the token-kind palette either.
-_FAMILY_FALLBACK_POOL: tuple[str, ...] = (
-    "#F472B6",  # pink-400 (lighter pink)
-    "#A78BFA",  # violet-400
-    "#67E8F9",  # cyan-300
-    "#FBBF24",  # amber-400 (only if nothing else fits)
-)
-
-# Color reserved for the "I couldn't classify this family" sentinel
-# (`analytics.UNKNOWN_MODEL_FAMILY`). Neutral slate so the band reads
-# as "not categorised" rather than competing with the branded colors.
-_UNKNOWN_FAMILY_COLOR = "#94A3B8"  # slate-400
+# Color for any family the registry doesn't recognise (the
+# `analytics.UNKNOWN_MODEL_FAMILY` sentinel, future-model ids,
+# non-Claude names that slipped through). Neutral slate — visually
+# distinct from branded families so it reads as "uncategorised".
+_UNKNOWN_FAMILY_COLOR = PALETTE["Other"]
 
 
 def family_color_map(families: list[str]) -> dict[str, str]:
-    """Build a family-name → color map with brand-stable assignments.
+    """Build a family-name → color map sourced entirely from `PALETTE`.
 
     Known Anthropic families (`opus` / `sonnet` / `haiku` — see
-    `KNOWN_MODEL_FAMILIES`) always get their canonical hue regardless
-    of input ordering or which other families are present. That means
-    "opus is indigo" holds whether the window contains 1 family or 5,
-    in any order — the user's color/family muscle memory survives
-    re-renders.
+    `KNOWN_MODEL_FAMILIES`) always get their canonical PALETTE hue
+    regardless of input ordering or which other families are present.
+    That means "opus is violet" holds whether the window contains 1
+    family or 5, in any order — the user's color/family muscle memory
+    survives re-renders.
 
-    Unknown families (non-Claude models like `gpt-4o`, future Claude
-    families Anthropic hasn't shipped yet, or the
-    `UNKNOWN_MODEL_FAMILY` sentinel) get colors from the remainder of
-    the categorical palette. The unknown sentinel itself gets a
-    neutral gray — visually distinct from branded families so it
-    reads as "uncategorised", not as a peer category.
-
-    Stable under input reordering (the result is a dict; the colors
-    are deterministic per family name).
+    Any family the canonical map doesn't recognise — non-Claude
+    models (`gpt-4o`), future Anthropic families Anthropic hasn't
+    shipped yet, the `UNKNOWN_MODEL_FAMILY` sentinel, an empty-string
+    leak — gets `PALETTE["Other"]` (neutral slate). NO chart-builder
+    auto-pick from a Plotly default sequence; the only way to colour
+    a new branded family is to add it to PALETTE explicitly.
     """
-    fallback_pool = list(_FAMILY_FALLBACK_POOL)
-    fallback_index = 0
     out: dict[str, str] = {}
-    # Sort the unknown families so successive renders see a
-    # deterministic assignment from the fallback pool.
     for family in sorted(set(families), key=lambda f: f or ""):
-        if family == UNKNOWN_MODEL_FAMILY:
-            out[family] = _UNKNOWN_FAMILY_COLOR
-        elif family in _FAMILY_CANONICAL_COLORS:
+        if family in _FAMILY_CANONICAL_COLORS:
             out[family] = _FAMILY_CANONICAL_COLORS[family]
-        elif not family:
-            # Defensive: an empty-string family slipped through the
-            # `model_family` fallback (shouldn't happen post-fix, but
-            # the chart layer doesn't trust upstream).
-            out[family] = _UNKNOWN_FAMILY_COLOR
         else:
-            out[family] = fallback_pool[fallback_index % max(len(fallback_pool), 1)]
-            fallback_index += 1
+            # Unknown / sentinel / blank — all map to the documented
+            # `Other` slot. No silent auto-coloring.
+            out[family] = _UNKNOWN_FAMILY_COLOR
     return out
 
 # Neutral grays for text + gridlines, sourced from the same Tailwind
@@ -224,22 +250,44 @@ def apply_enterprise_style(fig: go.Figure) -> go.Figure:
 
     Also scrubs any phantom `undefined`-named traces as the final
     pipeline step — see `_scrub_undefined_traces`.
+
+    Forces ``clickmode="event+select"`` on every chart so the
+    Streamlit PlotlyChart bundle's selection-event setup receives a
+    clean event mode. The user reported a browser-side
+    `Unhandled Promise Rejection: undefined` originating in
+    `PlotlyChart.*.js` — when `on_select="rerun"` is passed to
+    `st.plotly_chart` but the figure's `clickmode` is left at the
+    Plotly default (just `"event"`), the wrapper attaches a
+    selection-event promise that can reject without a value. The
+    rejection value (JS `undefined`) was rendering as a phantom
+    legend entry. Setting `clickmode="event+select"` explicitly
+    aligns the figure with what the wrapper expects.
     """
+    # Plotly's title / axis-title fields serialise as objects: `title:
+    # {text, font, ...}`. Passing `title=None` to `update_layout` does
+    # NOT clear the object — Plotly retains `title: {}`, and the JS
+    # renderer then reads `title.text` (= JS `undefined`) and draws
+    # the LITERAL string `undefined` as a `<tspan>` SVG element in
+    # the `g.gtitle` group. That's the phantom legend-looking item
+    # the user has been seeing. Explicit empty-string `title_text=""`
+    # serialises as `title: {text: ""}` which renders correctly as
+    # nothing visible.
     fig.update_layout(
-        title=None,
+        title_text="",
+        clickmode="event+select",
         font=dict(family=_ENTERPRISE_FONT_FAMILY, size=12, color=_TEXT_PRIMARY),
         margin=dict(l=8, r=8, t=16, b=8),
         plot_bgcolor="white",
         paper_bgcolor="white",
         xaxis=dict(
-            title=None,
+            title_text="",
             showgrid=False,
             showline=False,
             zeroline=False,
             tickfont=dict(size=11, color=_TEXT_MUTED),
         ),
         yaxis=dict(
-            title=None,
+            title_text="",
             showgrid=True,
             gridcolor=_GRID_COLOR,
             griddash="dot",
@@ -463,7 +511,7 @@ def cost_trend_with_rolling(
                 name=rolling_label,
                 legendgroup=rolling_label,
                 showlegend=True,
-                line=dict(color=_TEXT_PRIMARY, width=2, dash="dot"),
+                line=dict(color=PALETTE["7-day avg"], width=2, dash="dot"),
                 hovertemplate=(
                     f"<b>{rolling_label}</b><br>"
                     "%{x}<br>$%{y:,.2f}<extra></extra>"
@@ -473,6 +521,10 @@ def cost_trend_with_rolling(
 
     if spike is not None:
         spike_date, spike_cost = spike
+        # Spike annotation: same near-black as the 7-day avg overlay
+        # — both are reference marks layered on top of the family
+        # bands, so they share a single palette entry.
+        annotation_color = PALETTE["7-day avg"]
         fig.add_annotation(
             x=spike_date,
             y=spike_cost,
@@ -481,14 +533,16 @@ def cost_trend_with_rolling(
             arrowhead=2,
             arrowsize=1,
             arrowwidth=1,
-            arrowcolor=_TEXT_PRIMARY,
+            arrowcolor=annotation_color,
             ax=20,
             ay=-30,
             bgcolor="white",
             bordercolor=_BORDER_COLOR,
             borderwidth=1,
             font=dict(
-                family=_ENTERPRISE_FONT_FAMILY, size=11, color=_TEXT_PRIMARY
+                family=_ENTERPRISE_FONT_FAMILY,
+                size=11,
+                color=annotation_color,
             ),
         )
 

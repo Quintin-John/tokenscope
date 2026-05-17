@@ -21,10 +21,56 @@ plan fee as the headline with the API-equivalent figure as a
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 from datetime import date, datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+_log = logging.getLogger("tokenscope.ui.overview")
+
+# Diagnostic dump path. When `TOKENSCOPE_DUMP_FIGURES=1` is set in the
+# environment, every Overview chart writes its `fig.to_json()` to a
+# file inside this directory immediately before `st.plotly_chart`
+# ships it to the JS client. The dump is the same bytes the browser
+# receives over the websocket — definitive evidence of what the
+# rendered figure contains. INFO log line emits the path + a grep
+# count of `"undefined"` so operators can confirm cleanliness
+# without leaving the log viewer.
+_FIGURE_DUMP_DIR = Path(os.environ.get("TOKENSCOPE_FIGURE_DUMP_DIR", "/tmp"))
+
+
+def _dump_figure_for_diagnostics(fig, label: str) -> None:
+    """Diagnostic instrumentation: write the figure JSON to disk
+    and log a grep-count for `"undefined"`. No-op unless
+    `TOKENSCOPE_DUMP_FIGURES=1` is set.
+
+    The file path + grep count is the proof the user can read in
+    docker logs. Same bytes get shipped over the websocket; if the
+    grep count is 0, the JS client receives a figure with zero
+    `undefined` literals.
+    """
+    if os.environ.get("TOKENSCOPE_DUMP_FIGURES") != "1":
+        return
+    if fig is None:
+        return
+    try:
+        payload = fig.to_json()
+        out = _FIGURE_DUMP_DIR / f"tokenscope_last_{label}.json"
+        out.write_text(payload)
+        undefined_count = payload.lower().count("undefined")
+        _log.info(
+            "figure.dump label=%s path=%s bytes=%d undefined_grep_count=%d",
+            label,
+            out,
+            len(payload),
+            undefined_count,
+        )
+    except Exception as exc:
+        _log.warning("figure.dump_failed label=%s exc=%s", label, exc)
 
 from tokenscope import config, data
 from tokenscope.analytics import (
@@ -404,6 +450,7 @@ def _render_cost_trend(
         )
         if fig is None:
             return
+        _dump_figure_for_diagnostics(fig, "cost_trend")
         event = st.plotly_chart(
             fig,
             width="stretch",
@@ -454,6 +501,7 @@ def _render_token_mix(daily_report: DailyReport, nav: Navigation) -> None:
         )
         if fig is None:
             return
+        _dump_figure_for_diagnostics(fig, "token_mix")
         event = st.plotly_chart(
             fig,
             width="stretch",

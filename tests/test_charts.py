@@ -24,6 +24,7 @@ from tokenscope.models import (
 )
 from tokenscope.ui.charts import (
     BRAND_HUE_SHADES,
+    PALETTE,
     TOKEN_KIND_COLORS,
     _daily_metric_figure,
     apply_enterprise_style,
@@ -699,6 +700,96 @@ def test_family_color_map_unknown_family_gets_palette_fallback() -> None:
     assert mapping["future-family-x"].startswith("#")
 
 
+def test_palette_has_no_duplicate_colors() -> None:
+    """No two distinct categories anywhere in the app share a color.
+    Locks the disjoint-hue contract: opus is the only violet, input
+    is the only pink, cache_create is the only amber, etc. If a
+    future PALETTE edit accidentally collides two entries, the
+    visual category mapping breaks; this test catches it."""
+    values = list(PALETTE.values())
+    duplicates = [c for c in values if values.count(c) > 1]
+    assert len(values) == len(set(values)), (
+        f"PALETTE has duplicate colors: {duplicates!r}"
+    )
+
+
+def _palette_consistency_cases() -> list[tuple]:
+    """Build the set of (chart_builder, fixture, expected_traces)
+    triples used by the palette-consistency parametrized test.
+
+    Each tuple describes one chart-and-fixture combination that the
+    test should iterate. Keeping them in a separate helper means
+    adding a new chart to the consistency contract is a one-line
+    append rather than a regex-friendly copy-paste."""
+    multi_family_report = _report(
+        [
+            _entry("2026-05-14", cost=5.0, model="claude-opus-4-7"),
+            _entry("2026-05-14", cost=1.0, model="claude-haiku-4-5-20251001"),
+            _entry("2026-05-15", cost=4.0, model="claude-opus-4-7"),
+            _entry("2026-05-15", cost=2.0, model="claude-haiku-4-5-20251001"),
+        ]
+    )
+    single_day_token_report = _report(
+        [_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")]
+    )
+    return [
+        (
+            "cost_trend_with_rolling[stacked]",
+            lambda r=multi_family_report: cost_trend_with_rolling(r, mode="stacked"),
+            {"opus", "haiku", "7-day avg"},
+        ),
+        (
+            "cost_trend_with_rolling[overlay]",
+            lambda r=multi_family_report: cost_trend_with_rolling(r, mode="overlay"),
+            {"opus", "haiku", "7-day avg"},
+        ),
+        (
+            "token_mix_percent_bar",
+            lambda r=single_day_token_report: token_mix_percent_bar(r),
+            {"input", "output", "cache_create", "cache_read"},
+        ),
+        (
+            "token_mix_non_cache_percent_bar",
+            lambda r=single_day_token_report: token_mix_non_cache_percent_bar(r),
+            {"input", "output", "cache_create"},
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "label,build,expected", _palette_consistency_cases(), ids=lambda v: v if isinstance(v, str) else None
+)
+def test_palette_applied_consistently_across_charts(
+    label: str, build, expected: set[str]
+) -> None:
+    """Every chart that names a trace in PALETTE must paint that
+    trace with PALETTE[name]. Across all chart builders. No silent
+    fallback to a Plotly default color sequence anywhere.
+
+    Asserts on either `marker.color` (bar traces) or `line.color`
+    (scatter traces) — whichever the trace actually carries. The
+    7-day avg overlay is a scatter-line trace; family bands are
+    scatter+fill so their `line.color` carries the brand hue;
+    token-mix bars carry `marker.color`.
+    """
+    fig = build()
+    assert fig is not None, f"{label}: chart builder returned None"
+    seen = {t.name for t in fig.data}
+    assert expected.issubset(seen), (
+        f"{label}: expected traces {expected!r} not all in {seen!r}"
+    )
+    for trace in fig.data:
+        name = trace.name
+        if name not in PALETTE:
+            continue
+        expected_color = PALETTE[name]
+        actual = _trace_color(trace)
+        assert actual == expected_color, (
+            f"{label}: trace {name!r} has color {actual!r}, "
+            f"expected PALETTE[{name!r}]={expected_color!r}"
+        )
+
+
 def test_token_kind_and_family_palettes_share_no_color() -> None:
     """Different concept-groups in the dashboard (token kinds vs
     model families) must NOT share colors — if `input` and `opus`
@@ -863,20 +954,66 @@ def test_token_mix_percent_zero_day_has_zero_percents() -> None:
 # ---------- apply_enterprise_style ----------
 
 
-def test_apply_enterprise_style_clears_title_and_axis_titles() -> None:
-    """The enterprise style drops any in-chart title and axis titles —
-    the section H3 above the chart owns the title, the ticks own the
-    axes."""
+def test_apply_enterprise_style_clears_title_to_empty_string() -> None:
+    """The enterprise style clears any in-chart title and axis titles
+    to the empty string — NOT to `None`.
+
+    Plotly's JS renderer reads `layout.title.text`. When `text` is
+    not set (because we passed `title=None`, which leaves `title: {}`
+    in the figure spec), JS evaluates `title.text` to `undefined` and
+    draws the LITERAL string `undefined` as a `<tspan>` SVG element
+    in the chart's `g.gtitle` group. That's the phantom legend-
+    looking item the user reported. Empty-string text renders as
+    nothing visible.
+
+    The earlier version of this test asserted `title.text is None`
+    — which is exactly the broken value the bug requires. The
+    assertion passed while the user saw `undefined` in the browser.
+    Now the test asserts the CORRECT contract.
+    """
     fig = go.Figure()
     fig.update_layout(
-        title="Should be removed",
+        title="Should be cleared to empty string",
         xaxis_title="Date",
         yaxis_title="Cost (USD)",
     )
     styled = apply_enterprise_style(fig)
-    assert styled.layout.title.text is None
-    assert styled.layout.xaxis.title.text is None
-    assert styled.layout.yaxis.title.text is None
+    assert styled.layout.title.text == "", (
+        f"title.text must be empty string (not None), got "
+        f"{styled.layout.title.text!r}"
+    )
+    assert styled.layout.xaxis.title.text == "", (
+        f"xaxis.title.text must be empty string, got "
+        f"{styled.layout.xaxis.title.text!r}"
+    )
+    assert styled.layout.yaxis.title.text == "", (
+        f"yaxis.title.text must be empty string, got "
+        f"{styled.layout.yaxis.title.text!r}"
+    )
+
+
+def test_styled_figure_json_contains_no_undefined_title_field() -> None:
+    """Belt-and-braces JSON-walk: the serialised figure spec must NOT
+    leave `title.text` unset. Plotly serialises an unset `text` as
+    a JS `undefined`, which the renderer draws as the literal
+    string. Assert that every `title` object in the layout has an
+    explicit `text` key — even if the value is `""`."""
+    fig = go.Figure()
+    fig.update_layout(title="x", xaxis_title="y", yaxis_title="z")
+    styled = apply_enterprise_style(fig)
+    spec = styled.to_dict()
+    layout = spec["layout"]
+    for path in ("title", "xaxis.title", "yaxis.title"):
+        node = layout
+        for part in path.split("."):
+            node = node.get(part, {})
+        assert "text" in node, (
+            f"layout.{path} has no `text` key — Plotly JS will render "
+            f"`undefined`. Full layout dict: {layout!r}"
+        )
+        assert node["text"] == "", (
+            f"layout.{path}.text must be empty string; got {node['text']!r}"
+        )
 
 
 def test_apply_enterprise_style_horizontal_gridlines_only() -> None:
@@ -888,6 +1025,46 @@ def test_apply_enterprise_style_horizontal_gridlines_only() -> None:
     assert fig.layout.yaxis.zeroline is False
     assert fig.layout.xaxis.showline is False
     assert fig.layout.yaxis.showline is False
+
+
+def test_apply_enterprise_style_sets_clickmode_event_plus_select() -> None:
+    """Regression for the browser-side `Unhandled Promise Rejection:
+    undefined` that surfaced as a phantom legend entry on charts that
+    pass `on_select` to `st.plotly_chart`.
+
+    The Streamlit PlotlyChart bundle's selection-event setup attaches
+    a promise that can reject without a value when the figure's
+    clickmode is the Plotly default `"event"` but the wrapper has been
+    told to listen for selections. The rejection value (JS
+    `undefined`) leaked into the legend.
+
+    Fix: force `clickmode="event+select"` on every styled figure so
+    the wrapper finds the event mode it expects. This test locks
+    that in so a future restyle doesn't silently drop the property.
+    """
+    fig = apply_enterprise_style(go.Figure())
+    assert fig.layout.clickmode == "event+select"
+
+
+def test_cost_trend_carries_event_plus_select_clickmode() -> None:
+    """End-to-end: the actual Daily-cost chart that drives
+    drill-down must end up with the correct clickmode."""
+    report = _report(
+        [
+            _entry("2026-05-14", cost=5.0, model="claude-opus-4-7"),
+            _entry("2026-05-15", cost=3.0, model="claude-opus-4-7"),
+        ]
+    )
+    fig = cost_trend_with_rolling(report)
+    assert fig.layout.clickmode == "event+select"
+
+
+def test_token_mix_carries_event_plus_select_clickmode() -> None:
+    """Same regression for Token mix — both Overview charts pass
+    `on_select` and both need the matching clickmode."""
+    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
+    fig = token_mix_percent_bar(report)
+    assert fig.layout.clickmode == "event+select"
 
 
 def test_apply_enterprise_style_is_idempotent() -> None:
