@@ -56,6 +56,18 @@ DATA_CACHE_TTL_SECONDS: int = int(_get("dashboard", "data_cache_ttl_seconds", 30
 # [live]
 LIVE_REFRESH_SECONDS: int = int(_get("live", "refresh_seconds", 30))
 
+# Wall-clock minutes per token-throughput bucket on the Live view.
+# The throughput chart's percent-stacked area is meaningful only once
+# at least `LIVE_THROUGHPUT_MIN_BUCKETS` buckets of data have
+# accumulated; before that, the chart layer renders an empty-state
+# panel rather than a degenerate single-column plot.
+LIVE_THROUGHPUT_BUCKET_MINUTES: int = int(
+    _get("live", "throughput_bucket_minutes", 5)
+)
+LIVE_THROUGHPUT_MIN_BUCKETS: int = int(
+    _get("live", "throughput_min_buckets", 2)
+)
+
 # [overview]
 # A day's cost qualifies as a "spike" worth annotating on the Overview
 # cost chart when it exceeds this multiplier × the window's median

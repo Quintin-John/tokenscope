@@ -21,6 +21,16 @@ data_cache_ttl_seconds = 30
 # `@st.fragment(run_every=...)` decorator uses this directly.
 refresh_seconds = 30
 
+# Wall-clock minutes per token-throughput bucket. The Live view's
+# percent-stacked throughput chart is gated on having at least
+# `throughput_min_buckets` buckets of elapsed data — otherwise the
+# chart would render as a degenerate single column with identical
+# X-axis ticks. Lower these values to see the chart sooner after
+# block start; raise them to suppress the chart when there's not
+# enough variation to be informative.
+throughput_bucket_minutes = 5
+throughput_min_buckets = 2
+
 [overview]
 # Multiplier for the daily-cost-spike detection on the Overview page.
 # A day's total cost qualifies as a spike worth annotating on the

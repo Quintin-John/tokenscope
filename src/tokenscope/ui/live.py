@@ -77,6 +77,8 @@ _TOKEN_KIND_ORDER: tuple[str, ...] = (
 )
 
 REFRESH_SECONDS = config.LIVE_REFRESH_SECONDS
+_THROUGHPUT_BUCKET_MINUTES = config.LIVE_THROUGHPUT_BUCKET_MINUTES
+_THROUGHPUT_MIN_BUCKETS = config.LIVE_THROUGHPUT_MIN_BUCKETS
 
 # session_state key for the in-session sample history that gives the
 # spend-trajectory chart's solid line real intra-block data points
@@ -121,8 +123,16 @@ def _live_panel(offline: bool, tz: str | None = None) -> None:
     _render_token_kind_kpis(active)
     _render_cache_hit_callout(active)
     now_iso = _now_iso(now_utc)
-    _render_spend_trajectory(active, cost_samples=cost_samples, now_iso=now_iso)
-    _render_token_throughput(active, kind_samples=kind_samples, now_iso=now_iso)
+    _render_spend_trajectory(
+        active, cost_samples=cost_samples, now_iso=now_iso, tz=tz
+    )
+    _render_token_throughput(
+        active,
+        kind_samples=kind_samples,
+        now_iso=now_iso,
+        now_utc=now_utc,
+        tz=tz,
+    )
 
 
 # --- refresh indicator ---------------------------------------------------
@@ -328,6 +338,7 @@ def _render_spend_trajectory(
     *,
     cost_samples: list[tuple[str, float]],
     now_iso: str,
+    tz: str | None,
 ) -> None:
     """Cumulative-spend line with dashed projection to window end.
 
@@ -336,18 +347,19 @@ def _render_spend_trajectory(
     we're heading (dashed projection). The slope of the actual line
     is the burn rate — users see acceleration directly.
 
-    Wrapped in a bordered container so the chart reads as a card
-    matching the KPI strip + the Overview chart cards.
+    The ``tz`` parameter routes the user's IANA zone through to the
+    chart builder so every X-axis tick renders in local clock time
+    rather than UTC.
     """
     with st.container(border=True):
         st.markdown("### Spend in this block")
         st.caption(
-            "Cumulative cost from the start of the window. Solid line "
-            "is actual; dotted line is the projection to window end "
-            "at the current rate. The vertical dotted reference line "
-            "marks where 'now' falls inside the block."
+            "Cumulative spend across the 5-hour block. Solid is "
+            "actual, dotted is projection at the current rate."
         )
-        fig = live_spend_trajectory(active, cost_samples, now_iso=now_iso)
+        fig = live_spend_trajectory(
+            active, cost_samples, now_iso=now_iso, tz=tz
+        )
         if fig is None:
             st.caption("No projection available for this block yet.")
             return
@@ -357,8 +369,7 @@ def _render_spend_trajectory(
         if active.projection is not None:
             st.caption(
                 f"Projected total tokens: "
-                f"{format_compact_int(active.projection.total_tokens)} "
-                f"({active.projection.total_tokens:,})"
+                f"{format_compact_int(active.projection.total_tokens)}"
             )
 
 
@@ -437,7 +448,9 @@ def _render_cache_hit_callout(active: BlockEntry) -> None:
     `cache_read` in PALETTE — visual breadcrumb that this stat is
     derived from cache_read divided by cache-eligible total) so
     the eye reads it as "derived from the four kinds", not "a
-    fifth raw count".
+    fifth raw count". The supporting copy is plain English
+    ("share of input-side tokens served from cache") rather than
+    the formula — same fix the Overview KPI already had.
     """
     ratio = block_cache_hit_ratio(active)
     pct = ratio * 100
@@ -446,7 +459,7 @@ def _render_cache_hit_callout(active: BlockEntry) -> None:
         <div class="tokenscope-cache-ratio-callout">
           <div class="tokenscope-cache-ratio-value">{pct:.1f}%</div>
           <div class="tokenscope-cache-ratio-label">
-            Cache hit ratio · cache_read ÷ (input + cache_create + cache_read)
+            Cache hit ratio · share of input-side tokens served from cache
           </div>
         </div>
         """,
@@ -459,6 +472,8 @@ def _render_token_throughput(
     *,
     kind_samples: list[tuple[str, dict[str, int]]],
     now_iso: str,
+    now_utc: datetime,
+    tz: str | None,
 ) -> None:
     """Percent-stacked area of per-interval token-kind throughput.
 
@@ -466,11 +481,17 @@ def _render_token_throughput(
     window, same now-reference line. Where spend tells you "how
     much"; throughput tells you "of what kind".
 
-    When no intra-block intervals carry token activity (a very
-    new block, or one that hasn't moved since the page opened),
-    `build_intra_block_token_throughput` returns an empty list
-    and we render an empty-state caption instead of a frame.
+    The chart is gated on wall-clock elapsed time. A block in its
+    first few minutes has at most one or two cumulative snapshots,
+    which Plotly's percent-stacked area renders as a degenerate
+    single column with multiple identical X-axis ticks. Until at
+    least `_THROUGHPUT_BUCKET_MINUTES × _THROUGHPUT_MIN_BUCKETS`
+    minutes have passed since block start, we show an explicit
+    empty-state panel naming the wait — both thresholds are
+    operator-tunable in `tokenscope.config.toml`.
     """
+    from tokenscope.tz import minutes_since_utc_iso
+
     with st.container(border=True):
         st.markdown("### Token throughput in this block")
         st.caption(
@@ -478,10 +499,27 @@ def _render_token_throughput(
             "cache_read tokens. Each column sums to 100%; hover for "
             "absolute counts."
         )
+
+        elapsed = minutes_since_utc_iso(active.start_time, now_utc=now_utc)
+        threshold = _THROUGHPUT_BUCKET_MINUTES * _THROUGHPUT_MIN_BUCKETS
+        if elapsed is not None and elapsed < threshold:
+            st.markdown(
+                f"""
+                <div class="tokenscope-live-throughput-empty">
+                  Block started <strong>{elapsed:.0f} min ago</strong> —
+                  token throughput will start showing once the block has
+                  been active for at least <strong>{threshold} minutes</strong>
+                  (current bucket size: {_THROUGHPUT_BUCKET_MINUTES} min).
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            return
+
         rows = build_intra_block_token_throughput(
             active, kind_samples, now_iso=now_iso
         )
-        fig = live_token_throughput(active, rows, now_iso=now_iso)
+        fig = live_token_throughput(active, rows, now_iso=now_iso, tz=tz)
         if fig is None:
             st.caption(
                 "No intra-block intervals with token activity yet — "

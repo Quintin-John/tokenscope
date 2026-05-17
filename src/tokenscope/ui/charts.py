@@ -1163,6 +1163,53 @@ def per_model_cache_bar(daily_report: DailyReport) -> go.Figure | None:
     return styled
 
 
+def _localize_iso(iso: str, tz: str | None) -> str:
+    """Convert a UTC ISO timestamp to the *naive* local-clock ISO form
+    Plotly's date axis renders without further conversion.
+
+    Falls back to the raw UTC ISO when ``tz`` is ``None`` or the
+    helper can't resolve the zone — matches the legacy behaviour
+    so no caller has to handle a None / sentinel return path.
+
+    Wraps `tz.utc_iso_to_local_naive_iso` so the chart layer doesn't
+    duplicate the localisation logic per-builder. Single point of
+    failure if a future ccusage schema change breaks the format.
+    """
+    if tz is None:
+        return iso
+    from tokenscope.tz import utc_iso_to_local_naive_iso
+
+    return utc_iso_to_local_naive_iso(iso, tz) or iso
+
+
+def _apply_block_window_xaxis(
+    fig: go.Figure, block: BlockEntry, tz: str | None
+) -> None:
+    """Force a date X-axis spanning the active block's full 5-hour
+    window in local-clock time.
+
+    Without this, Plotly auto-scales the X-axis to the data range,
+    which on a brand-new block (one or two samples clustered near
+    `now`) collapses to a near-zero-width range with multiple
+    identical tick labels (the `22:41 · 22:41 · 22:41 · 22:41`
+    regression the user flagged).
+
+    Tick density of 11 gives roughly half-hourly ticks across five
+    hours — readable without crowding. Both `live_spend_trajectory`
+    and `live_token_throughput` route through this helper so the
+    two charts share one X-axis contract: same range, same ticks,
+    same `now` reference position.
+    """
+    fig.update_xaxes(
+        range=[
+            _localize_iso(block.start_time, tz),
+            _localize_iso(block.end_time, tz),
+        ],
+        tickformat="%H:%M",
+        nticks=11,
+    )
+
+
 def _add_now_reference(fig: go.Figure, now_iso: str) -> None:
     """Vertical dotted reference line at `now_iso` spanning the full
     chart height. Single visual contract for "where 'now' falls
@@ -1210,6 +1257,7 @@ def live_spend_trajectory(
     samples: list[tuple[str, float]],
     *,
     now_iso: str,
+    tz: str | None = None,
 ) -> go.Figure | None:
     """Cumulative cost across the active 5-hour block.
 
@@ -1229,6 +1277,14 @@ def live_spend_trajectory(
     chart. No new palette entry needed; this is a single-series
     trajectory, not a categorical breakdown.
 
+    When ``tz`` is provided (the user's IANA zone, as auto-detected
+    by the sidebar), every X-value is converted from UTC ISO to a
+    naive local-clock ISO before reaching Plotly so the axis ticks
+    render in the user's wall-clock time rather than UTC. The block
+    window's start and end set the X-axis range explicitly so the
+    chart always spans the full 5 hours regardless of how many
+    samples have accumulated.
+
     Returns ``None`` if the block has no projection (gap block,
     finished block) — the caller renders an empty-state caption
     instead.
@@ -1237,16 +1293,17 @@ def live_spend_trajectory(
         return None
 
     color = PALETTE["7-day avg"]
-    actual_x: list[str] = [block.start_time]
+    actual_x: list[str] = [_localize_iso(block.start_time, tz)]
     actual_y: list[float] = [0.0]
     for sample_t, sample_cost in samples:
-        actual_x.append(sample_t)
+        actual_x.append(_localize_iso(sample_t, tz))
         actual_y.append(sample_cost)
     # Always anchor the actual line on the current "now" point so the
     # solid trace ends at the latest snapshot regardless of sample
     # cadence.
-    if actual_x[-1] != now_iso:
-        actual_x.append(now_iso)
+    local_now = _localize_iso(now_iso, tz)
+    if actual_x[-1] != local_now:
+        actual_x.append(local_now)
         actual_y.append(block.cost_usd)
 
     fig = go.Figure()
@@ -1266,7 +1323,7 @@ def live_spend_trajectory(
 
     fig.add_trace(
         go.Scatter(
-            x=[now_iso, block.end_time],
+            x=[local_now, _localize_iso(block.end_time, tz)],
             y=[block.cost_usd, block.projection.total_cost],
             mode="lines",
             name="Projected",
@@ -1283,7 +1340,8 @@ def live_spend_trajectory(
         xaxis_type="date",
         xaxis_tickformat="%H:%M",
     )
-    _add_now_reference(styled, now_iso)
+    _apply_block_window_xaxis(styled, block, tz)
+    _add_now_reference(styled, local_now)
     return styled
 
 
@@ -1292,6 +1350,7 @@ def live_token_throughput(
     rows: list[dict],
     *,
     now_iso: str,
+    tz: str | None = None,
 ) -> go.Figure | None:
     """Percent-stacked area of token-kind throughput across the
     active block.
@@ -1323,6 +1382,10 @@ def live_token_throughput(
     if not rows:
         return None
     df = pd.DataFrame(rows)
+    # Localise every X-value so Plotly's date axis renders ticks in
+    # the user's wall-clock time instead of UTC. Pure string
+    # transformation — no impact on `total_tokens` / `*_pct` columns.
+    df = df.assign(t=df["t"].map(lambda iso: _localize_iso(iso, tz)))
     kind_order = ["input", "output", "cache_create", "cache_read"]
 
     fig = go.Figure()
@@ -1356,7 +1419,8 @@ def live_token_throughput(
         xaxis_type="date",
         xaxis_tickformat="%H:%M",
     )
-    _add_now_reference(styled, now_iso)
+    _apply_block_window_xaxis(styled, block, tz)
+    _add_now_reference(styled, _localize_iso(now_iso, tz))
     _log.info(
         "chart.live_throughput.built trace_names=%s buckets=%d",
         [t.name for t in styled.data],

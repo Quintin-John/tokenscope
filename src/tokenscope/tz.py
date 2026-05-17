@@ -17,7 +17,7 @@ lives outside `analytics.py` (which is pure).
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -134,6 +134,69 @@ def utc_iso_to_local_clock(iso: str, zone: str) -> str | None:
     except _ZONE_INVALID:
         return iso
     return local_dt.strftime("%H:%M")
+
+
+def utc_iso_to_local_naive_iso(iso: str, zone: str) -> str | None:
+    """Convert a UTC ISO timestamp to a *naive* local-clock ISO string
+    suitable for handing directly to Plotly's date-axis machinery
+    without re-interpretation.
+
+    The trailing ``Z`` (UTC marker) and any timezone offset are
+    stripped from the output. Plotly treats the resulting
+    ``YYYY-MM-DDTHH:MM:SS`` value as a naive datetime and renders
+    the axis tick at exactly that clock value — i.e. the user's
+    wall-clock time in their zone, no automatic re-conversion.
+
+    This is the one-line answer to "why does my chart axis say UTC
+    when the rest of the page says EDT": Plotly silently coerces
+    any ``...Z`` value into the browser's locale. Naive ISO sidesteps
+    the coercion entirely.
+
+    Returns ``None`` for empty / malformed input (defensive — a
+    corrupted block id shouldn't crash a Plotly figure build); the
+    raw input is returned if the zone itself can't be resolved.
+
+    Example:
+        utc_iso_to_local_naive_iso(
+            "2026-05-17T19:00:00.000Z", "America/New_York"
+        )
+            → "2026-05-17T15:00:00"   (3pm EDT, the wall-clock time)
+    """
+    if not iso:
+        return None
+    try:
+        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    try:
+        local_dt = utc_dt.astimezone(ZoneInfo(zone))
+    except _ZONE_INVALID:
+        return iso
+    return local_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def minutes_since_utc_iso(iso: str, now_utc: datetime | None = None) -> float | None:
+    """Minutes elapsed between a UTC ISO timestamp and ``now_utc``.
+
+    Used by the Live view's throughput-chart empty state to decide
+    whether enough wall-clock time has passed for the bucketing
+    chart to be informative — when the active block has just started,
+    a percent-stacked area of one bucket is a degenerate single
+    column and the chart layer renders a "block too new" caption
+    instead.
+
+    ``now_utc`` defaults to ``datetime.now(timezone.utc)`` so the
+    test surface can inject a frozen instant. Returns ``None`` for
+    empty / unparseable input.
+    """
+    if not iso:
+        return None
+    try:
+        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    reference = now_utc if now_utc is not None else datetime.now(timezone.utc)
+    return (reference - utc_dt).total_seconds() / 60.0
 
 
 def utc_iso_to_local_date(iso: str, zone: str) -> str | None:

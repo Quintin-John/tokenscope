@@ -230,6 +230,27 @@ main h1 + [data-testid="stCaptionContainer"] {
     margin-bottom: 0.1rem;
 }
 
+/* Token-throughput empty state — shown on the Live view when the
+ * active block has been running for less than
+ * `live.throughput_bucket_minutes × throughput_min_buckets`
+ * minutes. Same shell as the cache-range banner — soft slate
+ * background, no border on the right, comfortable padding — so the
+ * panel reads as informational, not as an error. */
+.tokenscope-live-throughput-empty {
+    background: #f8fafc;
+    border-left: 3px solid #94a3b8;
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    margin: 0.5rem 0 0.25rem 0;
+    color: #1e293b;
+    font-size: 0.92rem;
+    line-height: 1.55;
+}
+.tokenscope-live-throughput-empty strong {
+    color: #0f172a;
+    font-weight: 600;
+}
+
 /* Cache hit ratio callout — derived/composite stat, visually
  * distinct from the four raw-count token-kind cards. Slate-tinted
  * background + teal left border (same hue as `cache_read` in
