@@ -5,6 +5,14 @@
 # leaves the kebab menu intact.
 toolbarMode = "viewer"
 
+# Drop "Ask Google" / "Ask ChatGPT" affordances under exceptions. For a
+# local-only dashboard, the user already has the full source — they'd
+# rather ask the project maintainer than route their stacktrace into
+# someone else's product.
+# "stacktrace" keeps the trace visible for debugging but removes the AI
+# helper buttons that "full" (default) adds.
+showErrorDetails = "stacktrace"
+
 [browser]
 # Belt-and-braces against ever leaking telemetry from a local-only dashboard.
 gatherUsageStats = false
