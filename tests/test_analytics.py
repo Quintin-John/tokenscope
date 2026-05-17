@@ -29,12 +29,14 @@ from tokenscope.analytics import (
     find_block,
     find_daily_entry,
     find_session,
+    friendly_project_label,
     last_day_cost,
     model_breakdown,
     model_family,
     mtd_cost,
     rolling_cost_average,
     sessions_on_day,
+    short_model_label,
     today_cost,
     token_flow_sankey_data,
     top_n_by_cost,
@@ -1041,6 +1043,60 @@ def test_model_breakdown_keeps_versions_separate() -> None:
 
 def test_model_breakdown_empty_report() -> None:
     assert model_breakdown(_report([])) == []
+
+
+def test_friendly_project_label() -> None:
+    assert (
+        friendly_project_label(
+            "-Users-quintin-johnsmith-Documents-RiderProjects-WorldForge"
+        )
+        == "WorldForge — Documents/RiderProjects"
+    )
+
+
+def test_friendly_project_label_drops_users_prefix() -> None:
+    # Users/<user> is shared noise across every project — trim it.
+    result = friendly_project_label("-Users-jane-Documents-Hack")
+    assert result == "Hack — Documents"
+
+
+def test_friendly_project_label_volume_path() -> None:
+    """Path under /Volumes shouldn't get the Users/ trimming."""
+    result = friendly_project_label("-Volumes-SSK-Drive--ManageLiterature")
+    # leaf is "ManageLiterature", parent is "Volumes/SSK/Drive"
+    assert result.startswith("ManageLiterature — ")
+    assert "Volumes" in result
+
+
+def test_friendly_project_label_passthrough() -> None:
+    assert friendly_project_label("Unknown Project") == "Unknown Project"
+    assert friendly_project_label("") == ""
+
+
+def test_friendly_project_label_single_segment() -> None:
+    # Just `-projname` with no parent path
+    assert friendly_project_label("-Hack") == "Hack"
+
+
+def test_friendly_project_label_only_dashes() -> None:
+    # Pathological input: nothing but separators.
+    assert friendly_project_label("-") == "-"
+    assert friendly_project_label("---") == "---"
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+        ("claude-opus-4-7", "claude-opus-4-7"),  # no date suffix → unchanged
+        ("claude-opus-4-6", "claude-opus-4-6"),
+        ("claude-3-5-sonnet-20240620", "claude-3-5-sonnet"),
+        ("gpt-4o", "gpt-4o"),  # not claude-prefixed → passthrough
+        ("", ""),
+    ],
+)
+def test_short_model_label(name: str, expected: str) -> None:
+    assert short_model_label(name) == expected
 
 
 def test_model_breakdown_zero_tokens_safe() -> None:
