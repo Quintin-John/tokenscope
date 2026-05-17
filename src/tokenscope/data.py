@@ -34,7 +34,7 @@ from typing import Any
 
 import streamlit as st
 
-from tokenscope import ccusage
+from tokenscope import ccusage, config
 from tokenscope.models import (
     BlocksReport,
     DailyByProjectReport,
@@ -47,7 +47,7 @@ from tokenscope.models import (
 )
 from tokenscope.query import Query
 
-_TTL = 30
+_TTL = config.DATA_CACHE_TTL_SECONDS
 
 
 def _q_args(query: Query | None) -> list[str]:

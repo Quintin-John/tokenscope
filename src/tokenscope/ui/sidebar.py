@@ -23,7 +23,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from tokenscope import data
+from tokenscope import config, data
 from tokenscope.analytics import (
     available_models,
     friendly_project_label,
@@ -35,7 +35,7 @@ from tokenscope.query import Query
 from tokenscope.tz import detect_local_iana
 
 
-DEFAULT_RANGE_DAYS = 30
+DEFAULT_RANGE_DAYS = config.DEFAULT_RANGE_DAYS
 ALL_PROJECTS = "All projects"
 
 

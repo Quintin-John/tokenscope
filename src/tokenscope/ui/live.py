@@ -30,7 +30,7 @@ from datetime import datetime
 
 import streamlit as st
 
-from tokenscope import ccusage
+from tokenscope import ccusage, config
 from tokenscope.analytics import typical_burn_rate
 from tokenscope.ccusage import CcusageError
 from tokenscope.navigation import Navigation
@@ -39,7 +39,7 @@ from tokenscope.ui.charts import burn_gauge
 from tokenscope.ui.sidebar import SidebarState
 
 
-REFRESH_SECONDS = 30
+REFRESH_SECONDS = config.LIVE_REFRESH_SECONDS
 
 
 def render(state: SidebarState, nav: Navigation) -> None:

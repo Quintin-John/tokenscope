@@ -35,6 +35,8 @@ from tokenscope.ccusage import CcusageError
 from tokenscope.navigation import Navigation
 from tokenscope.plans import Plan
 from tokenscope.query import Query
+from tokenscope.ui._data import load_daily
+from tokenscope.ui._nav import handle_chart_drill
 from tokenscope.ui.charts import (
     rolling_average_line,
     stacked_area_cost_by_family,
@@ -46,17 +48,9 @@ from tokenscope.ui.sidebar import SidebarState
 def render(state: SidebarState, nav: Navigation, today: date | None = None) -> None:
     today = today or date.today()
 
-    try:
-        daily_report = data.daily(state.query)
-    except CcusageError as exc:
-        st.error(f"ccusage failed:\n\n```\n{exc}\n```")
+    daily_report = load_daily(state)
+    if daily_report is None:
         return
-
-    # Apply post-fetch model filter — only when user has narrowed below "all".
-    all_models = available_models(daily_report)
-    chosen = set(state.selected_models)
-    if chosen and chosen != set(all_models):
-        daily_report = filter_daily_by_models(daily_report, chosen)
 
     try:
         blocks_report = data.blocks(active=True, query=state.query)
@@ -67,6 +61,7 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
     # current query has explicit since/until.
     prior_total: float | None = None
     prior_q = prior_window_query(state.query)
+    chosen = set(state.selected_models)
     if prior_q is not None:
         try:
             prior_report = data.daily(prior_q)
@@ -103,7 +98,7 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             on_select="rerun",
             selection_mode=("points",),
         )
-        _handle_day_click(event, nav)
+        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
 
     st.subheader("7-day rolling average cost")
     fig = rolling_average_line(daily_report, window_days=7)
@@ -115,7 +110,7 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             on_select="rerun",
             selection_mode=("points",),
         )
-        _handle_day_click(event, nav)
+        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
 
     st.subheader("Daily token mix")
     fig = token_mix_bar(daily_report)
@@ -127,7 +122,7 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             on_select="rerun",
             selection_mode=("points",),
         )
-        _handle_day_click(event, nav)
+        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
 
 
 def _render_kpis(
@@ -272,22 +267,3 @@ def _window_days(query: Query) -> int | None:
     return (until - since).days + 1
 
 
-def _handle_day_click(event, nav: Navigation) -> None:
-    """If the user clicked a point in an overview chart, drill into that day."""
-    if not event:
-        return
-    selection = getattr(event, "selection", None)
-    if not selection:
-        return
-    points = getattr(selection, "points", None) or []
-    if not points:
-        return
-    raw = points[0].get("x")
-    if not raw:
-        return
-    day = str(raw)[:10]  # YYYY-MM-DD prefix
-    target = nav.to_day(day)
-    st.query_params.clear()
-    for k, v in target.to_params().items():
-        st.query_params[k] = v
-    st.rerun()
