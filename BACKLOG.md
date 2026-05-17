@@ -237,9 +237,109 @@ task — we don't.
 "do this to fix it" reading, and the mini-chart approach is honest:
 we surface the data, the user does the diagnosis.
 
+### Sidebar Models default — three independent slices
+
+The Models multiselect currently defaults to the full
+`available_models(discovery_daily)` list on **first render only**.
+After that, `st.session_state["sidebar-models"]` (or a shared URL's
+`models=` param) takes over, so a user landing on
+`?models=claude-opus-4-7` sees only that one model selected even
+if other models also have data in the window. The dashboard then
+shows numbers that look wrong but aren't, until the user notices
+the filter and adds the missing models manually. We hit this exact
+pain twice this audit cycle (the "$153 missing" investigation, the
+"models confusing" feedback).
+
+Slices 25–27 each take a different approach to the same pain
+point. Pick one, or layer them — they don't conflict.
+
+### Slice 25 — "Select all models" button
+
+**Scope.** Add an explicit "Select all" button next to the Models
+multiselect in the sidebar. Clicking it wipes
+`st.session_state["sidebar-models"]` and the URL's `models=` param,
+then reruns — the multiselect re-renders with its full default
+list (`available_models(discovery_daily)`). Mirrors what
+`_render_reset_button` does today for the broader reset.
+
+**Why.** Smallest possible slice that addresses the pain. No
+state-model changes. The user has a one-click escape hatch when
+they realise the filter is narrower than they wanted.
+
+**Effort.** Low. Single `st.button` + the same session-state
+cleanup pattern `_render_reset_button` already uses (~15 lines
+in `_render_models_multiselect`).
+**Risk.** Low. Pure UI addition; no impact on the existing
+selection persistence.
+
+**Doesn't help.** The shared-URL-with-stale-models case is not
+automatic — the user still has to *notice* the filter is narrow
+and click the button.
+
+### Slice 26 — Re-seed Models default on every render
+
+**Scope.** Change the default behaviour so the multiselect treats
+"every available model" as the implicit selection unless the user
+has *explicitly* de-selected at least one model in this session.
+Requires a parallel session_state flag
+(`sidebar-models-user-narrowed: bool`) so we can distinguish
+"user has touched this widget" from "this is the initial state".
+
+URL `models=` param only seeds the multiselect when
+`user-narrowed=True`. Otherwise (fresh open, shared link from a
+narrowing session, etc.) the multiselect defaults to all available.
+
+**Why.** Closes the shared-URL pain automatically — no user action
+required. Common-case usefulness wins over strict
+"explicit-intent-always-wins" semantics. The user who *did*
+narrow their selection still gets their narrowing preserved.
+
+**Effort.** Medium. New session_state flag; the URL-seed logic in
+`_seed_session_from_url` and the multiselect render in
+`_render_models_multiselect` both get a condition; tests need to
+cover four state combinations (narrowed × url-present).
+**Risk.** Medium. Two-axis state machine (selection list +
+narrowed flag) is subtle. Shared URLs partially lose information
+about what the originator had selected.
+
+### Slice 27 — Auto-merge newly-discovered models
+
+**Scope.** On every sidebar render, compare
+`available_models(discovery_daily)` against the current
+`selected_models`. Any model in the former but not the latter that
+the user has never explicitly de-selected gets auto-added. Models
+the user has explicitly removed (tracked in a separate
+`sidebar-models-removed: set[str]`) stay removed.
+
+**Why.** Handles the "new model version appeared mid-window" case
+cleanly — a fresh `claude-opus-4-8` showing up in your data
+automatically joins the selection without prompting you. Lower
+surprise than slice 26's broader re-seed because it only ever
+*adds*, never restores something you removed.
+
+**Effort.** Medium. New `sidebar-models-removed` session_state set;
+multiselect render diffs and merges; the Reset button needs to
+clear both pieces of state.
+**Risk.** Medium. Subtle interaction with date-range changes — a
+user who narrowed by removing legacy models might see them
+re-appear when scrolling into an older window. Mitigation: the
+removed-set is keyed on model name, not window; explicit removal
+sticks across windows.
+
+**Why this isn't a bug fix.** Today's behaviour is *technically*
+correct — explicit user intent (URL params, prior interaction)
+beats defaults. These slices are UX improvements that trade
+"explicit intent always wins" for "common-case usefulness wins".
+Opinion changes, not defect fixes; hence backlog, not patches.
+
 ## Suggested order
 
 `18 → 19 → 20 → 21 → 22 → 23 → 24` — each independent,
 value-per-effort drops at 21 and again at 22. Slices 23 (budget,
-forward-looking) and 24 (forensics, backward-looking) are their own
-category and can be picked up out of order. Stop at any rung.
+forward-looking) and 24 (forensics, backward-looking) are their
+own category and can be picked up out of order. Slices 25 / 26 /
+27 (sidebar Models default — three independent approaches to the
+same pain) can land any time; start with 25 for the lowest-risk
+first pass, escalate to 26 only if the shared-URL pain persists,
+treat 27 as orthogonal (new-model auto-include is its own
+concern). Stop at any rung.
