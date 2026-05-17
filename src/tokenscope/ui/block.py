@@ -14,11 +14,11 @@ from tokenscope.ui.sidebar import SidebarState
 
 
 def render(state: SidebarState, nav: Navigation) -> None:
+    breadcrumbs.render(nav)
     if not nav.block:
-        st.warning("No block selected.")
+        st.warning("No block selected. Use the breadcrumb above to go back.")
         return
 
-    breadcrumbs.render(nav)
     st.subheader("Block detail")
     st.caption(f"`{nav.block}`")
 

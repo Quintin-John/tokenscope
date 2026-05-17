@@ -35,13 +35,23 @@ def render(state: SidebarState, nav: Navigation) -> None:
     st.metric("Cache hit ratio (window)", f"{aggregate:.1%}")
 
     if not daily_report.daily:
-        st.caption("No usage in the selected window.")
+        st.info(
+            "No usage in the selected window. Try widening the **Date range** "
+            "in the sidebar, or clearing the **Project** filter if one is set."
+        )
         return
 
     st.subheader("Cache hit ratio over time")
     fig = cache_hit_ratio_line(daily_report)
     if fig is not None:
-        st.plotly_chart(fig, width="stretch")
+        event = st.plotly_chart(
+            fig,
+            width="stretch",
+            key="cache-hit-ratio-line",
+            on_select="rerun",
+            selection_mode=("points",),
+        )
+        _handle_day_click(event, nav)
 
     st.subheader("Estimated $ saved by cache reads")
     st.caption(
@@ -50,4 +60,32 @@ def render(state: SidebarState, nav: Navigation) -> None:
     )
     fig = dollars_saved_bar(daily_report)
     if fig is not None:
-        st.plotly_chart(fig, width="stretch")
+        event = st.plotly_chart(
+            fig,
+            width="stretch",
+            key="cache-dollars-saved-bar",
+            on_select="rerun",
+            selection_mode=("points",),
+        )
+        _handle_day_click(event, nav)
+
+
+def _handle_day_click(event, nav: Navigation) -> None:
+    """Drill into day detail when the user clicks a point on a cache chart."""
+    if not event:
+        return
+    selection = getattr(event, "selection", None)
+    if not selection:
+        return
+    points = getattr(selection, "points", None) or []
+    if not points:
+        return
+    raw = points[0].get("x")
+    if not raw:
+        return
+    day = str(raw)[:10]
+    target = nav.to_day(day)
+    st.query_params.clear()
+    for k, v in target.to_params().items():
+        st.query_params[k] = v
+    st.rerun()

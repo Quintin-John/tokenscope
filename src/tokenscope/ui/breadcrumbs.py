@@ -1,8 +1,15 @@
 """Breadcrumb trail rendered at the top of every drill-down view.
 
-Each crumb is a button — clicking it rewrites `st.query_params` to the
-crumb's target navigation, which triggers a rerun and lands the user on
-that view. The current crumb is shown as plain text.
+Two roles in one component:
+
+1. Show the user where they are (`Overview › 2026-05-16 › sess-abc`).
+2. Give them a one-click route home. The first crumb is rendered with an
+   "← " prefix so it reads as the back affordance, not as decoration.
+
+The previous implementation used `type="tertiary"` buttons that looked
+like plain text and hid themselves entirely when the trail had only one
+entry (which happens, e.g., on `?view=day` with no `day` param — the
+user landed with no exit). Both fixed here.
 """
 
 from __future__ import annotations
@@ -14,6 +21,14 @@ from tokenscope.navigation import Navigation
 
 def render(nav: Navigation) -> None:
     trail = nav.trail()
+
+    # Even with one crumb (e.g. `?view=day` and no `day`), we still need
+    # to give the user a way home. Synthesise the leading "← Overview"
+    # button so the exit is always visible.
+    if len(trail) == 1 and nav.view != "overview":
+        if st.button("← Overview", key="crumb-back-only", type="secondary"):
+            _navigate(Navigation(view="overview"))
+        return
     if len(trail) <= 1:
         return
 
@@ -21,10 +36,16 @@ def render(nav: Navigation) -> None:
     for idx, (label, target) in enumerate(trail):
         col = crumb_cols[idx * 2]
         is_last = idx == len(trail) - 1
+        is_first = idx == 0
+        # The leading crumb is the "Back" affordance — prefix with "←" so
+        # users read it as such, not as just a path component.
+        display = f"← {label}" if is_first else label
         if is_last:
-            col.markdown(f"**{label}**")
+            col.markdown(f"**{display}**")
         else:
-            if col.button(label, key=f"crumb-{idx}-{label}", type="tertiary"):
+            # Secondary (was tertiary): renders with a visible border so it
+            # actually looks clickable.
+            if col.button(display, key=f"crumb-{idx}-{label}", type="secondary"):
                 _navigate(target)
         if not is_last:
             crumb_cols[idx * 2 + 1].markdown("›")
