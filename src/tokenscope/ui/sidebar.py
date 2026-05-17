@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 
 import streamlit as st
 
@@ -35,6 +36,17 @@ from tokenscope.query import Query
 
 DEFAULT_RANGE_DAYS = 30
 ALL_PROJECTS = "All projects"
+
+
+def _home_slug() -> str:
+    """Slugify the user's home directory the way ccusage encodes paths.
+
+    `/Users/quintin-johnsmith` → `-Users-quintin-johnsmith`. We pass this
+    into `friendly_project_label` so it can substitute the prefix with
+    `~`. Done at render time (not import time) so test runs with custom
+    `HOME` environments behave correctly.
+    """
+    return "-" + str(Path.home()).lstrip("/").replace("/", "-")
 
 # Widget keys — used by the Reset button to clear state deterministically.
 _KEY_DATE_RANGE = "sidebar-date-range"
@@ -111,11 +123,14 @@ def render(today: date | None = None) -> SidebarState:
         project_kwargs: dict = {"key": _KEY_PROJECT}
         if _KEY_PROJECT not in st.session_state:
             project_kwargs["index"] = 0
+        home = _home_slug()
         project_choice = st.selectbox(
             "Project",
             options=[ALL_PROJECTS, *project_options],
             help="Filters via ccusage's -p flag. Choose 'All projects' to disable.",
-            format_func=lambda v: v if v == ALL_PROJECTS else friendly_project_label(v),
+            format_func=lambda v: (
+                v if v == ALL_PROJECTS else friendly_project_label(v, home_slug=home)
+            ),
             **project_kwargs,
         )
         project_value: str | None = (
