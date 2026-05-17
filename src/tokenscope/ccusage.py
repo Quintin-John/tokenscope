@@ -82,10 +82,6 @@ def get_ccusage_version() -> str:
     return result.stdout.strip()
 
 
-def _q(query: Query | None) -> list[str]:
-    return query.to_args() if query is not None else []
-
-
 _EMPTY_TOTALS = {
     "inputTokens": 0,
     "outputTokens": 0,
@@ -112,7 +108,7 @@ def daily(query: Query | None = None) -> DailyReport:
     """Uncached daily report. Used only by the live ccusage integration
     tests; production code goes through `tokenscope.data.daily` for the
     Streamlit cache layer."""
-    raw = _coerce_empty(_run_json(["daily", *_q(query)]), "daily")
+    raw = _coerce_empty(_run_json(["daily", *Query.argv(query)]), "daily")
     return DailyReport.model_validate(raw)
 
 
@@ -126,5 +122,5 @@ def blocks(active: bool = False, query: Query | None = None) -> BlocksReport:
     args: list[str] = []
     if active:
         args.append("--active")
-    args += _q(query)
+    args.extend(Query.argv(query))
     return BlocksReport.model_validate(_run_json(["blocks", *args]))
