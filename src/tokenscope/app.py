@@ -113,11 +113,39 @@ def render() -> None:
             st.error(f"ccusage bridge unavailable:\n\n```\n{exc}\n```")
 
 
+_PAGE_SELECTOR_KEY = "top-page-selector"
+
+
 def _render_page_selector(nav: Navigation) -> Navigation:
     """Render the top-level page selector. Always visible — on drill views
     (day/session/block) the selector has no current selection, so picking
     any option routes out cleanly.
+
+    Bug previously surfaced (diagnosed via the logging slice):
+
+        chart.drill chart=overview-token-mix raw='2026-04-24'
+        nav.route target=Navigation(view='day', ...)
+        app.render view=day        ← drill succeeded
+        app.render view=overview   ← but instantly reverted by THIS function
+
+    Cause: `st.radio(..., key=K)` reads `st.session_state[K]` AHEAD of
+    the `index=` argument. Once the user had interacted with the page
+    selector in any prior render, `st.session_state["top-page-selector"]`
+    held a top-level label (e.g. "Overview"). On the next render for a
+    drill view, the radio resurrected that label, the if-clause below
+    saw `chosen_view != nav.view`, and routed the user back out of the
+    drill they just navigated into.
+
+    Fix: before rendering, drop the persisted selection whenever the
+    current nav is NOT a top-level view. The radio then renders with
+    `index=None`, returns `None`, and we no-op out as designed. The
+    user can still explicitly click a top-level option to leave the
+    drill — that re-populates session_state and routes via the normal
+    `chosen_view != nav.view` path.
     """
+    if nav.view not in TOP_LEVEL_VIEWS:
+        st.session_state.pop(_PAGE_SELECTOR_KEY, None)
+
     label_to_view = {v: k for k, v in _VIEW_LABELS.items()}
     options = [_VIEW_LABELS[v] for v in TOP_LEVEL_VIEWS]
     index = options.index(_VIEW_LABELS[nav.view]) if nav.view in TOP_LEVEL_VIEWS else None
@@ -127,7 +155,7 @@ def _render_page_selector(nav: Navigation) -> Navigation:
         index=index,
         horizontal=True,
         label_visibility="collapsed",
-        key="top-page-selector",
+        key=_PAGE_SELECTOR_KEY,
     )
     if chosen_label is None:
         # User hasn't picked anything yet (drill view, fresh render). No-op.

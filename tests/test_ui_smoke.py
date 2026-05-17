@@ -119,6 +119,46 @@ def test_day_with_no_day_param_shows_back_affordance(
     assert back_buttons
 
 
+def test_drill_view_does_not_revert_when_page_selector_has_stale_state(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Regression: the page selector's `st.session_state["top-page-selector"]`
+    persists across renders. After the user interacts with the selector
+    (e.g. clicks "Overview" to leave a drill), session_state holds
+    "Overview". On the NEXT drill (e.g. clicking a chart day), Streamlit
+    resurrects "Overview" ahead of the `index=None` argument and the
+    page-selector handler reroutes the user back out of the drill.
+
+    Diagnosed via the logging slice:
+        chart.drill chart=overview-token-mix raw='2026-04-24'
+        nav.route target=Navigation(view='day', ...)
+        app.render view=day        ← drill succeeded
+        app.render view=overview   ← reverted by stale page-selector
+
+    Fix: pop `top-page-selector` from session_state before rendering
+    the radio whenever the current view is not a top-level view.
+    """
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("day", day="2026-04-05")
+    # Simulate the user having previously picked "Overview" via the
+    # page-selector — exactly the state that triggered the bug.
+    at.session_state["top-page-selector"] = "Overview"
+    at.run()
+    _assert_clean(at)
+    # The user-facing proof of fix: URL stays on the drill view. Pre-fix
+    # the radio would resurrect "Overview", `chosen_view != nav.view`,
+    # query_params get cleared and rewritten to `view=overview`, and
+    # st.rerun fires. The fix pops the stale session_state so the radio
+    # sees index=None and returns None → no reroute.
+    #
+    # AppTest exposes query_params with multidict semantics; values come
+    # back as lists. Compare the first entry.
+    view = at.query_params["view"]
+    day = at.query_params["day"]
+    assert (view[0] if isinstance(view, list) else view) == "day"
+    assert (day[0] if isinstance(day, list) else day) == "2026-04-05"
+
+
 def test_day_renders_session_and_block_rows_via_shared_helper(
     mock_ccusage, mock_ccusage_version
 ) -> None:
