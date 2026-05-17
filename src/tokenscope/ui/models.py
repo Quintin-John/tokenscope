@@ -22,14 +22,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from tokenscope import data
-from tokenscope.analytics import (
-    available_models,
-    filter_daily_by_models,
-    model_breakdown,
-)
-from tokenscope.ccusage import CcusageError
+from tokenscope.analytics import model_breakdown
 from tokenscope.navigation import Navigation
+from tokenscope.ui._data import load_daily
+from tokenscope.ui._nav import route_to
 from tokenscope.ui.charts import (
     single_family_token_bar,
     token_flow_sankey,
@@ -41,16 +37,9 @@ def render(state: SidebarState, nav: Navigation) -> None:
     if (banner := state.plan.banner_text()) is not None:
         st.info(banner)
 
-    try:
-        daily_report = data.daily(state.query)
-    except CcusageError as exc:
-        st.error(f"ccusage failed:\n\n```\n{exc}\n```")
+    daily_report = load_daily(state)
+    if daily_report is None:
         return
-
-    all_models = available_models(daily_report)
-    chosen = set(state.selected_models)
-    if chosen and chosen != set(all_models):
-        daily_report = filter_daily_by_models(daily_report, chosen)
 
     if not daily_report.daily:
         st.info(
@@ -198,15 +187,13 @@ def _render_composition(daily_report, rows: list[dict]) -> None:
             continue
         col = drill_cols[idx % len(drill_cols)]
         if col.button(f"→ {fam}", key=f"drill-family-{fam}"):
-            st.query_params["view"] = "overview"
-            st.query_params["models"] = ",".join(fam_models)
-            # Wipe deeper drill state if present.
-            for k in ("day", "session", "block"):
-                if k in st.query_params:
-                    del st.query_params[k]
-            # session_state must agree with the URL after we've set it.
+            # Seed the sidebar's models multiselect before the rerun so
+            # the widget initialises with the family pre-selected.
             st.session_state["sidebar-models"] = fam_models
-            st.rerun()
+            route_to(
+                Navigation(view="overview"),
+                extra_params={"models": ",".join(fam_models)},
+            )
 
 
 def _family_donut_rows(rows: list[dict]) -> list[dict]:

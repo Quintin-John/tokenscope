@@ -27,14 +27,13 @@ from pathlib import Path
 from statistics import median
 from typing import TypedDict
 
-LITELLM_PRICING_URL = (
-    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
-    "model_prices_and_context_window.json"
-)
-_CACHE_DIR = Path.home() / ".cache" / "tokenscope"
+from tokenscope import config
+
+LITELLM_PRICING_URL = config.PRICING_LITELLM_URL
+_CACHE_DIR = config.PRICING_CACHE_DIR
 _CACHE_FILE = _CACHE_DIR / "litellm_pricing.json"
-_CACHE_TTL_SECONDS = 7 * 24 * 3600
-_FETCH_TIMEOUT_SECONDS = 10
+_CACHE_TTL_SECONDS = config.PRICING_CACHE_TTL_SECONDS
+_FETCH_TIMEOUT_SECONDS = config.PRICING_FETCH_TIMEOUT_SECONDS
 
 
 class FamilyRates(TypedDict):

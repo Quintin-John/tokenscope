@@ -13,6 +13,7 @@ from tokenscope.analytics import (
 from tokenscope.ccusage import CcusageError
 from tokenscope.navigation import Navigation
 from tokenscope.ui import breadcrumbs
+from tokenscope.ui._nav import route_to
 from tokenscope.ui.charts import donut_cost_by_model
 from tokenscope.ui.sidebar import SidebarState
 
@@ -89,7 +90,7 @@ def _session_row(session, nav: Navigation) -> None:
     if cols[3].button(
         "Open session", key=f"open-session-{session.session_id}", type="secondary"
     ):
-        _go(nav.to_session(session.session_id))
+        route_to(nav.to_session(session.session_id))
 
 
 def _block_row(block, nav: Navigation) -> None:
@@ -100,11 +101,6 @@ def _block_row(block, nav: Navigation) -> None:
     if cols[3].button(
         "Open block", key=f"open-block-{block.id}", type="secondary"
     ):
-        _go(nav.to_block(block.id))
+        route_to(nav.to_block(block.id))
 
 
-def _go(target: Navigation) -> None:
-    st.query_params.clear()
-    for k, v in target.to_params().items():
-        st.query_params[k] = v
-    st.rerun()

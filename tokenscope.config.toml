@@ -1,0 +1,41 @@
+# tokenscope — operator-tunable configuration.
+#
+# Every key has a sensible default in `src/tokenscope/config.py`. Override
+# only what you want to change. Comments below describe each setting.
+#
+# Reload by restarting the Streamlit process. There's no hot-reload of
+# config values today — they're read once at import time.
+
+[dashboard]
+# Default date range when the user first opens the dashboard. The
+# sidebar's "Date range" picker primes to (today - N days, today).
+default_range_days = 30
+
+# How long `data.daily` / `data.session` / `data.blocks` results stay
+# in Streamlit's cache before we re-shell ccusage. Lower for faster
+# data updates, higher to spare the ccusage subprocess.
+data_cache_ttl_seconds = 30
+
+[live]
+# Auto-refresh cadence for the Live billing-block view. The
+# `@st.fragment(run_every=...)` decorator uses this directly.
+refresh_seconds = 30
+
+[pricing]
+# Source of truth for per-model rates (input / output / cache_create /
+# cache_read). LiteLLM mirrors Anthropic's public pricing and is what
+# ccusage itself uses; we fetch from the same URL so the dashboard's
+# "Cost composition" panel agrees with ccusage's reported totals.
+litellm_url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+
+# Where to cache the downloaded pricing JSON. Path is expanded via
+# `pathlib.Path.expanduser` so `~` works.
+cache_dir = "~/.cache/tokenscope"
+
+# How long the on-disk pricing cache is considered fresh before we
+# re-fetch from LiteLLM. Rates rarely change so a week is plenty.
+cache_ttl_days = 7
+
+# Network timeout for the LiteLLM fetch. Failures fall back to the
+# stale cache if any.
+fetch_timeout_seconds = 10

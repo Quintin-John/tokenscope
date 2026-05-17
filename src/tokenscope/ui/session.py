@@ -17,6 +17,7 @@ from tokenscope.analytics import blocks_for_session, find_session
 from tokenscope.ccusage import CcusageError
 from tokenscope.navigation import Navigation
 from tokenscope.ui import breadcrumbs
+from tokenscope.ui._nav import handle_chart_drill
 from tokenscope.ui.charts import (
     donut_cost_by_model,
     session_blocks_timeline,
@@ -105,25 +106,4 @@ def _render_blocks_timeline(state: SidebarState, nav: Navigation, entry) -> None
         on_select="rerun",
         selection_mode=("points",),
     )
-    _handle_block_click(event, nav)
-
-
-def _handle_block_click(event, nav: Navigation) -> None:
-    """Click on a timeline bar → drill into that block."""
-    if not event:
-        return
-    selection = getattr(event, "selection", None)
-    if not selection:
-        return
-    points = getattr(selection, "points", None) or []
-    if not points:
-        return
-    # px.timeline exposes the y-axis category (block id) on the clicked point.
-    raw = points[0].get("y") or points[0].get("label")
-    if not raw:
-        return
-    target = nav.to_block(str(raw))
-    st.query_params.clear()
-    for k, v in target.to_params().items():
-        st.query_params[k] = v
-    st.rerun()
+    handle_chart_drill(event, nav.to_block)

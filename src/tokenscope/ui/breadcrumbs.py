@@ -17,6 +17,7 @@ from __future__ import annotations
 import streamlit as st
 
 from tokenscope.navigation import Navigation
+from tokenscope.ui._nav import route_to
 
 
 def render(nav: Navigation) -> None:
@@ -27,7 +28,7 @@ def render(nav: Navigation) -> None:
     # button so the exit is always visible.
     if len(trail) == 1 and nav.view != "overview":
         if st.button("← Overview", key="crumb-back-only", type="secondary"):
-            _navigate(Navigation(view="overview"))
+            route_to(Navigation(view="overview"))
         return
     if len(trail) <= 1:
         return
@@ -46,18 +47,8 @@ def render(nav: Navigation) -> None:
             # Secondary (was tertiary): renders with a visible border so it
             # actually looks clickable.
             if col.button(display, key=f"crumb-{idx}-{label}", type="secondary"):
-                _navigate(target)
+                route_to(target)
         if not is_last:
             crumb_cols[idx * 2 + 1].markdown("›")
 
 
-def _navigate(target: Navigation) -> None:
-    """Replace st.query_params with the target's params and rerun.
-
-    Clearing first prevents stale fields (e.g. block= when navigating up
-    to session) from sticking around.
-    """
-    st.query_params.clear()
-    for k, v in target.to_params().items():
-        st.query_params[k] = v
-    st.rerun()
