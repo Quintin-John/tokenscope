@@ -162,15 +162,27 @@ def _build_model_rates(pricing_data: dict) -> dict[str, FamilyRates]:
 
 
 def _ensure_loaded() -> bool:
+    """Populate the three module caches from `_fetch_pricing_json()`.
+
+    Cache assignment is atomic: every derived dict is built locally
+    before any of the three globals is mutated. If `_build_family_rates`
+    or `_build_model_rates` raises on malformed pricing data, the
+    exception propagates and the module is left in its pre-call state
+    (all three caches still None). A retry hits `_fetch_pricing_json`
+    fresh — there is no half-loaded state that would let the post-load
+    `assert _MODEL_RATES_CACHE is not None` in `rates_for_model` fire.
+    """
     global _PRICING_DATA_CACHE, _FAMILY_RATES_CACHE, _MODEL_RATES_CACHE
     if _PRICING_DATA_CACHE is not None:
         return True
     data = _fetch_pricing_json()
     if data is None:
         return False
+    family_rates = _build_family_rates(data)
+    model_rates = _build_model_rates(data)
     _PRICING_DATA_CACHE = data
-    _FAMILY_RATES_CACHE = _build_family_rates(data)
-    _MODEL_RATES_CACHE = _build_model_rates(data)
+    _FAMILY_RATES_CACHE = family_rates
+    _MODEL_RATES_CACHE = model_rates
     return True
 
 
