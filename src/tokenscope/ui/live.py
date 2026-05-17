@@ -4,6 +4,10 @@ Phase 6 deliverable per PLAN.md §6:
     "Auto-refresh `--active` block every 30s (`st.fragment(run_every="30s")`),
      burn gauge + projection."
 
+Slice 12 additions: "Last refreshed at HH:MM:SS" caption (you can tell
+the panel is alive) and a "typical burn" threshold line on the gauge
+computed from the median cost-per-hour of recent completed blocks.
+
 Implementation notes:
 - The refreshing panel is a `@st.fragment(run_every=30)`. Only the panel
   re-runs on the timer — the page selector, sidebar, and breadcrumbs are
@@ -15,13 +19,19 @@ Implementation notes:
 - The sidebar's date/project/model filters don't apply to "right now";
   the only sidebar control we honour is `offline`, so an offline-pinned
   session keeps using cached pricing in the live view too.
+- We fetch ALL blocks (not just `--active`) and filter for the active
+  block in Python. Single ccusage call serves both the headline KPIs
+  and the typical-burn baseline.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import streamlit as st
 
 from tokenscope import ccusage
+from tokenscope.analytics import typical_burn_rate
 from tokenscope.ccusage import CcusageError
 from tokenscope.navigation import Navigation
 from tokenscope.query import Query
@@ -33,9 +43,6 @@ REFRESH_SECONDS = 30
 
 
 def render(state: SidebarState, nav: Navigation) -> None:
-    if (banner := state.plan.banner_text()) is not None:
-        st.info(banner)
-
     st.subheader("Active billing block (live)")
     st.caption(
         f"Auto-refreshes every {REFRESH_SECONDS}s. Ignores the date / project / "
@@ -50,13 +57,22 @@ def render(state: SidebarState, nav: Navigation) -> None:
 def _live_panel(offline: bool) -> None:
     """The actual live panel. Args must be hashable so Streamlit can key the
     fragment; a single bool is fine."""
+    refreshed_at = datetime.now()
     try:
-        report = ccusage.blocks(active=True, query=Query(offline=offline))
+        # Fetch all blocks so we can both pick the active one and compute
+        # the typical-burn baseline from completed blocks in a single call.
+        report = ccusage.blocks(active=False, query=Query(offline=offline))
     except CcusageError as exc:
         st.error(f"ccusage failed:\n\n```\n{exc}\n```")
         return
 
     active = next((b for b in report.blocks if b.is_active), None)
+    typical = typical_burn_rate(report)
+    st.caption(
+        f"Last refreshed at **{refreshed_at.strftime('%H:%M:%S')}** "
+        f"({REFRESH_SECONDS}s cadence)."
+    )
+
     if active is None:
         st.info(
             "No active billing block right now. Start a Claude Code session "
@@ -67,7 +83,20 @@ def _live_panel(offline: bool) -> None:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Cost so far", f"${active.cost_usd:,.2f}")
     if active.burn_rate is not None:
-        c2.metric("$/hr", f"${active.burn_rate.cost_per_hour:,.2f}")
+        burn_kwargs: dict = {}
+        if typical is not None:
+            change = (active.burn_rate.cost_per_hour - typical) / typical
+            burn_kwargs["delta"] = f"{change:+.0%} vs typical"
+        c2.metric(
+            "$/hr",
+            f"${active.burn_rate.cost_per_hour:,.2f}",
+            help=(
+                f"Median burn over recent completed blocks: ${typical:,.2f}/hr."
+                if typical is not None
+                else "Need 3+ completed blocks to compute a typical baseline."
+            ),
+            **burn_kwargs,
+        )
         c3.metric(
             "Tokens / min",
             f"{active.burn_rate.tokens_per_minute:,.0f}",
@@ -92,7 +121,7 @@ def _live_panel(offline: bool) -> None:
         f"Models: {', '.join(active.models) or '—'}."
     )
 
-    gauge = burn_gauge(active)
+    gauge = burn_gauge(active, typical=typical)
     if gauge is not None:
         st.plotly_chart(gauge, width="stretch")
 

@@ -24,7 +24,6 @@ from tokenscope.models import (
 from tokenscope.ui.charts import (
     burn_gauge,
     cache_hit_ratio_line,
-    dollars_saved_bar,
     donut_cost_by_model,
     rolling_average_line,
     session_token_mix,
@@ -289,26 +288,6 @@ def test_cache_hit_ratio_line_empty_returns_none() -> None:
     assert cache_hit_ratio_line(_report([])) is None
 
 
-# ---------- dollars_saved_bar ----------
-
-
-def test_dollars_saved_bar_returns_figure_with_family_traces() -> None:
-    report = _report(
-        [
-            _entry("2026-05-15", cost=1.0, model="claude-opus-4-7"),
-            _entry("2026-05-16", cost=1.0, model="claude-haiku-4-5-20251001"),
-        ]
-    )
-    fig = dollars_saved_bar(report)
-    assert isinstance(fig, go.Figure)
-    families = {t.name for t in fig.data}
-    assert families == {"opus", "haiku"}
-
-
-def test_dollars_saved_bar_empty_returns_none() -> None:
-    assert dollars_saved_bar(_report([])) is None
-
-
 # ---------- token_flow_sankey ----------
 
 
@@ -334,11 +313,16 @@ def test_single_family_token_bar_returns_horizontal_log_bar() -> None:
     report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
     fig = single_family_token_bar(report)
     assert isinstance(fig, go.Figure)
-    assert len(fig.data) == 1
-    # Horizontal: y is the categories.
-    assert list(fig.data[0].y) == ["cache_read", "cache_create", "output", "input"]
+    # Coloured by kind → one trace per category (4 total) so each bar gets
+    # a distinct colour from Plotly's qualitative palette.
+    assert len(fig.data) == 4
+    trace_names = {t.name for t in fig.data}
+    assert trace_names == {"cache_read", "cache_create", "output", "input"}
     # Log x so cache_read doesn't drown input.
     assert fig.layout.xaxis.type == "log"
+    # Distinct colours: every trace has a different marker color.
+    colors = {t.marker.color for t in fig.data if t.marker.color is not None}
+    assert len(colors) == 4
 
 
 def test_single_family_token_bar_empty_returns_none() -> None:

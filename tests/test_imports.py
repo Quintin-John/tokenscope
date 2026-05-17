@@ -18,7 +18,6 @@ def test_submodules_import() -> None:
         models,
         navigation,
         plans,
-        pricing,
         query,
     )
     from tokenscope.ui import (  # noqa: F401
@@ -117,7 +116,6 @@ def test_analytics_public_surface() -> None:
     for name in (
         "rolling_cost_average",
         "cache_hit_ratio",
-        "dollars_saved",
         "top_n_by_cost",
         "model_family",
         "mtd_cost",
@@ -135,13 +133,15 @@ def test_analytics_public_surface() -> None:
         "filter_daily_by_models",
         "available_models",
         "daily_cache_hit_ratio",
-        "daily_dollars_saved",
         "token_flow_sankey_data",
         "window_cost",
         "last_day_cost",
         "model_breakdown",
         "friendly_project_label",
         "short_model_label",
+        "prior_window_query",
+        "window_effective_per_mtok",
+        "typical_burn_rate",
     ):
         assert callable(getattr(analytics, name)), name
 

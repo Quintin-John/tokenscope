@@ -12,7 +12,8 @@ figures.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
+from statistics import median
 from typing import Iterable, Protocol
 
 from tokenscope.models import (
@@ -23,15 +24,12 @@ from tokenscope.models import (
     SessionEntry,
     SessionReport,
 )
+from tokenscope.query import Query
 
 
 class _HasCacheTokens(Protocol):
     input_tokens: int
     cache_creation_tokens: int
-    cache_read_tokens: int
-
-
-class _HasCacheReadOnly(Protocol):
     cache_read_tokens: int
 
 
@@ -77,23 +75,6 @@ def cache_hit_ratio(entry: _HasCacheTokens) -> float:
     if denom == 0:
         return 0.0
     return entry.cache_read_tokens / denom
-
-
-def dollars_saved(entry: _HasCacheReadOnly, input_price_per_mtok: float) -> float:
-    """Dollars cache-reads saved versus paying the uncached input rate.
-
-    `input_price_per_mtok` is the model's plain-input price per *million*
-    tokens (Anthropic's standard pricing unit). If those `cache_read_tokens`
-    had been re-sent as fresh input, you'd have paid this. Their actual
-    cache-read cost is already inside `total_cost`; this estimates the
-    *delta*, not the absolute cost.
-
-    Returns 0.0 for a non-positive price (treat as "saving is undefined")
-    rather than producing a negative or misleading number.
-    """
-    if input_price_per_mtok <= 0:
-        return 0.0
-    return entry.cache_read_tokens / 1_000_000 * input_price_per_mtok
 
 
 def top_n_by_cost(entries: Iterable, n: int) -> list:
@@ -358,33 +339,6 @@ def daily_cache_hit_ratio(daily_report: DailyReport) -> list[tuple[str, float]]:
     return [(e.date, cache_hit_ratio(e)) for e in entries]
 
 
-def daily_dollars_saved(daily_report: DailyReport) -> list[dict]:
-    """Per-day, per-model rows of `dollars_saved` for the cache view.
-
-    Each row is `{date, model, family, dollars_saved}`. Cost is computed
-    from `tokenscope.pricing.input_price_per_mtok(model)` — i.e. the
-    cache-read tokens valued at uncached input rates. Empty report →
-    empty list.
-    """
-    # Local import to avoid an analytics → pricing → analytics cycle at import time.
-    from tokenscope.pricing import input_price_per_mtok
-
-    rows: list[dict] = []
-    for entry in daily_report.daily:
-        for breakdown in entry.model_breakdowns:
-            price = input_price_per_mtok(breakdown.model_name)
-            saved = breakdown.cache_read_tokens / 1_000_000 * price
-            rows.append(
-                {
-                    "date": entry.date,
-                    "model": breakdown.model_name,
-                    "family": model_family(breakdown.model_name),
-                    "dollars_saved": saved,
-                }
-            )
-    return rows
-
-
 def model_breakdown(daily_report: DailyReport) -> list[dict]:
     """Window-aggregate per-model rows for the Models breakdown table.
 
@@ -566,3 +520,76 @@ def model_family(model_name: str) -> str:
         if part and not part[0].isdigit():
             return part
     return model_name
+
+
+def prior_window_query(query: Query) -> Query | None:
+    """Build the prior-equivalent-length window for a comparison fetch.
+
+    If the current window is `2026-04-17 → 2026-05-16` (30 days), the
+    prior window is `2026-03-18 → 2026-04-16` (also 30 days, ending the
+    day before the current window starts).
+
+    Returns None when the query has no explicit `since`/`until` — without
+    bounds we don't have a "prior" to compare against. Date strings are
+    parsed/emitted in ccusage's `YYYYMMDD` format so the returned Query
+    is a drop-in for `data.daily(...)`.
+
+    Project / offline flags are carried over unchanged so the comparison
+    fetches the same slice of data, just shifted in time.
+    """
+    if not query.since or not query.until:
+        return None
+    try:
+        since = datetime.strptime(query.since, "%Y%m%d").date()
+        until = datetime.strptime(query.until, "%Y%m%d").date()
+    except ValueError:
+        return None
+    length = (until - since).days
+    if length < 0:
+        return None
+    prior_until = since - timedelta(days=1)
+    prior_since = prior_until - timedelta(days=length)
+    return Query(
+        since=prior_since.strftime("%Y%m%d"),
+        until=prior_until.strftime("%Y%m%d"),
+        project=query.project,
+        offline=query.offline,
+    )
+
+
+def window_effective_per_mtok(daily_report: DailyReport) -> float | None:
+    """Blended `$ / 1M tokens` for the window — what each million tokens
+    actually cost end-to-end, weighting input / output / cache_create /
+    cache_read together.
+
+    Useful as a "did caching help?" indicator: if your effective rate is
+    much lower than the published input rate, caching is doing its job.
+
+    Returns None when the window has no tokens (can't divide).
+    """
+    total_cost = sum(e.total_cost for e in daily_report.daily)
+    total_tokens = sum(
+        e.input_tokens + e.output_tokens + e.cache_creation_tokens + e.cache_read_tokens
+        for e in daily_report.daily
+    )
+    if total_tokens == 0:
+        return None
+    return total_cost / total_tokens * 1_000_000
+
+
+def typical_burn_rate(blocks_report: BlocksReport) -> float | None:
+    """Median `costPerHour` of completed (non-gap, non-active) blocks.
+
+    Used as a baseline on the Live view's burn gauge — "is the current
+    burn typical for me or am I on a hot streak?". Returns None when
+    fewer than 3 completed blocks with a burn rate exist (median of a
+    tiny sample is misleading).
+    """
+    rates = [
+        b.burn_rate.cost_per_hour
+        for b in blocks_report.blocks
+        if not b.is_gap and not b.is_active and b.burn_rate is not None
+    ]
+    if len(rates) < 3:
+        return None
+    return float(median(rates))
