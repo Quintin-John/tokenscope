@@ -91,10 +91,22 @@ mode (probably an optional `comparison=` kwarg).
 
 ### Slice 23 — Budget tracking + spend alerts
 
-**Scope.** Optional budgets in `tokenscope.config.toml` — any of:
-- `daily_budget_usd` (e.g. $50/day)
-- `monthly_budget_usd` (e.g. $1000/month)
-- `window_budget_usd` (the user's currently-selected date range)
+**Scope.** Budgets entered through the sidebar UI, not buried in a
+TOML. A new **"Budget"** section in the sidebar with three optional
+number inputs:
+- Daily budget (USD)
+- Monthly budget (USD)
+- Window budget (USD — applies to the currently-selected date range)
+
+Empty fields = no budget for that period (the most common case).
+Values persist to a small local file (`~/.config/tokenscope/budgets.toml`),
+the same way slice 18's saved-views feature would. In Docker, this
+path needs to be a volume mount (same pattern as `~/.claude` — add
+a line to the README's Docker run command).
+
+`tokenscope.config.toml` may still set *defaults* (useful when a team
+deploys the dashboard with a house budget), but the UI is the
+primary path and always overrides.
 
 When *any* budget is set, the Overview gains a **"Budget remaining"**
 KPI card showing the positive — `$642.85 left of $1,000 (May)` — with
@@ -117,7 +129,12 @@ alert is what happens when remaining → 0. Enterprise / pay-per-API
 users on a fixed monthly cap especially want this.
 
 **Effort.** Medium. Needs:
-- Config keys (any combination of daily / monthly / window budget)
+- Sidebar number-input section (3 fields, all optional)
+- Persistence layer (`tokenscope.budgets.load() / save(budgets)`)
+  writing to `~/.config/tokenscope/budgets.toml`. Mirror the existing
+  `~/.cache/tokenscope/` pattern from `pricing.py`.
+- Optional config-file defaults (`tokenscope.config.toml [budget]`)
+  honoured when no UI-set value exists
 - `analytics.budget_status(daily_report, today, budgets)` returning
   `{remaining, consumed, percent_used, tier: ok|warn|over}` for each
   active budget
@@ -125,6 +142,9 @@ users on a fixed monthly cap especially want this.
 - Banner component (`ui/_alerts.py`) for warn/over tiers
 - Banner + KPI wired into Overview; banner repeated on Live
 - Optional Live-view "ETA to limit" using the existing burn rate
+- README update: add `~/.config/tokenscope:/root/.config/tokenscope`
+  to the Docker run example so budgets persist across container
+  restarts
 
 **Risk.** Low-medium. Three tiers + opt-in via config (default no
 budget = no card and no banner) keeps it out of the way until the
@@ -147,8 +167,66 @@ user opts in.
   where the per-token spend actually varies; on flat-rate plans
   the user already knows what they'll pay.
 
+### Slice 24 — Expensive-session forensics
+
+**Scope.** A "Most expensive sessions this window" expander on the
+Overview. Top-N (configurable, default 5) sessions ranked by cost,
+each tagged with a one-line **reason** explaining what drove the spend:
+
+- *Output-heavy* — when `output_tokens / total_tokens > ~25%`.
+  Output tokens cost ~5× input rate, so an output-dominated session
+  costs disproportionately for its size.
+- *Cache-write heavy* — when `cache_create_tokens / total_tokens > ~20%`.
+  Lots of fresh context prep without amortising it over many reads.
+- *Low cache hit* — when the session's
+  `cache_read / (input + cache_create + cache_read) < 50%`.
+  Indicates context wasn't being reused.
+- *Heavy model* — when only opus/sonnet was used for a high-token
+  session that haiku could plausibly have handled. Soft signal.
+- *Large volume* — fall-through when none of the above dominates;
+  it just used a lot of tokens.
+
+Each row in the table includes the session id (friendly-labelled),
+cost, total tokens, the reason tag, and an "Open" button that drills
+into the existing Session-detail view.
+
+**Why.** Headline cost numbers tell you *what* — this view tells you
+*why*. A user looking at "$300 this week" can see which three
+sessions accounted for it, and whether the driver was a model choice
+(switchable), a cache miss (fixable), or just sustained heavy use
+(expected).
+
+**Effort.** Medium. Needs:
+- `analytics.session_cost_drivers(session)` returning a list of
+  matching tag strings (a session can be both output-heavy AND
+  low-cache, in which case both tags show).
+- `analytics.expensive_sessions(session_report, n=5)` — pure-function
+  ranker that returns annotated rows.
+- UI table on Overview (Enterprise-only — the same gating logic the
+  Cost-composition panel uses).
+- Tuning the thresholds. They want to live in
+  `tokenscope.config.toml` so the operator can dial them per-team:
+  ```toml
+  [forensics]
+  output_heavy_threshold = 0.25
+  cache_write_heavy_threshold = 0.20
+  low_cache_threshold = 0.50
+  top_n = 5
+  ```
+
+**Risk.** Medium. Heuristics can mislead — a user with one
+genuinely-justified output-heavy session might roll their eyes at
+the "Output-heavy" tag. Mitigations:
+- Tags are *signals*, not verdicts. Show all that match, not just one.
+- Add a caption disclosing the thresholds and that these are
+  heuristics ("based on token mix; your context may make some of
+  these expected").
+- Skip the "Heavy model" tag in v1 — too judgemental to ship without
+  per-task context.
+
 ## Suggested order
 
-`18 → 19 → 20 → 21 → 22 → 23` — each independent, value-per-effort
-drops at 21 and again at 22. Slice 23 is its own category (alerts,
-not metrics) and can be picked up out of order. Stop at any rung.
+`18 → 19 → 20 → 21 → 22 → 23 → 24` — each independent,
+value-per-effort drops at 21 and again at 22. Slices 23 (budget,
+forward-looking) and 24 (forensics, backward-looking) are their own
+category and can be picked up out of order. Stop at any rung.
