@@ -19,6 +19,7 @@ from tokenscope.analytics import (
     available_models,
     blocks_on_day,
     cache_hit_ratio,
+    cost_by_kind,
     cost_share_by_model,
     daily_cache_hit_ratio,
     daily_cost_by_model,
@@ -1350,3 +1351,85 @@ def test_typical_burn_rate_no_burn_rate_field() -> None:
     )
     # Only 2 valid samples → too few.
     assert typical_burn_rate(rep) is None
+
+
+# ---------- cost_by_kind ----------
+
+
+@pytest.fixture
+def _stub_rates(monkeypatch):
+    """Stub LiteLLM with a fixed rate table so test assertions don't drift
+    if Anthropic updates rates upstream."""
+    fake = {
+        "claude-opus-4-7": {
+            "input": 5.0, "output": 25.0,
+            "cache_create": 6.25, "cache_read": 0.50,
+        },
+    }
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model",
+        lambda name: fake.get(name),
+    )
+
+
+def test_cost_by_kind_returns_four_kinds_with_share_summing_to_one(_stub_rates) -> None:
+    b = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=1_000_000,
+        outputTokens=1_000_000,
+        cacheCreationTokens=1_000_000,
+        cacheReadTokens=1_000_000,
+        cost=36.75,
+    )
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                model_breakdowns=[b],
+                cache_read_tokens=1_000_000,
+                cache_creation_tokens=1_000_000,
+                input_tokens=1_000_000,
+                output_tokens=1_000_000,
+                total_cost=36.75,
+            )
+        ]
+    )
+    rows = cost_by_kind(report)
+    assert rows is not None
+    assert [r["kind"] for r in rows] == [
+        "input",
+        "output",
+        "cache_create",
+        "cache_read",
+    ]
+    assert rows[0]["est_cost"] == pytest.approx(5.0)
+    assert rows[1]["est_cost"] == pytest.approx(25.0)
+    assert rows[2]["est_cost"] == pytest.approx(6.25)
+    assert rows[3]["est_cost"] == pytest.approx(0.50)
+    assert sum(r["share"] for r in rows) == pytest.approx(1.0)
+
+
+def test_cost_by_kind_empty_report(_stub_rates) -> None:
+    """Empty report → 0 in every cell, *not* None (None signals
+    'rates unavailable', not 'no data')."""
+    rows = cost_by_kind(_report([]))
+    assert rows is not None
+    assert [r["tokens"] for r in rows] == [0, 0, 0, 0]
+    assert [r["est_cost"] for r in rows] == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_cost_by_kind_returns_none_when_rates_unavailable(monkeypatch) -> None:
+    """Offline + no cache → rates_for_model returns None for every model.
+    cost_by_kind should signal 'hide the panel' by returning None rather
+    than rendering zeros that read like 'no usage'."""
+    monkeypatch.setattr("tokenscope.pricing.rates_for_model", lambda _name: None)
+    b = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=1_000_000, outputTokens=0,
+        cacheCreationTokens=0, cacheReadTokens=0,
+        cost=5.0,
+    )
+    report = _report(
+        [_entry("2026-05-16", model_breakdowns=[b], input_tokens=1_000_000, total_cost=5.0)]
+    )
+    assert cost_by_kind(report) is None

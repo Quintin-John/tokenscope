@@ -25,6 +25,7 @@ from tokenscope.analytics import (
     active_block_burn,
     aggregate_cache_hit_ratio,
     available_models,
+    cost_by_kind,
     filter_daily_by_models,
     last_day_cost,
     prior_window_query,
@@ -76,6 +77,13 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             prior_total = None
 
     _render_kpis(daily_report, blocks_report, state.plan, state.query, prior_total)
+
+    # Enterprise users pay per token, so the per-kind composition is
+    # actionable for them. Flat-rate plans (Pro / Max) pay a fixed
+    # monthly fee regardless of mix, so this view would be noise.
+    if not state.plan.is_flat_rate and daily_report.daily:
+        _render_cost_composition(daily_report)
+
     st.divider()
 
     if not daily_report.daily:
@@ -192,6 +200,64 @@ def _render_kpis(
         f"{cache_ratio:.1%}",
         help="cache_read / (input + cache_create + cache_read), aggregated.",
     )
+
+
+def _render_cost_composition(daily_report) -> None:
+    """Enterprise-only: break window cost into estimated $-per-kind so
+    the user sees where the money is actually going (mostly cache_read
+    for typical Claude Code use).
+
+    The numbers are an estimate — ccusage doesn't break out per-kind
+    cost, so we multiply token counts by Anthropic's published rate
+    schedule (`tokenscope.pricing.RATES`). The estimated total
+    typically lands within a few percent of ccusage's reported total;
+    we show both so the gap is honest.
+    """
+    import pandas as pd
+
+    rows = cost_by_kind(daily_report)
+    if not rows or all(r["tokens"] == 0 for r in rows):
+        return
+
+    est_total = sum(r["est_cost"] for r in rows)
+    actual_total = window_cost(daily_report)
+    diff_pct = ((est_total - actual_total) / actual_total) if actual_total else 0.0
+
+    with st.expander(
+        f"Cost composition — where the ${actual_total:,.2f} went "
+        f"(est. ${est_total:,.2f}, {diff_pct:+.1%} vs ccusage)",
+        expanded=False,
+    ):
+        st.caption(
+            "Tokens × Anthropic's per-kind rate. Cache reads cost a small "
+            "fraction of input rate, output tokens cost several times input "
+            "— that's why the mix matters more than the raw token total. "
+            "The estimate can differ from ccusage's reported total when "
+            "promotional discounts or model-version pricing nuance apply."
+        )
+        df = pd.DataFrame(
+            [
+                {
+                    "Kind": r["kind"],
+                    "Tokens": r["tokens"],
+                    "Est. cost (USD)": r["est_cost"],
+                    "Share": r["share"],
+                }
+                for r in rows
+            ]
+        )
+        st.dataframe(
+            df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Tokens": st.column_config.NumberColumn(format="%d"),
+                "Est. cost (USD)": st.column_config.NumberColumn(format="$%.2f"),
+                "Share": st.column_config.ProgressColumn(
+                    min_value=0.0, max_value=1.0, format="%.1f%%"
+                ),
+            },
+        )
 
 
 def _window_days(query: Query) -> int | None:
