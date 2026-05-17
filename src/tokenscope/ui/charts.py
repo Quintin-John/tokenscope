@@ -312,3 +312,61 @@ def token_mix_bar(daily_report: DailyReport) -> go.Figure | None:
         yaxis_type="log",
     )
     return fig
+
+
+def session_blocks_timeline(
+    blocks: list[BlockEntry],
+    tz: str | None = None,
+) -> go.Figure | None:
+    """Horizontal timeline: each block as a bar from its start to its end.
+
+    Used on the session detail view to close PLAN.md §3.1's
+    "Blocks within session" drill. Active blocks render in a brighter
+    colour so the live one stands out from the completed ones.
+
+    Hover carries block id, cost, and total tokens. When ``tz`` is
+    given, the chart's x-axis displays timestamps in the user's
+    timezone; otherwise UTC.
+
+    Returns None for an empty list — the caller renders empty-state copy.
+    """
+    if not blocks:
+        return None
+    rows = []
+    for b in blocks:
+        rows.append(
+            {
+                "block_id": b.id,
+                "start": b.start_time,
+                "end": b.end_time,
+                "label": "Active" if b.is_active else "Completed",
+                "cost": b.cost_usd,
+                "tokens": b.total_tokens,
+            }
+        )
+    df = pd.DataFrame(rows)
+    fig = px.timeline(
+        df,
+        x_start="start",
+        x_end="end",
+        y="block_id",
+        color="label",
+        category_orders={"label": ["Active", "Completed"]},
+        hover_data={
+            "block_id": False,
+            "start": False,
+            "end": False,
+            "label": False,
+            "cost": ":$,.2f",
+            "tokens": ":,.0f",
+        },
+    )
+    fig.update_yaxes(autorange="reversed")  # newest at top
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=30, b=10),
+        height=max(180, 40 * len(blocks) + 60),
+        legend_title_text="",
+        xaxis_title=f"Time ({tz})" if tz else "Time (UTC)",
+        yaxis_title="",
+    )
+    return fig

@@ -142,6 +142,8 @@ def test_analytics_public_surface() -> None:
         "prior_window_query",
         "window_effective_per_mtok",
         "typical_burn_rate",
+        "blocks_for_session",
+        "cost_by_kind",
     ):
         assert callable(getattr(analytics, name)), name
 
