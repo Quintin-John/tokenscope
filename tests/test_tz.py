@@ -15,10 +15,12 @@ from tokenscope.tz import (
 )
 
 
-def test_detect_local_iana_returns_some_string() -> None:
+def test_detect_local_iana_returns_some_string(monkeypatch) -> None:
     """Whatever the host environment, we must return a non-empty string —
     every consumer can pass the result straight to ccusage without
-    nil-checks."""
+    nil-checks. TZ unset so the test isn't accidentally exercising the
+    env-var probe (which is covered separately)."""
+    monkeypatch.delenv("TZ", raising=False)
     name = detect_local_iana()
     assert isinstance(name, str)
     assert name  # never empty
@@ -54,6 +56,159 @@ def test_detect_local_iana_ignores_posix_tz(monkeypatch) -> None:
     name = detect_local_iana()
     assert name == "America/Chicago"
     assert "," not in name  # Definitely not the POSIX rule string.
+
+
+def test_detect_local_iana_empty_tz_falls_through(monkeypatch) -> None:
+    """TZ set to "" (e.g. a Docker compose-file with ``TZ:`` left blank)
+    must not satisfy the env probe — `.strip()` on an empty string is
+    falsy so the if-guard skips it and the symlink probe runs instead."""
+    import tokenscope.tz as tz_mod
+
+    monkeypatch.setenv("TZ", "")
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+    monkeypatch.setattr(
+        tz_mod.os, "readlink",
+        lambda _: "/usr/share/zoneinfo/Europe/Berlin",
+    )
+    assert detect_local_iana() == "Europe/Berlin"
+
+
+def test_detect_local_iana_whitespace_only_tz_falls_through(monkeypatch) -> None:
+    """TZ set to whitespace ("   ") is functionally unset — `.strip()`
+    normalises it. Skipping the env probe avoids handing whitespace to
+    ZoneInfo, which would raise and we'd swallow."""
+    import tokenscope.tz as tz_mod
+
+    monkeypatch.setenv("TZ", "   ")
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+    monkeypatch.setattr(
+        tz_mod.os, "readlink",
+        lambda _: "/usr/share/zoneinfo/Pacific/Auckland",
+    )
+    assert detect_local_iana() == "Pacific/Auckland"
+
+
+def test_detect_local_iana_malformed_iana_falls_through(monkeypatch) -> None:
+    """A typo'd IANA-looking value (`Atlantis/Lost_City`) is not a real
+    zone — ZoneInfo raises, we fall through rather than return junk
+    that would crash ccusage."""
+    import tokenscope.tz as tz_mod
+
+    monkeypatch.setenv("TZ", "Atlantis/Lost_City")
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+    monkeypatch.setattr(
+        tz_mod.os, "readlink",
+        lambda _: "/usr/share/zoneinfo/Asia/Tokyo",
+    )
+    assert detect_local_iana() == "Asia/Tokyo"
+
+
+def test_detect_local_iana_path_like_tz_falls_through(monkeypatch) -> None:
+    """TZ set to a path (`/etc/foo`) — ZoneInfo treats it as a key,
+    can't find it, raises. Must fall through."""
+    import tokenscope.tz as tz_mod
+
+    monkeypatch.setenv("TZ", "/etc/foo")
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+    monkeypatch.setattr(
+        tz_mod.os, "readlink",
+        lambda _: "/usr/share/zoneinfo/America/Denver",
+    )
+    assert detect_local_iana() == "America/Denver"
+
+
+def test_detect_local_iana_bare_utc_in_tz_returns_utc(monkeypatch) -> None:
+    """TZ="UTC" is a valid IANA zone (ZoneInfo accepts it). Returned as
+    the literal "UTC" — no '/' in the name, but still authoritative."""
+    monkeypatch.setenv("TZ", "UTC")
+    assert detect_local_iana() == "UTC"
+
+
+def test_detect_local_iana_uses_astimezone_key_when_tz_unset(monkeypatch) -> None:
+    """Probe 2: when TZ is unset and the host's stdlib resolves a
+    ZoneInfo-typed tzinfo with a ``.key`` containing a '/', that key
+    is returned. Covers the production path on macOS native runs."""
+    monkeypatch.delenv("TZ", raising=False)
+    import tokenscope.tz as tz_mod
+
+    class _ZoneInfoLikeTz:
+        key = "Europe/Paris"
+
+        def utcoffset(self, dt):
+            return None
+
+        def tzname(self, dt):
+            return "CET"
+
+        def dst(self, dt):
+            return None
+
+    class _FakeDatetime:
+        @staticmethod
+        def now():
+            class _D:
+                def astimezone(self):
+                    class _R:
+                        tzinfo = _ZoneInfoLikeTz()
+
+                    return _R()
+
+            return _D()
+
+    monkeypatch.setattr(tz_mod, "datetime", _FakeDatetime)
+    assert detect_local_iana() == "Europe/Paris"
+
+
+def test_detect_local_iana_readlink_oserror_falls_through_to_utc(
+    monkeypatch,
+) -> None:
+    """Probe 3 defensive path: if ``/etc/localtime`` is a symlink but
+    ``os.readlink`` raises OSError (corrupt symlink, EACCES, ELOOP),
+    swallow it and continue to the UTC fallback rather than crashing
+    the whole sidebar render."""
+    monkeypatch.delenv("TZ", raising=False)
+    import tokenscope.tz as tz_mod
+
+    class _NoKeyTzInfo:
+        def utcoffset(self, dt):
+            return None
+
+        def tzname(self, dt):
+            return "X"
+
+        def dst(self, dt):
+            return None
+
+    class _FakeDatetime:
+        @staticmethod
+        def now():
+            class _D:
+                def astimezone(self):
+                    class _R:
+                        tzinfo = _NoKeyTzInfo()
+
+                    return _R()
+
+            return _D()
+
+    monkeypatch.setattr(tz_mod, "datetime", _FakeDatetime)
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+
+    def _raise_oserror(_):
+        raise OSError("EACCES on /etc/localtime")
+
+    monkeypatch.setattr(tz_mod.os, "readlink", _raise_oserror)
+    assert detect_local_iana() == DEFAULT_FALLBACK
 
 
 def test_detect_local_iana_symlink_fallback(monkeypatch, tmp_path) -> None:
@@ -138,6 +293,22 @@ def test_utc_iso_to_local_malformed_returns_none() -> None:
     assert utc_iso_to_local("not-a-timestamp", "America/Los_Angeles") is None
 
 
+def test_utc_iso_to_local_unknown_zone_returns_raw_iso() -> None:
+    """Unknown zone names raise ZoneInfoNotFoundError; we return the
+    raw input so the UI still has something to render. Narrow catch:
+    a corrupt-tzdata OSError would surface as a real bug, not get
+    swallowed silently."""
+    s = utc_iso_to_local("2026-05-16T13:00:00.000Z", "Atlantis/Lost_City")
+    assert s == "2026-05-16T13:00:00.000Z"
+
+
+def test_utc_iso_to_local_malformed_zone_returns_raw_iso() -> None:
+    """An absolute-path zone key raises ValueError, not
+    ZoneInfoNotFoundError. Must also fall back rather than crash."""
+    s = utc_iso_to_local("2026-05-16T13:00:00.000Z", "/etc/foo")
+    assert s == "2026-05-16T13:00:00.000Z"
+
+
 # ---------- utc_iso_to_local_date ----------
 
 
@@ -167,3 +338,15 @@ def test_utc_iso_to_local_date_empty() -> None:
 
 def test_utc_iso_to_local_date_malformed() -> None:
     assert utc_iso_to_local_date("garbage", "America/Los_Angeles") is None
+
+
+def test_utc_iso_to_local_date_unknown_zone_returns_iso_prefix() -> None:
+    """Unknown zone → return the UTC date-prefix as a last-resort label."""
+    d = utc_iso_to_local_date("2026-05-16T13:00:00.000Z", "Atlantis/Lost_City")
+    assert d == "2026-05-16"
+
+
+def test_utc_iso_to_local_date_malformed_zone_returns_iso_prefix() -> None:
+    """Malformed zone (ValueError) → same fall-back as unknown zone."""
+    d = utc_iso_to_local_date("2026-05-16T13:00:00.000Z", "/etc/foo")
+    assert d == "2026-05-16"
