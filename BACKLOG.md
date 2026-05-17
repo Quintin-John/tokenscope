@@ -169,59 +169,73 @@ user opts in.
 ### Slice 24 — Expensive-session forensics
 
 **Scope.** A "Most expensive sessions this window" expander on the
-Overview. Top-N (configurable, default 5) sessions ranked by cost,
-each tagged with a one-line **reason** explaining what drove the spend:
+Overview. Top-N (configurable, default 5) sessions ranked by cost.
+Each row carries:
 
-- *Output-heavy* — when `output_tokens / total_tokens > ~25%`.
-  Output tokens cost ~5× input rate, so an output-dominated session
-  costs disproportionately for its size.
-- *Cache-write heavy* — when `cache_create_tokens / total_tokens > ~20%`.
-  Lots of fresh context prep without amortising it over many reads.
-- *Low cache hit* — when the session's
-  `cache_read / (input + cache_create + cache_read) < 50%`.
-  Indicates context wasn't being reused.
-- *Heavy model* — when only opus/sonnet was used for a high-token
-  session that haiku could plausibly have handled. Soft signal.
-- *Large volume* — fall-through when none of the above dominates;
-  it just used a lot of tokens.
+- Friendly session label (project + start time)
+- Cost (USD)
+- Total tokens
+- **Token-mix shape** — a small inline stacked bar showing the
+  input / output / cache_create / cache_read split for that session
+  (the same primitive `session_token_mix` already renders on the
+  Session-detail view, scaled down to ~80px wide). The user reads the
+  shape; we don't moralise about it.
+- **Low cache hit** tag (red dot) when
+  `cache_read / (input + cache_create + cache_read) < 50%`. This is
+  the *only* surviving heuristic tag — see "Why one tag, not five"
+  below.
+- An **Open** button that drills into the existing Session-detail
+  view, where the full per-model donut and full-size token-mix bar
+  live.
 
-Each row in the table includes the session id (friendly-labelled),
-cost, total tokens, the reason tag, and an "Open" button that drills
-into the existing Session-detail view.
+**Why one tag, not five (design lesson).** An earlier draft of this
+slice flagged five reasons: *Output-heavy*, *Cache-write heavy*,
+*Low cache hit*, *Heavy model*, *Large volume*. That design tripped
+on its own example: a normal `read code → write doc → slice doc →
+execute each slice` workflow is naturally both output-heavy AND
+cache-create-heavy — exactly the shape the heuristics would flag as
+"expensive for bad reasons" even though every token was load-bearing.
+The heuristics were pretending to know which work is justified, which
+we can't tell from the token mix alone.
 
-**Why.** Headline cost numbers tell you *what* — this view tells you
-*why*. A user looking at "$300 this week" can see which three
-sessions accounted for it, and whether the driver was a model choice
-(switchable), a cache miss (fixable), or just sustained heavy use
-(expected).
+The fix is to **drop the moralising tags, keep the data**:
 
-**Effort.** Medium. Needs:
-- `analytics.session_cost_drivers(session)` returning a list of
-  matching tag strings (a session can be both output-heavy AND
-  low-cache, in which case both tags show).
+- *Output-heavy* / *Cache-write heavy* / *Large volume* → all
+  workflow-dependent. Removed. The inline token-mix bar shows the
+  same shape without claiming the shape is wrong.
+- *Heavy model* → too judgemental without per-task context. Removed
+  (already flagged for v1 removal in the original draft).
+- *Low cache hit* → **kept.** Workflow-independent: if the cache-read
+  share of cache-eligible tokens is below 50%, you are literally
+  paying for context that isn't being reused. That's a fixable infra
+  signal (look for `/clear`, model swaps, big file diffs busting
+  prefixes) regardless of whether you're writing docs or code or
+  both.
+
+**Why.** Headline cost numbers tell you *what*. This view points to
+*which sessions* drove the spend and lets the user inspect the
+shape. The user decides whether the shape is appropriate for the
+task — we don't.
+
+**Effort.** Low-medium. Needs:
 - `analytics.expensive_sessions(session_report, n=5)` — pure-function
-  ranker that returns annotated rows.
-- UI table on Overview (Enterprise-only — the same gating logic the
-  Cost-composition panel uses).
-- Tuning the thresholds. They want to live in
-  `tokenscope.config.toml` so the operator can dial them per-team:
+  ranker that returns `[{session, cost, tokens, mix: {input, output,
+  cache_create, cache_read}, low_cache_hit: bool}, ...]`.
+- A compact `mini_token_mix_bar(mix)` chart helper in `ui/charts.py`
+  (could share the existing `session_token_mix` layout with smaller
+  margins + no axis labels).
+- UI table on Overview (Enterprise-only — same gating as the
+  Cost-composition panel).
+- Two knobs in `tokenscope.config.toml`:
   ```toml
   [forensics]
-  output_heavy_threshold = 0.25
-  cache_write_heavy_threshold = 0.20
   low_cache_threshold = 0.50
   top_n = 5
   ```
 
-**Risk.** Medium. Heuristics can mislead — a user with one
-genuinely-justified output-heavy session might roll their eyes at
-the "Output-heavy" tag. Mitigations:
-- Tags are *signals*, not verdicts. Show all that match, not just one.
-- Add a caption disclosing the thresholds and that these are
-  heuristics ("based on token mix; your context may make some of
-  these expected").
-- Skip the "Heavy model" tag in v1 — too judgemental to ship without
-  per-task context.
+**Risk.** Low. The single surviving tag is the one with the cleanest
+"do this to fix it" reading, and the mini-chart approach is honest:
+we surface the data, the user does the diagnosis.
 
 ## Suggested order
 
