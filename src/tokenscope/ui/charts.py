@@ -184,6 +184,45 @@ def dollars_saved_bar(daily_report: DailyReport) -> go.Figure | None:
     return fig
 
 
+def single_family_token_bar(daily_report: DailyReport) -> go.Figure | None:
+    """Horizontal bar of total tokens per kind, for a window where only
+    one model family is present.
+
+    A Sankey with one right-side node is just a four-strand comb feeding
+    one label — adds visual ceremony without insight. This bar gives the
+    same information honestly. Uses log x-axis for the same reason the
+    daily token-mix bar does (cache_read swamps everything else).
+    """
+    if not daily_report.daily:
+        return None
+    totals = {"input": 0, "output": 0, "cache_create": 0, "cache_read": 0}
+    for entry in daily_report.daily:
+        totals["input"] += entry.input_tokens
+        totals["output"] += entry.output_tokens
+        totals["cache_create"] += entry.cache_creation_tokens
+        totals["cache_read"] += entry.cache_read_tokens
+    if not any(totals.values()):
+        return None
+    kinds = ["cache_read", "cache_create", "output", "input"]
+    values = [totals[k] for k in kinds]
+    fig = go.Figure(
+        go.Bar(
+            x=values,
+            y=kinds,
+            orientation="h",
+            hovertemplate="<b>%{y}</b><br>%{x:,.0f} tokens<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis_type="log",
+        xaxis_title="Tokens",
+        yaxis_title="",
+        height=260,
+    )
+    return fig
+
+
 def token_flow_sankey(daily_report: DailyReport) -> go.Figure | None:
     """Sankey: token-kind → model family. Family labels carry the family's cost."""
     data_ = token_flow_sankey_data(daily_report)

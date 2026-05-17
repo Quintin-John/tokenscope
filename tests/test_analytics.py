@@ -30,6 +30,7 @@ from tokenscope.analytics import (
     find_daily_entry,
     find_session,
     last_day_cost,
+    model_breakdown,
     model_family,
     mtd_cost,
     rolling_cost_average,
@@ -956,3 +957,116 @@ def test_token_flow_sankey_data_skips_zero_links() -> None:
 def test_token_flow_sankey_data_empty_report() -> None:
     data_ = token_flow_sankey_data(_report([]))
     assert data_ == {"labels": [], "sources": [], "targets": [], "values": []}
+
+
+# ---------- model_breakdown ----------
+
+
+def test_model_breakdown_sorted_desc_with_share() -> None:
+    opus = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=100,
+        outputTokens=200,
+        cacheCreationTokens=300,
+        cacheReadTokens=400,
+        cost=10.0,
+    )
+    haiku = ModelBreakdown(
+        modelName="claude-haiku-4-5-20251001",
+        inputTokens=10,
+        outputTokens=20,
+        cacheCreationTokens=30,
+        cacheReadTokens=40,
+        cost=1.0,
+    )
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                model_breakdowns=[opus, haiku],
+                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+                total_cost=11.0,
+            )
+        ]
+    )
+    rows = model_breakdown(report)
+    # Sorted by cost desc.
+    assert [r["model"] for r in rows] == [
+        "claude-opus-4-7",
+        "claude-haiku-4-5-20251001",
+    ]
+    # Full model names preserved (no family collapse).
+    assert rows[0]["family"] == "opus"
+    assert rows[1]["family"] == "haiku"
+    # Share sums to 1.
+    assert rows[0]["share"] + rows[1]["share"] == pytest.approx(1.0)
+    # $/MTok blended is cost / tokens × 1M.
+    assert rows[0]["per_mtok"] == pytest.approx(10.0 / 1000 * 1_000_000)
+
+
+def test_model_breakdown_keeps_versions_separate() -> None:
+    """Regression: collapsing opus-4-6 and opus-4-7 into "opus" would hide
+    version-comparison work. The breakdown keeps the full model name."""
+    b46 = ModelBreakdown(
+        modelName="claude-opus-4-6",
+        inputTokens=1,
+        outputTokens=1,
+        cacheCreationTokens=1,
+        cacheReadTokens=1,
+        cost=2.0,
+    )
+    b47 = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=1,
+        outputTokens=1,
+        cacheCreationTokens=1,
+        cacheReadTokens=1,
+        cost=3.0,
+    )
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                model_breakdowns=[b46, b47],
+                models=["claude-opus-4-6", "claude-opus-4-7"],
+                total_cost=5.0,
+            )
+        ]
+    )
+    rows = model_breakdown(report)
+    names = [r["model"] for r in rows]
+    assert "claude-opus-4-6" in names
+    assert "claude-opus-4-7" in names
+
+
+def test_model_breakdown_empty_report() -> None:
+    assert model_breakdown(_report([])) == []
+
+
+def test_model_breakdown_zero_tokens_safe() -> None:
+    """Defensive: a model with zero recorded tokens shouldn't divide by zero."""
+    weird = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=0,
+        outputTokens=0,
+        cacheCreationTokens=0,
+        cacheReadTokens=0,
+        cost=0.0,
+    )
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                model_breakdowns=[weird],
+                models=["claude-opus-4-7"],
+                total_cost=0.0,
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation_tokens=0,
+                cache_read_tokens=0,
+            )
+        ]
+    )
+    rows = model_breakdown(report)
+    assert rows[0]["per_mtok"] == 0.0
+    assert rows[0]["share"] == 0.0
