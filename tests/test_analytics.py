@@ -25,11 +25,14 @@ from tokenscope.analytics import (
     daily_cache_hit_ratio,
     daily_cost_by_model,
     daily_token_mix,
+    bold_numbers_in_insight,
+    collapse_composition_rows,
     filter_daily_by_models,
     find_block,
     find_daily_entry,
     find_session,
     format_compact_int,
+    format_timezone_for_display,
     friendly_project_label,
     last_day_cost,
     overview_insight,
@@ -365,12 +368,25 @@ def test_top_n_by_cost_empty_iterable() -> None:
         ("claude-sonnet-4-6", "sonnet"),
         ("claude-3-5-sonnet-20240620", "sonnet"),
         ("gpt-4o", "gpt-4o"),
-        ("", ""),
+        # Defensive: falsy model names map to `"other"`, never the
+        # empty string. Plotly's JS layer stringifies empty category
+        # names to `"undefined"` in legends, which previously surfaced
+        # as a phantom legend entry on the Overview Daily-cost chart.
+        ("", "other"),
         ("claude", "claude"),
     ],
 )
 def test_model_family(name: str, expected: str) -> None:
     assert model_family(name) == expected
+
+
+def test_model_family_falsy_inputs_return_fallback() -> None:
+    """Regression for the `undefined` legend bug: any falsy model
+    name returns the documented fallback sentinel, not the input."""
+    from tokenscope.analytics import UNKNOWN_MODEL_FAMILY
+
+    assert model_family("") == UNKNOWN_MODEL_FAMILY
+    assert UNKNOWN_MODEL_FAMILY == "other"
 
 
 # ---------- mtd_cost ----------
@@ -1693,3 +1709,139 @@ def test_overview_insight_spike_skipped_on_zero_window_cost() -> None:
         cache_hit_ratio=0.0,
     )
     assert "2026-04-18" not in text
+
+
+# ---------- bold_numbers_in_insight ----------
+
+
+def test_bold_numbers_in_insight_wraps_dollar_amounts() -> None:
+    """Dollar amounts (`$1,020.73`, `$303.06`) get wrapped in
+    `<strong>` so the eye lands on the figures."""
+    out = bold_numbers_in_insight("You spent $1,020.73 over 30 days.")
+    assert "<strong>$1,020.73</strong>" in out
+
+
+def test_bold_numbers_in_insight_wraps_unsigned_percentages() -> None:
+    out = bold_numbers_in_insight("Cache reads served 99.0% of input-side tokens.")
+    assert "<strong>99.0%</strong>" in out
+
+
+def test_bold_numbers_in_insight_wraps_signed_percentages() -> None:
+    """Signed percentages like `+91%` or `-15%` keep the sign inside
+    the `<strong>` wrapping."""
+    out = bold_numbers_in_insight("up 91% vs the prior 30 days")
+    assert "<strong>91%</strong>" in out
+    out_signed = bold_numbers_in_insight("+91% increase")
+    assert "<strong>+91%</strong>" in out_signed
+    out_neg = bold_numbers_in_insight("a -15% change")
+    assert "<strong>-15%</strong>" in out_neg
+
+
+def test_bold_numbers_in_insight_pass_through_when_no_match() -> None:
+    """No numbers → no transformation. Don't introduce stray tags."""
+    out = bold_numbers_in_insight("Cache reads dominate the window.")
+    assert out == "Cache reads dominate the window."
+    assert "<strong>" not in out
+
+
+def test_bold_numbers_in_insight_handles_full_paragraph() -> None:
+    """End-to-end: the actual insight paragraph from `overview_insight`
+    gets every figure bolded without breaking the prose."""
+    paragraph = overview_insight(
+        window_total_cost=1_020.73,
+        window_days=30,
+        prior_total=535.0,
+        spike=("2026-04-18", 303.06),
+        cache_hit_ratio=0.990,
+    )
+    out = bold_numbers_in_insight(paragraph)
+    for figure in ("$1,020.73", "$303.06", "99.0%"):
+        assert f"<strong>{figure}</strong>" in out, (
+            f"figure {figure!r} not bolded; output: {out!r}"
+        )
+
+
+# ---------- collapse_composition_rows ----------
+
+
+def _comp_row(kind: str, share: float, *, tokens: int = 1000, est_cost: float = 1.0) -> dict:
+    return {"kind": kind, "share": share, "tokens": tokens, "est_cost": est_cost}
+
+
+def test_collapse_composition_rows_groups_below_threshold() -> None:
+    """Rows with share below threshold group into a single 'other' row
+    whose tokens / cost / share are the sum of the collapsed rows."""
+    rows = [
+        _comp_row("cache_read", 0.99, tokens=1_000_000, est_cost=900.0),
+        _comp_row("input", 0.005, tokens=5_000, est_cost=4.0),
+        _comp_row("cache_create", 0.004, tokens=4_000, est_cost=3.0),
+        _comp_row("output", 0.001, tokens=1_000, est_cost=1.0),
+    ]
+    out = collapse_composition_rows(rows, hide_threshold=0.01)
+    assert {r["kind"] for r in out} == {"cache_read", "other"}
+    other = next(r for r in out if r["kind"] == "other")
+    assert other["tokens"] == 5_000 + 4_000 + 1_000
+    assert other["est_cost"] == pytest.approx(4.0 + 3.0 + 1.0)
+    assert other["share"] == pytest.approx(0.005 + 0.004 + 0.001)
+
+
+def test_collapse_composition_rows_no_op_when_nothing_below_threshold() -> None:
+    """All rows ≥ threshold → input passes through unchanged
+    (different list object, same content)."""
+    rows = [
+        _comp_row("a", 0.40),
+        _comp_row("b", 0.30),
+        _comp_row("c", 0.20),
+        _comp_row("d", 0.10),
+    ]
+    out = collapse_composition_rows(rows, hide_threshold=0.01)
+    assert out == rows
+    assert out is not rows  # defensive copy
+
+
+def test_collapse_composition_rows_keeps_single_small_row() -> None:
+    """If only ONE row is below threshold, collapsing it into 'other'
+    would be a relabel, not a simplification. Leave it alone."""
+    rows = [
+        _comp_row("big", 0.99),
+        _comp_row("small", 0.01),
+    ]
+    out = collapse_composition_rows(rows, hide_threshold=0.05)
+    assert out == rows
+
+
+def test_collapse_composition_rows_zero_threshold_passes_through() -> None:
+    rows = [_comp_row("a", 0.5), _comp_row("b", 0.5)]
+    assert collapse_composition_rows(rows, hide_threshold=0.0) == rows
+
+
+# ---------- format_timezone_for_display ----------
+
+
+def test_format_timezone_for_display_replaces_underscores() -> None:
+    """IANA identifiers use underscores; UI copy should show spaces."""
+    assert format_timezone_for_display("America/New_York") == "America/New York"
+    assert format_timezone_for_display("Pacific/Pago_Pago") == "Pacific/Pago Pago"
+
+
+def test_format_timezone_for_display_passes_through_when_already_spaced() -> None:
+    assert format_timezone_for_display("UTC") == "UTC"
+    assert format_timezone_for_display("America/Chicago") == "America/Chicago"
+
+
+def test_format_timezone_for_display_empty_returns_empty() -> None:
+    """Defensive: missing tz string doesn't crash; returns empty."""
+    assert format_timezone_for_display("") == ""
+
+
+# ---------- KNOWN_MODEL_FAMILIES ----------
+
+
+def test_known_model_families_lists_current_anthropic_families() -> None:
+    """The dashboard reasons about families, not versions. The
+    registry of currently-known Anthropic families is the source the
+    chart layer consults for canonical brand colors — opus always
+    indigo, sonnet always cyan, haiku always emerald."""
+    from tokenscope.analytics import KNOWN_MODEL_FAMILIES
+
+    assert KNOWN_MODEL_FAMILIES == ("opus", "sonnet", "haiku")

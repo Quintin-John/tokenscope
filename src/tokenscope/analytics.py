@@ -12,6 +12,7 @@ figures.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Iterable, Protocol
@@ -590,6 +591,19 @@ def short_model_label(model_name: str) -> str:
     return model_name
 
 
+UNKNOWN_MODEL_FAMILY = "other"
+
+# Currently-known Anthropic model families, listed in capability order
+# (most-capable first). The dashboard reasons about families, not
+# individual model versions — `claude-opus-4-7`, `claude-opus-4-6`,
+# `claude-3-5-sonnet-20240620` all collapse to one of these names via
+# `model_family`. The list is the authoritative "known" registry the
+# chart layer consults when assigning brand-stable colors so each
+# family keeps the same hue across every render regardless of which
+# subset happens to be in the user's window.
+KNOWN_MODEL_FAMILIES: tuple[str, ...] = ("opus", "sonnet", "haiku")
+
+
 def model_family(model_name: str) -> str:
     """Strip date/version suffixes from a model identifier, keep the family.
 
@@ -599,21 +613,29 @@ def model_family(model_name: str) -> str:
         claude-sonnet-4-6          -> sonnet
         claude-3-5-sonnet-20240620 -> sonnet   (legacy ordering)
         gpt-4o                     -> gpt-4o   (no claude prefix, pass through)
-        ""                         -> ""
+        ""                         -> "other"  (defensive fallback)
+        None                       -> "other"
 
     The family is the first non-digit-prefixed segment after `claude-`.
     Anything that does not start with `claude-` is returned unchanged so the
     UI can still group/display it.
+
+    Defensive: an empty / None / falsy model_name returns `UNKNOWN_MODEL_FAMILY`
+    rather than the empty string. Plotly's JS layer stringifies empty
+    category names to the literal `"undefined"` in legends and axis
+    labels, which surfaced as a phantom legend entry on the Overview
+    Daily-cost chart. Returning a known sentinel here makes the
+    fallback explicit and chartable.
     """
     if not model_name:
-        return model_name
+        return UNKNOWN_MODEL_FAMILY
     parts = model_name.split("-")
     if parts[0] != "claude":
         return model_name
     for part in parts[1:]:
         if part and not part[0].isdigit():
             return part
-    return model_name
+    return model_name or UNKNOWN_MODEL_FAMILY
 
 
 def prior_window_query(query: Query) -> Query | None:
@@ -780,6 +802,77 @@ def cost_by_kind(daily_report: DailyReport) -> list[dict] | None:
 _COMPACT_THOUSAND = 1_000
 _COMPACT_MILLION = 1_000_000
 _COMPACT_BILLION = 1_000_000_000
+
+
+_BOLD_NUMBER_PATTERN = re.compile(
+    # Order matters: dollar amounts first (so "$1,020.73" is caught
+    # whole, not as "$1," + "020.73"); then signed-or-unsigned
+    # percentages.
+    r"(\$[\d,]+\.\d{2}|[+\-]?\d+(?:\.\d+)?%)"
+)
+
+
+def bold_numbers_in_insight(text: str) -> str:
+    """Wrap dollar amounts (``$X.XX``) and percentages (``+91%``,
+    ``99.0%``) in HTML ``<strong>`` tags. Used by the Overview
+    insight renderer to draw the eye to the key figures in the
+    narrative paragraph.
+
+    Pure text → text/HTML transform — kept here (not in the
+    Streamlit-coupled renderer) so the regex contract is
+    unit-testable without a Streamlit context.
+    """
+    return _BOLD_NUMBER_PATTERN.sub(r"<strong>\1</strong>", text)
+
+
+def collapse_composition_rows(
+    rows: list[dict], *, hide_threshold: float
+) -> list[dict]:
+    """Group cost-composition rows whose ``share`` is below
+    ``hide_threshold`` into a single ``"other"`` row.
+
+    The cost-composition table on Overview lists per-kind contribution
+    to window spend. With four kinds (input / output / cache_create /
+    cache_read), the share is often dominated by one (cache_read ≈ 99%)
+    and the smallest is sub-0.01% — a row that adds no signal and a
+    visible-share bar that clips to zero pixels.
+
+    ``hide_threshold`` is a *share fraction* (0–1), not a percentage.
+    Rows at or above the threshold pass through unchanged; rows below
+    are summed into a single "other" row whose tokens, est_cost, and
+    share are the aggregate of the collapsed rows. If no rows
+    qualify for collapse (or only one row is below threshold), the
+    input is returned unchanged.
+    """
+    if hide_threshold <= 0:
+        return list(rows)
+    below = [r for r in rows if r["share"] < hide_threshold]
+    above = [r for r in rows if r["share"] >= hide_threshold]
+    if len(below) < 2:
+        # Either nothing to collapse or exactly one small row, which
+        # we leave alone — collapsing one row into an "other" row
+        # would be a relabel, not a simplification.
+        return list(rows)
+    other = {
+        "kind": "other",
+        "tokens": sum(r["tokens"] for r in below),
+        "est_cost": sum(r["est_cost"] for r in below),
+        "share": sum(r["share"] for r in below),
+    }
+    return above + [other]
+
+
+def format_timezone_for_display(tz: str) -> str:
+    """Convert an IANA timezone identifier to display copy.
+
+    IANA identifiers use underscores in place of spaces (``America/New_York``)
+    so they're filename-safe and parser-friendly. The dashboard's UI
+    copy should show spaces — the underscore is implementation
+    detail leaking through. Pass-through for already-spaced inputs.
+    """
+    if not tz:
+        return ""
+    return tz.replace("_", " ")
 
 
 def format_compact_int(n: int) -> str:

@@ -1,8 +1,10 @@
 """Overview page.
 
 The landing surface: page H1 + window-context subtitle, KPI strip in
-cards, dynamic insight paragraph, inline cost composition, and two
-charts (cost trend with rolling overlay + percent-stacked token mix).
+cards, dynamic insight paragraph, inline cost composition, and charts
+(cost trend with rolling overlay + percent-stacked token mix + a
+non-cache mini chart that exposes the input/output/cache_create
+variance that cache_read otherwise crushes).
 
 Per PLAN.md §3.3 the cost-trend chart is the drill entry-point —
 clicking a day sets `?view=day&day=YYYY-MM-DD` and reruns. The
@@ -28,9 +30,12 @@ from tokenscope import config, data
 from tokenscope.analytics import (
     aggregate_cache_hit_ratio,
     available_models,
+    bold_numbers_in_insight,
+    collapse_composition_rows,
     cost_by_kind,
     filter_daily_by_models,
     format_compact_int,
+    format_timezone_for_display,
     last_day_cost,
     overview_insight,
     prior_window_query,
@@ -46,21 +51,27 @@ from tokenscope.ui._data import load_daily
 from tokenscope.ui._nav import handle_chart_drill
 from tokenscope.ui.charts import (
     cost_trend_with_rolling,
+    token_mix_non_cache_percent_bar,
     token_mix_percent_bar,
 )
 from tokenscope.ui.sidebar import SidebarState
 
 
-# Composition-table delta vs ccusage is suppressed below this threshold
+# Composition-table delta vs source is suppressed below this threshold
 # — the difference is rounding noise, not a meaningful divergence, and
-# surfacing "0.0%" is just noise. Operator-tunable threshold not worth
-# the configuration weight; 1% is the natural floor for the percent
-# formatter (".1f%%").
+# surfacing "0.0%" is just noise.
 _COMPOSITION_DELTA_DISPLAY_THRESHOLD = 0.01
+
+# Composition rows whose share of total cost is below this threshold
+# get collapsed into a single "other" row. Token kinds whose
+# contribution rounds to ≪ 0.01% are noise on a 4-row table; grouping
+# them keeps the share-bar column legible without dropping the data.
+_COMPOSITION_OTHER_THRESHOLD = 0.001  # 0.1%
 
 
 def render(state: SidebarState, nav: Navigation, today: date | None = None) -> None:
     today = today or date.today()
+    refresh_time = datetime.now()
 
     daily_report = load_daily(state)
     if daily_report is None:
@@ -83,7 +94,7 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
     window_days = _window_days(state.query) or config.DEFAULT_RANGE_DAYS
     spike = spike_day(daily_report, threshold_multiplier=config.OVERVIEW_SPIKE_THRESHOLD)
 
-    _render_page_header(state, window_days)
+    _render_page_header(state, window_days, refresh_time)
     _render_kpis(daily_report, state.plan, state.query, prior_total, window_days)
     _render_insight(daily_report, prior_total, window_days, spike)
 
@@ -107,15 +118,30 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
 # --- header --------------------------------------------------------------
 
 
-def _render_page_header(state: SidebarState, window_days: int) -> None:
-    """Page H1 (`Overview`) + window-context subtitle. The product
-    wordmark sits in the browser tab via `st.set_page_config`; the
-    visible H1 on every page should be the *view name*, not the
-    product name."""
-    st.markdown("# Overview")
-    st.caption(
-        f"Window: last {window_days} days · times in {state.query.tz}"
-    )
+def _render_page_header(
+    state: SidebarState, window_days: int, refresh_time: datetime
+) -> None:
+    """Page H1 (`Overview`) + window/timezone subtitle on the left,
+    `Updated HH:MM:SS` caption on the right. The product wordmark
+    sits in the browser tab via `st.set_page_config`; the visible H1
+    on every page should be the *view name*, not the product name.
+    """
+    cols = st.columns([4, 1])
+    with cols[0]:
+        st.markdown("# Overview")
+        tz_display = format_timezone_for_display(state.query.tz or "")
+        st.caption(
+            f"Window: last {window_days} days · times in {tz_display}"
+        )
+    with cols[1]:
+        # Right-align via markdown alignment — `st.caption` doesn't
+        # support `text-align`. The trailing div+css class lives in
+        # `_app_styles.css`.
+        st.markdown(
+            f'<div class="tokenscope-page-refresh">Updated '
+            f'{refresh_time.strftime("%H:%M:%S")}</div>',
+            unsafe_allow_html=True,
+        )
 
 
 # --- KPIs ---------------------------------------------------------------
@@ -129,15 +155,21 @@ def _render_kpis(
     window_days: int,
 ) -> None:
     """Four-card KPI strip. Each KPI lives inside a bordered container
-    so the row reads as four grouped surfaces, not as floating numbers.
+    so the row reads as four grouped surfaces.
 
-    The Active-block $/hr KPI was removed in favour of `Avg daily cost`
-    so every card describes the same window — the prior mix-of-time-
-    scales row forced the reader to re-anchor for each card. The Live
-    tab owns the active-block view.
+    Captions are plain English (`over 30 days`), not formulas
+    (`window cost ÷ 30 days`) — the formula form leaked implementation
+    detail into the user-facing UI. Help icons are reserved for the
+    one card whose semantics genuinely don't self-explain (Cache hit
+    ratio's denominator excludes output tokens, which surprises users
+    who expect "share of all tokens").
 
-    Window-cost delta uses `delta_color="inverse"` so a cost *increase*
-    paints red — going up is not the good direction on a cost metric.
+    Window-cost delta uses `delta_color="off"` — increased cost is not
+    good news in a cost dashboard, and the green-up arrow in Streamlit's
+    `normal` mode was actively misleading. The previous `inverse` mode
+    painted positive deltas red, which compounds the "red means warning"
+    convention with "red means cost rose" — also misleading. Neutral
+    gray for cost deltas is the only honest treatment.
     """
     api_window_cost = window_cost(daily_report)
     last_day = last_day_cost(daily_report)
@@ -151,23 +183,27 @@ def _render_kpis(
 
     with c2, st.container(border=True):
         if last_day is not None:
-            st.metric(
-                "Last day",
-                f"${last_day[1]:,.2f}",
-                help=f"Cost on {last_day[0]} — the most recent day with data.",
-            )
-            st.caption(last_day[0])
+            st.metric("Last day", f"${last_day[1]:,.2f}")
+            st.caption(f"on {last_day[0]}")
         else:
             st.metric("Last day", "—")
             st.caption("no data in window")
 
     with c3, st.container(border=True):
         st.metric("Avg daily cost", f"${avg_daily:,.2f}")
-        st.caption(f"window cost ÷ {window_days} days")
+        st.caption(f"over {window_days} days")
 
     with c4, st.container(border=True):
-        st.metric("Cache hit ratio", f"{cache_ratio:.1%}")
-        st.caption("cache_read / input-side tokens")
+        st.metric(
+            "Cache hit ratio",
+            f"{cache_ratio:.1%}",
+            help=(
+                "Share of input-side tokens served from cache. "
+                "Excludes output tokens (the model generates those — "
+                "they're not part of the cache decision)."
+            ),
+        )
+        st.caption("share of input-side tokens served from cache")
 
 
 def _render_window_cost_kpi(
@@ -178,7 +214,12 @@ def _render_window_cost_kpi(
 ) -> None:
     """Window-cost KPI — flips between pay-per-token (Enterprise) and
     flat-rate (Pro / Max). Extracted so the four-card layout in
-    `_render_kpis` reads as a parallel column comp."""
+    `_render_kpis` reads as a parallel column comp.
+
+    Cost delta uses `delta_color="off"` (neutral gray) — see
+    `_render_kpis` docstring for why neither `normal` (positive=green)
+    nor `inverse` (positive=red) is right for cost deltas.
+    """
     if plan.is_flat_rate:
         savings = api_window_cost - plan.flat_rate_usd_per_month
         st.metric(
@@ -186,13 +227,10 @@ def _render_window_cost_kpi(
             f"${plan.flat_rate_usd_per_month:,.0f}/mo",
             delta=f"would cost ${api_window_cost:,.2f} at API rates",
             delta_color="off",
-            help=(
-                f"Your {plan.name} plan is flat-rate at "
-                f"${plan.flat_rate_usd_per_month:.0f}/month — paid regardless of "
-                f"window length. The delta is what the same usage would have "
-                f"cost at API rates "
-                f"(${abs(savings):,.2f} {'saved' if savings >= 0 else 'over'})."
-            ),
+        )
+        st.caption(
+            f"${abs(savings):,.2f} {'saved' if savings >= 0 else 'over'} "
+            f"vs API rates this window"
         )
         return
 
@@ -200,19 +238,9 @@ def _render_window_cost_kpi(
     if prior_total and prior_total > 0:
         change = (api_window_cost - prior_total) / prior_total
         delta_kwargs["delta"] = f"{change:+.0%} vs prior {window_days}d"
-        # Inverse: positive cost delta paints red. More spend is not
-        # the good direction on a cost dashboard.
-        delta_kwargs["delta_color"] = "inverse"
-    st.metric(
-        "Window cost",
-        f"${api_window_cost:,.2f}",
-        help=(
-            "Sum of total_cost across every day in the selected date "
-            "range. Delta compares to the previous equivalent-length window."
-        ),
-        **delta_kwargs,
-    )
-    st.caption(f"last {window_days} days")
+        delta_kwargs["delta_color"] = "off"
+    st.metric("Window cost", f"${api_window_cost:,.2f}", **delta_kwargs)
+    st.caption(f"over the last {window_days} days")
 
 
 # --- insight summary -----------------------------------------------------
@@ -226,9 +254,12 @@ def _render_insight(
 ) -> None:
     """One-paragraph dynamic summary of what the window contains.
 
-    Composed from the same rollups the KPI cards display, plus the
-    spike-detection output. Renders inside a left-bordered callout
-    panel (CSS-driven) so the eye reads it as narrative, not metric."""
+    Numbers (dollar amounts, percentages) get wrapped in `<strong>`
+    via `bold_numbers_in_insight` so the eye lands on the figures
+    rather than the prose. Renders inside a left-bordered callout
+    panel (CSS-driven) so it reads as narrative, distinct from the
+    KPI cards.
+    """
     paragraph = overview_insight(
         window_total_cost=window_cost(daily_report),
         window_days=window_days,
@@ -236,8 +267,9 @@ def _render_insight(
         spike=spike,
         cache_hit_ratio=aggregate_cache_hit_ratio(daily_report),
     )
+    bolded = bold_numbers_in_insight(paragraph)
     st.markdown(
-        f'<div class="tokenscope-insight">{paragraph}</div>',
+        f'<div class="tokenscope-insight">{bolded}</div>',
         unsafe_allow_html=True,
     )
 
@@ -247,18 +279,13 @@ def _render_insight(
 
 def _render_cost_composition(daily_report: DailyReport) -> None:
     """Inline cost composition — section header + one-line subtitle +
-    breakdown table. Previously buried inside `st.expander`, which
-    framed it as optional drill-down content; it's actually the
-    most-cited number on the page and deserves first-class space.
+    breakdown table + total row.
 
-    Token counts use `format_compact_int` (4.9M / 1.6B) so cell widths
-    don't blow past the container. Tokens column is widened so the cost
-    column never clips on a narrow viewport — the prior 4-column
-    default-width pack clipped `Est. cost (USD)` off the right edge.
-
-    The estimate-vs-ccusage delta is dropped unless it exceeds the
-    display threshold — "-0.0%" was rounding noise that surfaced the
-    upstream library's name in user-facing copy for zero signal.
+    The table collapses sub-0.1%-share kinds into a single "other"
+    row so the share-bar column stays legible (a 0.004% slice
+    rendered as a zero-pixel bar adds no information). Token counts
+    use `format_compact_int` (4.9M / 1.6B). The estimate-vs-source
+    delta only renders when |diff| ≥ 1% — zero noise.
     """
     rows = cost_by_kind(daily_report)
     if not rows or all(r["tokens"] == 0 for r in rows):
@@ -269,33 +296,42 @@ def _render_cost_composition(daily_report: DailyReport) -> None:
     diff_pct = (
         (est_total - actual_total) / actual_total if actual_total else 0.0
     )
+    total_tokens = sum(r["tokens"] for r in rows)
+    collapsed = collapse_composition_rows(
+        rows, hide_threshold=_COMPOSITION_OTHER_THRESHOLD
+    )
 
     st.markdown("### Cost composition")
     st.caption(
-        "Estimate of where the window's spend went, by token kind. "
-        "Tokens × Anthropic's per-kind rate — cache reads are a small "
-        "fraction of input rate, output costs several times input, "
-        "so the mix matters more than the raw token total."
+        "Estimate of where the window's spend went, by token kind."
     )
 
-    df = pd.DataFrame(
-        [
-            {
-                "Kind": r["kind"],
-                "Tokens": format_compact_int(r["tokens"]),
-                "Est. cost (USD)": r["est_cost"],
-                "Share": r["share"] * 100,
-            }
-            for r in rows
-        ]
+    table_rows = [
+        {
+            "Kind": r["kind"],
+            "Tokens": format_compact_int(r["tokens"]),
+            "Est. cost (USD)": r["est_cost"],
+            "Share": r["share"] * 100,
+        }
+        for r in collapsed
+    ]
+    table_rows.append(
+        {
+            "Kind": "total",
+            "Tokens": format_compact_int(total_tokens),
+            "Est. cost (USD)": est_total,
+            "Share": 100.0,
+        }
     )
+
+    df = pd.DataFrame(table_rows)
     st.dataframe(
         df,
         width="stretch",
         hide_index=True,
         column_config={
             "Kind": st.column_config.TextColumn(width="small"),
-            "Tokens": st.column_config.TextColumn(width="medium"),
+            "Tokens": st.column_config.TextColumn(width="small"),
             "Est. cost (USD)": st.column_config.NumberColumn(
                 format="$%.2f", width="medium"
             ),
@@ -317,54 +353,86 @@ def _render_cost_trend(
     spike: tuple[str, float] | None,
 ) -> None:
     """Combined cost-by-family stacked area + 7-day rolling overlay,
-    with the spike day annotated. Clicking a point still drills into
-    the day view (PLAN.md §3.1)."""
-    st.markdown("### Daily cost")
-    st.caption(
-        "Stacked area = per-family raw daily cost. Dotted line is the "
-        "7-day rolling average. Click any day to drill into the detail view."
-    )
-    fig = cost_trend_with_rolling(
-        daily_report, rolling_window_days=7, spike=spike
-    )
-    if fig is None:
-        return
-    event = st.plotly_chart(
-        fig,
-        width="stretch",
-        key="overview-cost-trend",
-        on_select="rerun",
-        selection_mode=("points",),
-    )
-    handle_chart_drill(
-        event, lambda x: nav.to_day(x[:10]), chart_key="overview-cost-trend"
-    )
+    with the spike day annotated. Wrapped in a bordered container so
+    the chart reads as a card matching the KPI strip.
+
+    The annotation arrow is the source of truth for the spike date —
+    if the user reads a tick label and reaches a different date, the
+    annotation is what they should trust (Plotly's date-axis ticks
+    are spaced ~5 days apart, and the spike day will often fall
+    between labels).
+    """
+    with st.container(border=True):
+        st.markdown("### Daily cost")
+        st.caption(
+            "Stacked area = per-family raw daily cost. Dotted line is "
+            "the 7-day rolling average. Click any day to drill in."
+        )
+        fig = cost_trend_with_rolling(
+            daily_report, rolling_window_days=7, spike=spike
+        )
+        if fig is None:
+            return
+        event = st.plotly_chart(
+            fig,
+            width="stretch",
+            key="overview-cost-trend",
+            on_select="rerun",
+            selection_mode=("points",),
+        )
+        handle_chart_drill(
+            event, lambda x: nav.to_day(x[:10]), chart_key="overview-cost-trend"
+        )
+
+
+_NON_CACHE_TOGGLE_KEY = "overview-token-mix-include-cache-read"
 
 
 def _render_token_mix(daily_report: DailyReport, nav: Navigation) -> None:
-    """Percent-stacked token-mix bar. "Mix" is a composition question
-    — each day's bars sum to 100% so the user reads "what fraction of
-    each day went to input/output/cache_create/cache_read" directly.
-    Magnitude is one hover away via the bar's customdata."""
-    st.markdown("### Token mix")
-    st.caption(
-        "What fraction of each day's tokens went to input / output / "
-        "cache_create / cache_read. Each bar sums to 100%; absolute "
-        "token counts surface on hover."
-    )
-    fig = token_mix_percent_bar(daily_report)
-    if fig is None:
-        return
-    event = st.plotly_chart(
-        fig,
-        width="stretch",
-        key="overview-token-mix",
-        on_select="rerun",
-        selection_mode=("points",),
-    )
-    handle_chart_drill(
-        event, lambda x: nav.to_day(x[:10]), chart_key="overview-token-mix"
-    )
+    """Token-mix chart. Default renders the full percent-stacked bar
+    across all four kinds. A toggle below switches to the non-cache
+    re-base (input / output / cache_create only) so the variance
+    cache_read otherwise crushes becomes legible.
+
+    Both variants live in their own bordered card so the chart reads
+    as a peer of the KPI strip rather than as bare Plotly output.
+    """
+    with st.container(border=True):
+        st.markdown("### Token mix")
+        st.caption(
+            "What fraction of each day's tokens went to input / output / "
+            "cache_create / cache_read. Each bar sums to 100%; absolute "
+            "token counts surface on hover."
+        )
+        include_cache_read = st.toggle(
+            "Include cache_read",
+            value=True,
+            key=_NON_CACHE_TOGGLE_KEY,
+            help=(
+                "Cache reads typically dominate every bar (~99% of "
+                "tokens on Claude Code workloads), making the other "
+                "three kinds visually flat. Turn this off to re-base "
+                "on input / output / cache_create only — useful when "
+                "you want to see the non-cache variance."
+            ),
+        )
+        fig = (
+            token_mix_percent_bar(daily_report)
+            if include_cache_read
+            else token_mix_non_cache_percent_bar(daily_report)
+        )
+        if fig is None:
+            return
+        event = st.plotly_chart(
+            fig,
+            width="stretch",
+            key="overview-token-mix",
+            on_select="rerun",
+            selection_mode=("points",),
+        )
+        handle_chart_drill(
+            event, lambda x: nav.to_day(x[:10]), chart_key="overview-token-mix"
+        )
 
 
 # --- helpers -------------------------------------------------------------

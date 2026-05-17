@@ -24,16 +24,19 @@ from tokenscope.models import (
 )
 from tokenscope.ui.charts import (
     BRAND_HUE_SHADES,
+    TOKEN_KIND_COLORS,
     _daily_metric_figure,
     apply_enterprise_style,
     burn_gauge,
     cache_hit_ratio_line,
     cost_trend_with_rolling,
     donut_cost_by_model,
+    family_color_map,
     session_blocks_timeline,
     session_token_mix,
     single_family_token_bar,
     token_flow_sankey,
+    token_mix_non_cache_percent_bar,
     token_mix_percent_bar,
 )
 
@@ -196,23 +199,67 @@ def test_cost_trend_single_day_uses_bar_not_area() -> None:
     assert fig.layout.barmode == "stack"
 
 
-def test_cost_trend_brand_hue_palette_used() -> None:
-    """Family bands draw from the brand-hue shade sequence so the chart
-    stays in family-tonal territory rather than picking from Plotly's
-    default qualitative palette (which includes red)."""
+def test_cost_trend_uses_categorical_palette_via_color_map() -> None:
+    """Family bands draw from the categorical palette via an explicit
+    `family_color_map` so each family gets a distinct hue rather than
+    a tonal shade of one color. The mapping is positional on sorted
+    family names, so the test computes the expected color the same
+    way the chart does."""
     report = _report(
         [
             _entry("2026-05-15", cost=5.0, model="claude-opus-4-7"),
+            _entry("2026-05-15", cost=1.0, model="claude-haiku-4-5-20251001"),
             _entry("2026-05-16", cost=4.0, model="claude-opus-4-7"),
         ]
     )
     fig = cost_trend_with_rolling(report)
-    band = next(t for t in fig.data if t.name == "opus")
-    # The first family's fill color should match the first brand-hue shade.
-    fill = band.fillcolor if hasattr(band, "fillcolor") else None
-    line = band.line.color if hasattr(band, "line") and band.line else None
-    assert (fill in BRAND_HUE_SHADES) or (line in BRAND_HUE_SHADES), (
-        f"expected brand-hue color on `opus` band; got fill={fill!r} line={line!r}"
+    expected_colors = family_color_map(["opus", "haiku"])
+    for family in ("opus", "haiku"):
+        band = next(t for t in fig.data if t.name == family)
+        line_color = band.line.color if hasattr(band, "line") and band.line else None
+        fill_color = band.fillcolor if hasattr(band, "fillcolor") else None
+        assert line_color == expected_colors[family] or fill_color == expected_colors[family], (
+            f"family {family!r} expected color {expected_colors[family]!r}; "
+            f"got line={line_color!r} fill={fill_color!r}"
+        )
+
+
+def _trace_color(trace) -> str | None:
+    """Best-effort extraction of a trace's visual color across the
+    Plotly trace types we use (Scatter for area, Bar for fallback,
+    Scatter for line overlay). The exact attribute that carries the
+    rendered color varies — we check the common locations."""
+    if hasattr(trace, "line") and trace.line and trace.line.color:
+        return trace.line.color
+    if hasattr(trace, "marker") and trace.marker and trace.marker.color:
+        return trace.marker.color
+    return getattr(trace, "fillcolor", None)
+
+
+def test_cost_trend_distinct_family_colors_not_shades_of_one() -> None:
+    """Regression for the grayscale-palette bug: two families with
+    different names must get visually distinct hues, not adjacent
+    shades of the same color. Uses a multi-day fixture so the chart
+    builds as an area (where line.color carries the family hue),
+    not the single-day bar fallback."""
+    report = _report(
+        [
+            _entry("2026-05-14", cost=5.0, model="claude-opus-4-7"),
+            _entry("2026-05-14", cost=1.0, model="claude-haiku-4-5-20251001"),
+            _entry("2026-05-15", cost=4.0, model="claude-opus-4-7"),
+            _entry("2026-05-15", cost=2.0, model="claude-haiku-4-5-20251001"),
+        ]
+    )
+    fig = cost_trend_with_rolling(report)
+    family_colors: dict[str, str | None] = {}
+    for trace in fig.data:
+        if trace.name in {"opus", "haiku"}:
+            family_colors[trace.name] = _trace_color(trace)
+    assert None not in family_colors.values(), (
+        f"opus and haiku must have explicit colors; got {family_colors!r}"
+    )
+    assert len(set(family_colors.values())) == 2, (
+        f"opus and haiku must use distinct hues; got {family_colors!r}"
     )
 
 
@@ -275,6 +322,357 @@ def test_token_mix_percent_uses_stack_not_overlay() -> None:
 
 def test_token_mix_percent_empty_returns_none() -> None:
     assert token_mix_percent_bar(_report([])) is None
+
+
+# ---------- regression: no `undefined` trace from edge-case data ---------
+#
+# The Daily-cost and Token-mix charts shipped to the user with a literal
+# `undefined` legend entry. Root cause: when the data contained a
+# category not anticipated by the classifier (e.g. a new model id whose
+# family suffix the classifier returned empty for, or a stray token-kind
+# row), `color_discrete_sequence=` would emit a Plotly trace whose name
+# stringified to `undefined` in the JS legend.
+#
+# These tests assert the post-fix contract: regardless of what the data
+# layer throws at the chart builders, the resulting figures contain only
+# traces whose names are in the documented allowed set. They run against
+# pathological fixtures (unknown model, blank model, empty modelsUsed,
+# entirely-foreign model) so a future regression in the classifier or
+# data emitter can't silently slip the bug back in.
+
+
+def _entry_with_models(
+    date_str: str, models: list[str], cost_per_model: float = 1.0
+) -> DailyEntry:
+    """Build a DailyEntry whose model_breakdowns reflect `models`
+    one-to-one. Used to construct pathological-input scenarios for
+    the regression tests."""
+    breakdowns = [
+        ModelBreakdown(
+            modelName=m,
+            inputTokens=10,
+            outputTokens=20,
+            cacheCreationTokens=30,
+            cacheReadTokens=40,
+            cost=cost_per_model,
+        )
+        for m in models
+    ]
+    return DailyEntry(
+        date=date_str,
+        inputTokens=10 * max(len(models), 1),
+        outputTokens=20 * max(len(models), 1),
+        cacheCreationTokens=30 * max(len(models), 1),
+        cacheReadTokens=40 * max(len(models), 1),
+        totalTokens=100 * max(len(models), 1),
+        totalCost=cost_per_model * max(len(models), 1),
+        modelsUsed=models,
+        modelBreakdowns=breakdowns,
+    )
+
+
+_PATHOLOGICAL_DAILY_FIXTURES = {
+    "clean_two_families": [
+        _entry_with_models("2026-05-15", ["claude-opus-4-7"], 5.0),
+        _entry_with_models("2026-05-15", ["claude-haiku-4-5-20251001"], 1.0),
+        _entry_with_models("2026-05-16", ["claude-opus-4-7"], 3.0),
+    ],
+    "deprecated_family_alongside_current": [
+        _entry_with_models("2026-05-15", ["claude-opus-4-7"], 5.0),
+        _entry_with_models("2026-05-15", ["claude-opus-4-6"], 4.0),
+        _entry_with_models("2026-05-16", ["claude-haiku-4-5-20251001"], 1.0),
+    ],
+    "third_family_beyond_active_filter": [
+        _entry_with_models("2026-05-15", ["claude-opus-4-7"], 5.0),
+        _entry_with_models("2026-05-15", ["claude-haiku-4-5-20251001"], 1.0),
+        _entry_with_models("2026-05-16", ["claude-sonnet-4-5-20251022"], 2.0),
+    ],
+    "unknown_future_model_id": [
+        _entry_with_models("2026-05-15", ["claude-opus-4-7"], 5.0),
+        _entry_with_models(
+            "2026-05-16",
+            ["some-future-model-anthropic-hasnt-shipped-yet"],
+            2.0,
+        ),
+    ],
+    "blank_model_id_slipped_through": [
+        _entry_with_models("2026-05-15", ["claude-opus-4-7"], 5.0),
+        _entry_with_models("2026-05-16", [""], 1.0),
+    ],
+}
+
+
+@pytest.mark.parametrize("fixture_name", list(_PATHOLOGICAL_DAILY_FIXTURES))
+def test_cost_trend_chart_has_no_undefined_trace(fixture_name: str) -> None:
+    """Regression for the `undefined` legend entry on Daily cost.
+
+    Across every pathological input (deprecated family, third family,
+    totally-unknown model id, blank id), the chart must produce traces
+    whose names are real human-readable strings — never `"undefined"`,
+    never `None`, never `""`."""
+    entries = _PATHOLOGICAL_DAILY_FIXTURES[fixture_name]
+    fig = cost_trend_with_rolling(_report(entries))
+    assert fig is not None, f"chart must render for fixture {fixture_name!r}"
+    names = [t.name for t in fig.data]
+    for name in names:
+        assert name is not None, (
+            f"[{fixture_name}] trace with None name: {names!r}"
+        )
+        assert name != "", (
+            f"[{fixture_name}] trace with empty-string name: {names!r}"
+        )
+        assert name.lower() != "undefined", (
+            f"[{fixture_name}] `undefined` trace leaked: {names!r}"
+        )
+        assert name.lower() != "nan", (
+            f"[{fixture_name}] `nan` trace leaked: {names!r}"
+        )
+
+
+@pytest.mark.parametrize("fixture_name", list(_PATHOLOGICAL_DAILY_FIXTURES))
+def test_token_mix_chart_has_exactly_four_documented_kinds(
+    fixture_name: str,
+) -> None:
+    """Regression for the `undefined` legend entry on Token mix.
+
+    Token kinds are a fixed enum at the data layer (`daily_token_mix`
+    emits only the four). The chart's defensive `isin(TOKEN_KIND_LABELS)`
+    filter is belt-and-braces — even if a future emitter drift added a
+    5th kind row, the chart wouldn't paint it. Assert here that the
+    chart's trace set is exactly the documented four regardless of
+    what model-id pathology the input has."""
+    entries = _PATHOLOGICAL_DAILY_FIXTURES[fixture_name]
+    fig = token_mix_percent_bar(_report(entries))
+    assert fig is not None, f"chart must render for fixture {fixture_name!r}"
+    names = {t.name for t in fig.data}
+    assert names == {"input", "output", "cache_create", "cache_read"}, (
+        f"[{fixture_name}] expected exactly the four kinds; got {names!r}"
+    )
+
+
+def test_token_mix_returns_none_when_all_kinds_unknown() -> None:
+    """Defensive edge case: if a future schema drift made *every* row
+    carry an unknown kind, the filter would empty the df entirely.
+    Returning None lets the caller render an empty state instead of
+    a blank Plotly canvas."""
+    import tokenscope.ui.charts as charts_module
+
+    real_daily_token_mix = charts_module.daily_token_mix
+    charts_module.daily_token_mix = lambda _report: [
+        {"date": "2026-05-16", "kind": "experimental", "tokens": 100},
+        {"date": "2026-05-16", "kind": "phantom", "tokens": 200},
+    ]
+    try:
+        report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
+        fig = token_mix_percent_bar(report)
+    finally:
+        charts_module.daily_token_mix = real_daily_token_mix
+    assert fig is None
+
+
+def test_token_mix_chart_filters_unknown_kinds_defensively() -> None:
+    """If a future schema drift introduced a 5th kind row, the chart's
+    `isin(TOKEN_KIND_LABELS)` filter would drop it before reaching
+    Plotly. Verified by mocking `daily_token_mix` to emit a phantom
+    `"experimental"` kind alongside the four real ones."""
+    import tokenscope.ui.charts as charts_module
+
+    real_daily_token_mix = charts_module.daily_token_mix
+
+    def spiked(daily_report):
+        rows = real_daily_token_mix(daily_report)
+        if rows:
+            rows.append(
+                {"date": rows[0]["date"], "kind": "experimental", "tokens": 999}
+            )
+        return rows
+
+    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
+    charts_module.daily_token_mix = spiked
+    try:
+        fig = token_mix_percent_bar(report)
+    finally:
+        charts_module.daily_token_mix = real_daily_token_mix
+    names = {t.name for t in fig.data}
+    assert "experimental" not in names, (
+        f"defensive filter failed — `experimental` reached Plotly: {names!r}"
+    )
+    assert names == {"input", "output", "cache_create", "cache_read"}
+
+
+# ---------- categorical palette ----------
+
+
+def test_token_kind_colors_are_distinct_hues() -> None:
+    """Categorical data needs distinguishable hues, not shades of one.
+    The four kinds must map to four different colors — adjacent grays
+    were the previous palette bug."""
+    colors = set(TOKEN_KIND_COLORS.values())
+    assert len(colors) == 4, f"TOKEN_KIND_COLORS must be 4 distinct; got {TOKEN_KIND_COLORS!r}"
+
+
+def test_family_color_map_assigns_distinct_colors_to_distinct_families() -> None:
+    mapping = family_color_map(["opus", "haiku", "sonnet"])
+    assert len(set(mapping.values())) == 3
+    assert all(c.startswith("#") for c in mapping.values())
+
+
+def test_family_color_map_stable_under_input_order() -> None:
+    """Sorting the input means `family_color_map(["opus", "haiku"])`
+    and `family_color_map(["haiku", "opus"])` agree on which hue each
+    family gets — successive renders never reshuffle colors."""
+    assert family_color_map(["opus", "haiku"]) == family_color_map(
+        ["haiku", "opus"]
+    )
+
+
+def test_family_color_map_falls_back_to_neutral_for_blank() -> None:
+    """A blank family name (defensive case) gets a neutral gray —
+    never an empty-string color that browsers would render as
+    transparent / default."""
+    mapping = family_color_map([""])
+    assert mapping[""].startswith("#")
+
+
+def test_family_color_map_known_families_get_canonical_colors() -> None:
+    """`opus` / `sonnet` / `haiku` always get the same hue regardless
+    of which other families are in the window. Users build muscle
+    memory — "opus is the indigo band" — and that breaks if the same
+    family gets a different color across renders."""
+    full = family_color_map(["opus", "sonnet", "haiku"])
+    partial_oh = family_color_map(["opus", "haiku"])
+    partial_os = family_color_map(["opus", "sonnet"])
+    just_haiku = family_color_map(["haiku"])
+
+    assert full["opus"] == partial_oh["opus"] == partial_os["opus"]
+    assert full["haiku"] == partial_oh["haiku"] == just_haiku["haiku"]
+    assert full["sonnet"] == partial_os["sonnet"]
+    # And the three canonical colors are distinct.
+    assert len({full["opus"], full["sonnet"], full["haiku"]}) == 3
+
+
+def test_family_color_map_unknown_family_gets_palette_fallback() -> None:
+    """A future Anthropic family Anthropic hasn't shipped yet — or a
+    non-Claude model id like `gpt-4o` — gets a palette color that's
+    distinct from the three branded slots."""
+    mapping = family_color_map(["opus", "future-family-x"])
+    assert mapping["opus"] != mapping["future-family-x"]
+    assert mapping["future-family-x"].startswith("#")
+
+
+def test_family_color_map_unknown_sentinel_gets_neutral() -> None:
+    """The `UNKNOWN_MODEL_FAMILY` ("other") sentinel renders neutral
+    gray so the band visually reads as "uncategorised", not as a
+    peer of the branded Anthropic families."""
+    from tokenscope.analytics import UNKNOWN_MODEL_FAMILY
+
+    mapping = family_color_map(["opus", UNKNOWN_MODEL_FAMILY])
+    assert mapping[UNKNOWN_MODEL_FAMILY] != mapping["opus"]
+    # The same neutral color is used as for blank families.
+    assert mapping[UNKNOWN_MODEL_FAMILY] == family_color_map([""])[""]
+
+
+def test_token_mix_non_cache_renders_three_kinds_only() -> None:
+    """Non-cache mini chart excludes cache_read so the variance the
+    main token-mix crushes becomes legible. Exactly three traces,
+    each rebased to the non-cache subtotal."""
+    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
+    fig = token_mix_non_cache_percent_bar(report)
+    assert isinstance(fig, go.Figure)
+    names = {t.name for t in fig.data}
+    assert names == {"input", "output", "cache_create"}
+    # Each day's three bars sum to 100% (non-cache total = 100%).
+    day_total = sum(float(t.y[0]) for t in fig.data)
+    assert day_total == pytest.approx(100.0, abs=0.01)
+
+
+def test_token_mix_non_cache_uses_stack_mode() -> None:
+    report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
+    fig = token_mix_non_cache_percent_bar(report)
+    assert fig.layout.barmode == "stack"
+    assert list(fig.layout.yaxis.range) == [0, 100]
+
+
+def test_token_mix_non_cache_empty_returns_none() -> None:
+    assert token_mix_non_cache_percent_bar(_report([])) is None
+
+
+def test_token_mix_non_cache_returns_none_when_no_non_cache_tokens() -> None:
+    """If every entry has zero input/output/cache_create tokens, the
+    chart would render all-zero bars — the empty state is better
+    surfaced as a caption by the caller. Return None."""
+    cache_only_entry = DailyEntry(
+        date="2026-05-16",
+        inputTokens=0,
+        outputTokens=0,
+        cacheCreationTokens=0,
+        cacheReadTokens=1_000_000,
+        totalTokens=1_000_000,
+        totalCost=1.0,
+        modelsUsed=["claude-opus-4-7"],
+        modelBreakdowns=[
+            ModelBreakdown(
+                modelName="claude-opus-4-7",
+                inputTokens=0,
+                outputTokens=0,
+                cacheCreationTokens=0,
+                cacheReadTokens=1_000_000,
+                cost=1.0,
+            )
+        ],
+    )
+    report = DailyReport(
+        daily=[cache_only_entry],
+        totals=Totals(
+            inputTokens=0,
+            outputTokens=0,
+            cacheCreationTokens=0,
+            cacheReadTokens=1_000_000,
+            totalTokens=1_000_000,
+            totalCost=1.0,
+        ),
+    )
+    assert token_mix_non_cache_percent_bar(report) is None
+
+
+@pytest.mark.parametrize("fixture_name", list(_PATHOLOGICAL_DAILY_FIXTURES))
+def test_token_mix_non_cache_chart_has_no_undefined_trace(
+    fixture_name: str,
+) -> None:
+    """Same `undefined`-regression contract as the main chart: across
+    every pathological input, the non-cache chart's traces must be
+    exactly the documented three kinds."""
+    entries = _PATHOLOGICAL_DAILY_FIXTURES[fixture_name]
+    fig = token_mix_non_cache_percent_bar(_report(entries))
+    if fig is None:
+        return  # fixture's tokens were all-cache_read — acceptable
+    names = {t.name for t in fig.data}
+    assert names == {"input", "output", "cache_create"}, (
+        f"[{fixture_name}] non-cache chart got unexpected traces: {names!r}"
+    )
+
+
+def test_cost_trend_with_every_known_anthropic_family_renders_distinctly() -> None:
+    """A future user runs with all three currently-known Anthropic
+    families (opus + sonnet + haiku) in the same window. Every family
+    must get a distinct, real color — no `undefined` even with three
+    bands stacked."""
+    report = _report(
+        [
+            _entry("2026-05-14", cost=5.0, model="claude-opus-4-7"),
+            _entry("2026-05-14", cost=3.0, model="claude-sonnet-4-6"),
+            _entry("2026-05-14", cost=1.0, model="claude-haiku-4-5-20251001"),
+            _entry("2026-05-15", cost=4.0, model="claude-opus-4-7"),
+            _entry("2026-05-15", cost=2.0, model="claude-sonnet-4-6"),
+            _entry("2026-05-15", cost=0.5, model="claude-haiku-4-5-20251001"),
+        ]
+    )
+    fig = cost_trend_with_rolling(report)
+    family_traces = {t.name: t for t in fig.data if t.name in {"opus", "sonnet", "haiku"}}
+    assert set(family_traces.keys()) == {"opus", "sonnet", "haiku"}
+    colors = {name: _trace_color(t) for name, t in family_traces.items()}
+    assert None not in colors.values()
+    assert len(set(colors.values())) == 3, f"three families need three hues; got {colors!r}"
 
 
 def test_token_mix_percent_zero_day_has_zero_percents() -> None:

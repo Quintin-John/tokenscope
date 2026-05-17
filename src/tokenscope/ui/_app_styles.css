@@ -108,7 +108,9 @@ main h1 + [data-testid="stCaptionContainer"] {
 
 /* ---------- Insight summary callout ----------
  * Left-bordered panel; distinct from KPI cards so the eye reads it
- * as narrative.
+ * as narrative. Embedded `<strong>` tags are wrapped around dollar
+ * amounts and percentages by `analytics.bold_numbers_in_insight` —
+ * the eye lands on the figures.
  */
 .tokenscope-insight {
     border-left: 3px solid #475569;
@@ -117,6 +119,23 @@ main h1 + [data-testid="stCaptionContainer"] {
     line-height: 1.55;
     margin: 0.75rem 0 1.5rem 0;
     font-size: 0.95rem;
+}
+.tokenscope-insight strong {
+    color: #0f172a;
+    font-weight: 600;
+    font-size: 1.04em;
+}
+
+/* ---------- Page refresh stamp ----------
+ * Right-aligned `Updated HH:MM:SS` caption in the page header so
+ * users know when the data on screen was last fetched. Sits in the
+ * narrow right column of a 4:1 split next to the H1.
+ */
+.tokenscope-page-refresh {
+    text-align: right;
+    color: #64748b;
+    font-size: 0.8rem;
+    margin-top: 1.5rem;
 }
 
 /* ---------- Hide Streamlit's "Made with Streamlit" footer ----------

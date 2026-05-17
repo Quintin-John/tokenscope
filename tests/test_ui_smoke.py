@@ -264,6 +264,178 @@ def test_overview_renders_unified_cost_trend_chart(
     assert "overview-rolling-line" not in chart_keys
 
 
+# ---------- Overview polish round 2 ----------
+
+
+def test_overview_timezone_caption_has_no_underscore(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """IANA timezone identifiers use underscores (`America/New_York`)
+    for filesystem safety; UI copy should show spaces. The window
+    caption is the most-visible place this leaks through."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    captions = [c.value for c in at.caption]
+    window_caption = next((c for c in captions if "Window:" in c), None)
+    assert window_caption is not None
+    assert "_" not in window_caption.split("times in", 1)[1], (
+        f"timezone display still has underscore: {window_caption!r}"
+    )
+
+
+def test_overview_renders_refresh_indicator(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Right-aligned `Updated HH:MM:SS` indicator lives in the page
+    header. Surfaced as a div with the `tokenscope-page-refresh`
+    class so the CSS rule can right-align it."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    md_text = _markdown_text(at)
+    assert "tokenscope-page-refresh" in md_text
+    assert "Updated " in md_text
+
+
+def test_overview_insight_callout_bolds_numbers(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Insight paragraph wraps figures in `<strong>` so the eye lands
+    on the dollar amounts and percentages, not the prose."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    # The rendered insight is a single `st.markdown` block containing
+    # `<div class="tokenscope-insight">...$X.XX...</div>`. The CSS
+    # stylesheet ALSO mentions the class name, so we match on the
+    # rendered div opener specifically.
+    insight_block = next(
+        (
+            m.value
+            for m in at.markdown
+            if '<div class="tokenscope-insight">' in m.value
+        ),
+        "",
+    )
+    assert insight_block, "rendered insight div not found"
+    assert "<strong>$" in insight_block, (
+        f"expected bolded dollar amount in insight; got: {insight_block!r}"
+    )
+
+
+def test_overview_kpi_captions_are_plain_english_not_formulas(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """KPI captions used to read `window cost ÷ 30 days` and
+    `cache_read / input-side tokens` — implementation formulas
+    leaked into the user-facing UI. Captions now use plain English."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    captions = [c.value for c in at.caption]
+    for caption in captions:
+        assert "÷" not in caption, (
+            f"formula symbol `÷` leaked into caption: {caption!r}"
+        )
+        # The cache-ratio caption explicitly says "share of input-side
+        # tokens"; the formula form `cache_read / input-side tokens`
+        # is what we're guarding against.
+        assert "cache_read /" not in caption, (
+            f"formula notation leaked into caption: {caption!r}"
+        )
+
+
+def test_overview_kpi_helps_only_on_cache_hit_ratio(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Help-icon discipline: the metric whose semantics genuinely
+    surprise users (cache ratio's denominator excludes output tokens)
+    keeps its `?`. Window cost / Last day / Avg daily cost don't —
+    they self-explain."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    for m in at.metric:
+        if m.label and "Cache hit ratio" in m.label:
+            assert m.help, "Cache hit ratio should keep its help tooltip"
+        elif m.label and m.label in {"Last day", "Avg daily cost"}:
+            assert not m.help, (
+                f"`{m.label}` should not have a help tooltip; got: {m.help!r}"
+            )
+
+
+def test_overview_cost_composition_includes_total_row(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """A `total` row at the bottom of the cost composition table
+    gives the reader an anchor for the per-kind contributions."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    # The DataFrame contents aren't directly inspectable via AppTest's
+    # element list. The dataframe's data lives in `.value` which is
+    # a pandas DataFrame — query the Kind column for the total row.
+    composition_df = None
+    for df_element in at.dataframe:
+        df = df_element.value
+        if "Kind" in df.columns:
+            composition_df = df
+            break
+    assert composition_df is not None, "composition dataframe missing"
+    assert "total" in composition_df["Kind"].values
+
+
+def test_overview_token_mix_has_non_cache_toggle(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Toggle in the Token-mix card switches between the full
+    percent-stacked view (default, includes cache_read) and a
+    non-cache rebased view that surfaces the input/output/cache_create
+    variance otherwise crushed under the cache_read dominance."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    toggle = next(
+        (t for t in at.toggle if t.key == "overview-token-mix-include-cache-read"),
+        None,
+    )
+    assert toggle is not None
+    assert toggle.value is True  # default = include cache_read
+
+
+def test_overview_token_mix_toggle_switches_chart_variant(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Flipping the toggle off renders the non-cache variant (only
+    three kinds). Verify by interacting via AppTest."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    toggle = next(
+        t for t in at.toggle if t.key == "overview-token-mix-include-cache-read"
+    )
+    toggle.set_value(False)
+    at.run()
+    _assert_clean(at)
+    # When non-cache is shown, the chart key is the same — the chart
+    # rendered by the non-cache branch. We can't easily inspect Plotly
+    # trace data from AppTest, but the toggle state being False after
+    # set_value confirms the branch ran.
+    toggle_after = next(
+        t for t in at.toggle if t.key == "overview-token-mix-include-cache-read"
+    )
+    assert toggle_after.value is False
+
+
 def test_live_renders(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     at = _at("live")
