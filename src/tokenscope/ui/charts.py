@@ -26,20 +26,24 @@ from tokenscope.models import BlockEntry, DailyEntry, DailyReport, SessionEntry
 
 
 def stacked_area_cost_by_family(daily_report: DailyReport) -> go.Figure | None:
-    """Stacked area: per-day cost, coloured by model family (opus/haiku/...)."""
+    """Stacked area: per-day cost, coloured by model family (opus/haiku/...).
+
+    Single-day windows fall back to a stacked bar — `px.area` paints a
+    zero-width band when there's only one x-value, so the chart appears
+    blank even though the data is there.
+    """
     rows = daily_cost_by_model(daily_report)
     if not rows:
         return None
     df = pd.DataFrame(rows)
     # Collapse same-day-same-family into one row so the area is a single band per family.
     grouped = df.groupby(["date", "family"], as_index=False)["cost"].sum()
-    fig = px.area(
-        grouped,
-        x="date",
-        y="cost",
-        color="family",
-        labels={"date": "Date", "cost": "Cost (USD)", "family": "Model family"},
-    )
+    labels = {"date": "Date", "cost": "Cost (USD)", "family": "Model family"}
+    if grouped["date"].nunique() == 1:
+        fig = px.bar(grouped, x="date", y="cost", color="family", labels=labels)
+        fig.update_layout(barmode="stack")
+    else:
+        fig = px.area(grouped, x="date", y="cost", color="family", labels=labels)
     fig.update_layout(
         margin=dict(l=10, r=10, t=30, b=10),
         legend_title_text="",
@@ -49,18 +53,21 @@ def stacked_area_cost_by_family(daily_report: DailyReport) -> go.Figure | None:
 
 
 def rolling_average_line(daily_report: DailyReport, window_days: int = 7) -> go.Figure | None:
-    """7-day rolling average of daily cost as a line chart."""
+    """7-day rolling average of daily cost as a line chart.
+
+    Single-day windows fall back to a bar — a one-point line is just a
+    marker dot that is easy to miss next to a $-axis.
+    """
     points = rolling_cost_average(daily_report, window_days=window_days)
     if not points:
         return None
     df = pd.DataFrame(points, columns=["date", "avg_cost"])
-    fig = px.line(
-        df,
-        x="date",
-        y="avg_cost",
-        labels={"date": "Date", "avg_cost": f"{window_days}-day avg cost (USD)"},
-    )
-    fig.update_traces(mode="lines+markers")
+    labels = {"date": "Date", "avg_cost": f"{window_days}-day avg cost (USD)"}
+    if len(df) == 1:
+        fig = px.bar(df, x="date", y="avg_cost", labels=labels)
+    else:
+        fig = px.line(df, x="date", y="avg_cost", labels=labels)
+        fig.update_traces(mode="lines+markers")
     fig.update_layout(
         margin=dict(l=10, r=10, t=30, b=10),
         yaxis_tickprefix="$",

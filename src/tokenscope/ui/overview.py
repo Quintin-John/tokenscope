@@ -230,13 +230,16 @@ def _render_cost_composition(daily_report) -> None:
             "The estimate can differ from ccusage's reported total when "
             "promotional discounts or model-version pricing nuance apply."
         )
+        # ProgressColumn's `format` string is applied to the raw value with no
+        # implicit ×100 — so a 0–1 fraction with format "%.1f%%" renders as
+        # "0.6%" instead of "65.0%". Pre-multiply and widen min/max to 100.
         df = pd.DataFrame(
             [
                 {
                     "Kind": r["kind"],
                     "Tokens": r["tokens"],
                     "Est. cost (USD)": r["est_cost"],
-                    "Share": r["share"],
+                    "Share": r["share"] * 100,
                 }
                 for r in rows
             ]
@@ -249,7 +252,7 @@ def _render_cost_composition(daily_report) -> None:
                 "Tokens": st.column_config.NumberColumn(format="%d"),
                 "Est. cost (USD)": st.column_config.NumberColumn(format="$%.2f"),
                 "Share": st.column_config.ProgressColumn(
-                    min_value=0.0, max_value=1.0, format="%.1f%%"
+                    min_value=0.0, max_value=100.0, format="%.1f%%"
                 ),
             },
         )
