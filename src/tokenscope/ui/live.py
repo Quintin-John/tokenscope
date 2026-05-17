@@ -50,18 +50,18 @@ def render(state: SidebarState, nav: Navigation) -> None:
         "5-hour billing window."
     )
 
-    _live_panel(offline=state.query.offline)
+    _live_panel(offline=state.query.offline, tz=state.query.tz)
 
 
 @st.fragment(run_every=REFRESH_SECONDS)
-def _live_panel(offline: bool) -> None:
+def _live_panel(offline: bool, tz: str | None = None) -> None:
     """The actual live panel. Args must be hashable so Streamlit can key the
-    fragment; a single bool is fine."""
+    fragment; a bool + string are fine."""
     refreshed_at = datetime.now()
     try:
         # Fetch all blocks so we can both pick the active one and compute
         # the typical-burn baseline from completed blocks in a single call.
-        report = ccusage.blocks(active=False, query=Query(offline=offline))
+        report = ccusage.blocks(active=False, query=Query(offline=offline, tz=tz))
     except CcusageError as exc:
         st.error(f"ccusage failed:\n\n```\n{exc}\n```")
         return
@@ -116,10 +116,20 @@ def _live_panel(offline: bool) -> None:
     else:
         c4.metric("Projected total", "—")
 
-    st.caption(
-        f"Window {active.start_time} → {active.end_time} (UTC). "
-        f"Models: {', '.join(active.models) or '—'}."
-    )
+    if tz:
+        from tokenscope.tz import utc_iso_to_local
+
+        start_disp = utc_iso_to_local(active.start_time, tz) or active.start_time
+        end_disp = utc_iso_to_local(active.end_time, tz) or active.end_time
+        st.caption(
+            f"Window {start_disp} → {end_disp}. "
+            f"Models: {', '.join(active.models) or '—'}."
+        )
+    else:
+        st.caption(
+            f"Window {active.start_time} → {active.end_time} (UTC). "
+            f"Models: {', '.join(active.models) or '—'}."
+        )
 
     gauge = burn_gauge(active, typical=typical)
     if gauge is not None:

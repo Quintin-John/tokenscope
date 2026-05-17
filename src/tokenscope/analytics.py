@@ -200,18 +200,37 @@ def sessions_on_day(session_report: SessionReport, day: str) -> list[SessionEntr
     return [s for s in session_report.sessions if s.last_activity == day]
 
 
-def blocks_on_day(blocks_report: BlocksReport, day: str) -> list[BlockEntry]:
-    """Non-gap blocks whose `startTime` falls on `day` (YYYY-MM-DD, UTC).
+def blocks_on_day(
+    blocks_report: BlocksReport, day: str, tz: str | None = None
+) -> list[BlockEntry]:
+    """Non-gap blocks whose local-zone start-of-day matches ``day``.
 
-    `startTime` is ISO 8601 with a `Z` suffix, so prefix comparison works
-    against `YYYY-MM-DD`. Gap blocks are filtered out — they don't carry
-    real usage and would clutter the table.
+    Block timestamps are UTC ISO regardless of ccusage's `--timezone`
+    flag (only ccusage's daily / weekly / monthly bucketing honours it).
+    For "which blocks started on YYYY-MM-DD?" the comparison must happen
+    in the user's local zone, otherwise a PST user sees yesterday's
+    blocks under tomorrow's date.
+
+    When ``tz`` is None, fall back to the legacy UTC-prefix match so
+    pre-slice-14 callers still work.
+
+    Gap blocks are always excluded — they don't carry real usage.
     """
-    return [
-        b
-        for b in blocks_report.blocks
-        if not b.is_gap and b.start_time.startswith(day)
-    ]
+    # Local import — `tz.py` reads /etc/localtime, which we don't want at
+    # analytics module load time. utc_iso_to_local_date is pure.
+    from tokenscope.tz import utc_iso_to_local_date
+
+    out: list[BlockEntry] = []
+    for b in blocks_report.blocks:
+        if b.is_gap:
+            continue
+        if tz is None:
+            local_day = b.start_time[:10]
+        else:
+            local_day = utc_iso_to_local_date(b.start_time, tz) or b.start_time[:10]
+        if local_day == day:
+            out.append(b)
+    return out
 
 
 def find_session(session_report: SessionReport, session_id: str) -> SessionEntry | None:

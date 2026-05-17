@@ -32,6 +32,7 @@ from tokenscope.analytics import (
 from tokenscope.ccusage import CcusageError
 from tokenscope.plans import Plan, get_plan, plan_names
 from tokenscope.query import Query
+from tokenscope.tz import detect_local_iana
 
 
 DEFAULT_RANGE_DAYS = 30
@@ -70,6 +71,7 @@ def _to_ccusage_date(d: date | None) -> str | None:
 def render(today: date | None = None) -> SidebarState:
     today = today or date.today()
     default_start = today - timedelta(days=DEFAULT_RANGE_DAYS - 1)
+    local_tz = detect_local_iana()
 
     with st.sidebar:
         st.markdown("### Filters")
@@ -105,6 +107,7 @@ def render(today: date | None = None) -> SidebarState:
             since=_to_ccusage_date(since_date),
             until=_to_ccusage_date(until_date),
             offline=offline,
+            tz=local_tz,
         )
 
         model_options: list[str] = []
@@ -178,12 +181,18 @@ def render(today: date | None = None) -> SidebarState:
                 st.session_state.pop(k, None)
             st.rerun()
 
+        st.caption(
+            f"Times in `{local_tz}` (auto-detected). Override with the `TZ` "
+            "env var if it's wrong."
+        )
+
     return SidebarState(
         query=Query(
             since=_to_ccusage_date(since_date),
             until=_to_ccusage_date(until_date),
             project=project_value,
             offline=offline,
+            tz=local_tz,
         ),
         plan=get_plan(plan_name),
         selected_models=tuple(selected_models),

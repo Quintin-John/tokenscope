@@ -42,9 +42,24 @@ def render(state: SidebarState, nav: Navigation) -> None:
     else:
         c4.metric("$/hr", "—")
 
+    tz = state.query.tz
+    if tz:
+        # Local import — tz module is OS-touching and lives outside analytics.
+        from tokenscope.tz import utc_iso_to_local
+
+        start_disp = utc_iso_to_local(block.start_time, tz) or block.start_time
+        end_disp = utc_iso_to_local(block.end_time, tz) or block.end_time
+        ended_disp = (
+            utc_iso_to_local(block.actual_end_time, tz) or block.actual_end_time
+            if block.actual_end_time
+            else None
+        )
+    else:
+        start_disp, end_disp = block.start_time, block.end_time
+        ended_disp = block.actual_end_time
     st.caption(
-        f"Window {block.start_time} → {block.end_time}"
-        + (f" (ended {block.actual_end_time})" if block.actual_end_time else "")
+        f"Window {start_disp} → {end_disp}"
+        + (f" (ended {ended_disp})" if ended_disp else "")
     )
 
     st.divider()
