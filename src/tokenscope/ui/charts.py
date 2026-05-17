@@ -6,6 +6,14 @@ are unit-testable: build a figure, assert its traces / data look right.
 
 When the report has no entries, builders return `None` — the UI layer
 renders an empty-state message instead of an empty chart.
+
+Every chart adopts an `enterprise` visual style via
+``apply_enterprise_style(fig)``: no in-chart title (the section H3
+above the chart carries that), no axis titles (ticks are
+self-evident), system-stack font, light dotted horizontal gridlines
+only, styled hover tooltip, brand-accent palette. Adding a new chart
+means building the figure and ending with
+``return apply_enterprise_style(fig)`` — no per-chart style duplication.
 """
 
 from __future__ import annotations
@@ -25,6 +33,95 @@ from tokenscope.analytics import (
     token_flow_sankey_data,
 )
 from tokenscope.models import BlockEntry, DailyEntry, DailyReport, SessionEntry
+
+
+# --- enterprise chart style ----------------------------------------------
+
+# System font stack — matches what most browsers render for native UI
+# without needing a web-font import. Keeps Plotly figures visually
+# consistent with the surrounding Streamlit page.
+_ENTERPRISE_FONT_FAMILY = (
+    "-apple-system, BlinkMacSystemFont, 'Segoe UI', "
+    "Roboto, 'Helvetica Neue', Arial, sans-serif"
+)
+
+# Brand-hue shade palette — discrete sequence used as the color
+# scheme for every multi-series Overview chart. Shades of slate-indigo
+# (matches `.streamlit/config.toml [theme] primaryColor`). Darker first
+# so single-series charts pick the most-saturated shade and stacked
+# charts get a tonal cascade. Red is deliberately absent — reserved
+# for warnings.
+BRAND_HUE_SHADES: tuple[str, ...] = (
+    "#0f172a",  # slate-900 (darkest)
+    "#475569",  # slate-600 (brand accent)
+    "#94a3b8",  # slate-400
+    "#cbd5e1",  # slate-300
+    "#e2e8f0",  # slate-200 (lightest)
+)
+
+# Neutral grays for text + gridlines, sourced from the same Tailwind
+# slate scale as the brand shades so everything stays in family.
+_TEXT_PRIMARY = "#0f172a"
+_TEXT_MUTED = "#64748b"
+_GRID_COLOR = "rgba(15, 23, 42, 0.06)"
+_BORDER_COLOR = "#e2e8f0"
+
+
+def apply_enterprise_style(fig: go.Figure) -> go.Figure:
+    """Apply the shared Overview chart styling. Idempotent.
+
+    Drops the in-chart title (the section H3 above the chart owns
+    that), drops both axis titles (the ticks are self-evident),
+    switches the font to the system stack, replaces the busy default
+    gridlines with light dotted horizontals only (no vertical, no
+    axis spines), and replaces Plotly's default tooltip with a
+    bordered branded card.
+    """
+    fig.update_layout(
+        title=None,
+        font=dict(family=_ENTERPRISE_FONT_FAMILY, size=12, color=_TEXT_PRIMARY),
+        margin=dict(l=8, r=8, t=16, b=8),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        xaxis=dict(
+            title=None,
+            showgrid=False,
+            showline=False,
+            zeroline=False,
+            tickfont=dict(size=11, color=_TEXT_MUTED),
+        ),
+        yaxis=dict(
+            title=None,
+            showgrid=True,
+            gridcolor=_GRID_COLOR,
+            griddash="dot",
+            showline=False,
+            zeroline=False,
+            tickfont=dict(size=11, color=_TEXT_MUTED),
+        ),
+        hoverlabel=dict(
+            bgcolor="white",
+            bordercolor=_BORDER_COLOR,
+            font=dict(
+                family=_ENTERPRISE_FONT_FAMILY, size=12, color=_TEXT_PRIMARY
+            ),
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            title_text="",
+            font=dict(
+                family=_ENTERPRISE_FONT_FAMILY, size=11, color=_TEXT_MUTED
+            ),
+        ),
+    )
+    return fig
+
+
+__all_style_exports__ = ("apply_enterprise_style", "BRAND_HUE_SHADES")
 
 
 def _daily_metric_figure(
@@ -57,54 +154,153 @@ def _daily_metric_figure(
     return fig
 
 
-def stacked_area_cost_by_family(daily_report: DailyReport) -> go.Figure | None:
-    """Stacked area: per-day cost, coloured by model family (opus/haiku/...).
+def cost_trend_with_rolling(
+    daily_report: DailyReport,
+    *,
+    rolling_window_days: int = 7,
+    spike: tuple[str, float] | None = None,
+) -> go.Figure | None:
+    """Combined daily-cost-by-family stacked area + N-day rolling
+    average overlay + optional spike annotation.
 
-    Single-day windows fall back to a stacked bar via
-    `_daily_metric_figure`.
+    Replaces the previous two-chart layout (separate `stacked_area`
+    and `rolling_average_line`) — both plotted the same underlying
+    data, the rolling line just being the smoothed envelope. One
+    chart shows spikes (area) and trend (line) without duplication.
+
+    Family colors come from `BRAND_HUE_SHADES` so the chart stays in
+    the brand-hue tonal family. The rolling-average line uses the
+    darkest shade so it reads as the "summary line" above the bands.
+
+    ``spike``: optional ``(date, cost)`` tuple identifying an outlier
+    day worth calling out. Rendered as a Plotly annotation arrow with
+    the day's value inline. Computed by `analytics.spike_day` — kept
+    out of this builder so the threshold logic stays in analytics.
+
+    Single-day windows fall back to a stacked bar so the chart stays
+    visible (an area chart with one x-value paints zero width).
     """
     rows = daily_cost_by_model(daily_report)
     if not rows:
         return None
     df = pd.DataFrame(rows)
-    # Collapse same-day-same-family into one row so the area is a single band per family.
     grouped = df.groupby(["date", "family"], as_index=False)["cost"].sum()
-    fig = _daily_metric_figure(
+    families = sorted(grouped["family"].unique())
+
+    if grouped["date"].nunique() == 1:
+        fig = px.bar(
+            grouped,
+            x="date",
+            y="cost",
+            color="family",
+            color_discrete_sequence=BRAND_HUE_SHADES,
+            category_orders={"family": families},
+        )
+        fig.update_layout(barmode="stack", yaxis_tickprefix="$")
+        return apply_enterprise_style(fig)
+
+    fig = px.area(
         grouped,
         x="date",
         y="cost",
         color="family",
-        labels={"date": "Date", "cost": "Cost (USD)", "family": "Model family"},
-        multi_day="area",
+        color_discrete_sequence=BRAND_HUE_SHADES,
+        category_orders={"family": families},
     )
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=30, b=10),
-        legend_title_text="",
+
+    rolling = rolling_cost_average(daily_report, window_days=rolling_window_days)
+    if rolling:
+        rdf = pd.DataFrame(rolling, columns=["date", "avg_cost"])
+        fig.add_trace(
+            go.Scatter(
+                x=rdf["date"],
+                y=rdf["avg_cost"],
+                mode="lines",
+                name=f"{rolling_window_days}-day avg",
+                line=dict(color=_TEXT_PRIMARY, width=2, dash="dot"),
+                hovertemplate=(
+                    f"<b>{rolling_window_days}-day avg</b><br>"
+                    "%{x}<br>$%{y:,.2f}<extra></extra>"
+                ),
+            )
+        )
+
+    if spike is not None:
+        spike_date, spike_cost = spike
+        fig.add_annotation(
+            x=spike_date,
+            y=spike_cost,
+            text=f"{spike_date} · ${spike_cost:,.0f}",
+            showarrow=True,
+            arrowhead=2,
+            arrowsize=1,
+            arrowwidth=1,
+            arrowcolor=_TEXT_PRIMARY,
+            ax=20,
+            ay=-30,
+            bgcolor="white",
+            bordercolor=_BORDER_COLOR,
+            borderwidth=1,
+            font=dict(
+                family=_ENTERPRISE_FONT_FAMILY, size=11, color=_TEXT_PRIMARY
+            ),
+        )
+
+    return apply_enterprise_style(fig).update_layout(
         yaxis_tickprefix="$",
+        xaxis_type="date",
     )
-    return fig
 
 
-def rolling_average_line(daily_report: DailyReport, window_days: int = 7) -> go.Figure | None:
-    """N-day rolling average of daily cost. Single-day windows fall back
-    to a bar via `_daily_metric_figure`.
+def token_mix_percent_bar(daily_report: DailyReport) -> go.Figure | None:
+    """Per-day token-mix as a percent-stacked bar.
+
+    Replaces the prior log-axis absolute-tokens chart. A "mix" is a
+    composition question — what fraction of each day's tokens went
+    to each kind — which percent-stacking surfaces directly. Each
+    day's bars sum to 100%; the legend identifies the four kinds
+    (input / output / cache_create / cache_read).
+
+    Absolute token counts are preserved in the hover via customdata
+    so the magnitude question is one tooltip away. The chart itself
+    answers the composition question first.
+
+    Days with zero tokens get no bar (the underlying `daily_token_mix`
+    emits zero-valued rows; percent-stacking can't divide by zero).
+    The continuous date axis surfaces those gaps honestly rather than
+    rendering them as adjacent bars that hide the missing data.
     """
-    points = rolling_cost_average(daily_report, window_days=window_days)
-    if not points:
+    rows = daily_token_mix(daily_report)
+    if not rows:
         return None
-    df = pd.DataFrame(points, columns=["date", "avg_cost"])
-    fig = _daily_metric_figure(
+    df = pd.DataFrame(rows)
+    totals = df.groupby("date")["tokens"].transform("sum")
+    df["pct"] = (df["tokens"] / totals.where(totals > 0, 1) * 100).where(
+        totals > 0, 0.0
+    )
+
+    kind_order = ["input", "output", "cache_create", "cache_read"]
+    fig = px.bar(
         df,
         x="date",
-        y="avg_cost",
-        labels={"date": "Date", "avg_cost": f"{window_days}-day avg cost (USD)"},
-        multi_day="line",
+        y="pct",
+        color="kind",
+        color_discrete_sequence=BRAND_HUE_SHADES,
+        category_orders={"kind": kind_order},
+        custom_data=["tokens"],
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>%{fullData.name}</b><br>%{x}<br>"
+            "%{y:.1f}% · %{customdata[0]:,d} tokens<extra></extra>"
+        ),
     )
     fig.update_layout(
-        margin=dict(l=10, r=10, t=30, b=10),
-        yaxis_tickprefix="$",
+        barmode="stack",
+        yaxis_ticksuffix="%",
+        yaxis_range=[0, 100],
     )
-    return fig
+    return apply_enterprise_style(fig).update_layout(xaxis_type="date")
 
 
 def donut_cost_by_model(entry: DailyEntry | SessionEntry) -> go.Figure | None:
@@ -305,51 +501,6 @@ def token_flow_sankey(
         )
     )
     fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=520)
-    return fig
-
-
-def token_mix_bar(daily_report: DailyReport) -> go.Figure | None:
-    """Per-day token-mix bar chart.
-
-    cache_read is typically 100–100,000× larger than input / output /
-    cache_create. Two combined fixes keep every kind readable:
-
-    1. **barmode="overlay"** with categories ordered largest-typical-first
-       so cache_read paints to the back and the smaller kinds layer on top.
-       Bars share a 0.75 opacity so neither side fully occludes the other.
-    2. **log y-axis** (`yaxis_type="log"`). On a linear axis, an input bar
-       of ~1k tokens next to a cache_read bar of ~100M is a single pixel —
-       overlay z-order doesn't help when the value itself is invisible.
-       Log scale turns those into bars of substantially different but
-       comparable heights.
-    """
-    rows = daily_token_mix(daily_report)
-    if not rows:
-        return None
-    df = pd.DataFrame(rows)
-    fig = px.bar(
-        df,
-        x="date",
-        y="tokens",
-        color="kind",
-        # Largest-typical first → drawn first → at the back of the overlay
-        # z-order. Smaller kinds render on top and stay visible.
-        category_orders={"kind": ["cache_read", "cache_create", "output", "input"]},
-        labels={"date": "Date", "tokens": "Tokens", "kind": ""},
-    )
-    # Hover shows the absolute token count even though the y-axis is log.
-    # Log scale makes magnitudes comparable visually; hover keeps the truth
-    # one mouse-move away.
-    fig.update_traces(
-        opacity=0.75,
-        hovertemplate="<b>%{fullData.name}</b><br>%{x}<br>%{y:,.0f} tokens<extra></extra>",
-    )
-    fig.update_layout(
-        margin=dict(l=10, r=10, t=30, b=10),
-        legend_title_text="",
-        barmode="overlay",
-        yaxis_type="log",
-    )
     return fig
 
 

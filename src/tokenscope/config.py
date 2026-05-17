@@ -56,6 +56,17 @@ DATA_CACHE_TTL_SECONDS: int = int(_get("dashboard", "data_cache_ttl_seconds", 30
 # [live]
 LIVE_REFRESH_SECONDS: int = int(_get("live", "refresh_seconds", 30))
 
+# [overview]
+# A day's cost qualifies as a "spike" worth annotating on the Overview
+# cost chart when it exceeds this multiplier × the window's median
+# daily cost. Lower → more sensitive (annotate routine highs); higher
+# → only call out genuinely extreme days. 3.0 is the conventional
+# "3× median = outlier" heuristic.
+OVERVIEW_SPIKE_THRESHOLD: float = float(
+    _get("overview", "spike_threshold_median_multiplier", 3.0)
+)
+
+
 # [pricing]
 PRICING_LITELLM_URL: str = str(
     _get(

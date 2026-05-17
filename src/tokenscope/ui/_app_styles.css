@@ -1,0 +1,150 @@
+/*
+ * App-wide CSS overrides — top page nav, card containers, code-pill
+ * suppression, column-flex responsive rules, Overview-page H1
+ * polish, insight-callout styling.
+ *
+ * Scoped where possible. Selectors target Streamlit's data-testid and
+ * data-baseweb attributes — the conventional hooks for theming
+ * Streamlit components. Values inline; this is a stylesheet.
+ *
+ * Layered intent:
+ *   1. Page-nav: the top page selector (Overview / Live / Cache /
+ *      Models) is still an `st.radio` because we want URL-state
+ *      persistence; CSS hides the radio bullets and gives the active
+ *      label an underline, so it READS as tabs.
+ *   2. Card containers: `st.container(border=True)` gets a tighter
+ *      enterprise treatment than Streamlit's default heavy border.
+ *   3. Dataframe / expander defaults that leak Streamlit's look on
+ *      the Overview page are dialled back.
+ *   4. Code-pill rendering of backticked text is suppressed
+ *      page-wide — defensive against any regression that re-introduces
+ *      a backtick in caption / header copy.
+ */
+
+/* ---------- Page-nav: radio rendered as tabs ----------
+ * The page selector has key `top-page-selector`. Streamlit's radio
+ * renders each option as a label containing a bullet element and the
+ * option text. We:
+ *   - hide the bullet element so labels look like plain tabs,
+ *   - give the labels comfortable padding and a transparent bottom
+ *     border, and
+ *   - apply the brand accent to the bottom border on `:has(input:checked)`
+ *     so the active tab gets the underline.
+ *
+ * Note `:has()` is well-supported in modern browsers (Chrome 105+,
+ * Safari 15.4+, Firefox 121+). Streamlit Cloud serves modern browsers
+ * exclusively; the local-only dashboard runs in whatever the user
+ * launches it from.
+ */
+[data-testid="stRadio"]:has(input[type="radio"][value="Overview"]),
+[data-testid="stRadio"]:has(input[type="radio"][value="Live"]),
+[data-testid="stRadio"]:has(input[type="radio"][value="Cache"]),
+[data-testid="stRadio"]:has(input[type="radio"][value="Models"]) {
+    border-bottom: 1px solid #e2e8f0;
+    margin-bottom: 1.25rem;
+}
+
+/* Radio bullets — hide them. The label text + underline does the job. */
+[data-testid="stRadio"] [role="radiogroup"] label > div:first-child {
+    display: none !important;
+}
+
+/* Tab-style labels: padding, transparent underline, hover affordance. */
+[data-testid="stRadio"] [role="radiogroup"] label {
+    padding: 0.5rem 1rem 0.65rem 1rem !important;
+    margin: 0 !important;
+    border-bottom: 2px solid transparent !important;
+    color: #64748b !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: color 120ms ease, border-color 120ms ease;
+}
+[data-testid="stRadio"] [role="radiogroup"] label:hover {
+    color: #1e293b !important;
+}
+[data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) {
+    color: #0f172a !important;
+    border-bottom-color: #475569 !important;
+}
+
+/* ---------- Card containers ----------
+ * `st.container(border=True)` renders with Streamlit's default border;
+ * we tighten the radius and use a more neutral grey so cards read as
+ * grouped surfaces, not as form sections.
+ */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 10px !important;
+    border-color: #e2e8f0 !important;
+    box-shadow: none !important;
+}
+
+/* ---------- Code-pill suppression ----------
+ * Defensive: if any caption / header on the Overview page accidentally
+ * carries backticked text, Streamlit's default styles it with a green
+ * inline-code background. We've eliminated backticks from this
+ * surface; the rule keeps regressions from re-introducing the look.
+ */
+main code,
+[data-testid="stMain"] code {
+    background: transparent !important;
+    color: inherit !important;
+    font-family: inherit !important;
+    padding: 0 !important;
+    border: none !important;
+    font-size: inherit !important;
+}
+
+/* ---------- Page H1 + subtitle ----------
+ * Overview page renders `# Overview` followed by a caption. Tighten
+ * the spacing between them.
+ */
+main h1 {
+    margin-bottom: 0.25rem !important;
+}
+main h1 + [data-testid="stCaptionContainer"] {
+    margin-top: 0 !important;
+    margin-bottom: 1.5rem !important;
+}
+
+/* ---------- Insight summary callout ----------
+ * Left-bordered panel; distinct from KPI cards so the eye reads it
+ * as narrative.
+ */
+.tokenscope-insight {
+    border-left: 3px solid #475569;
+    padding: 0.6rem 0 0.6rem 1rem;
+    color: #1e293b;
+    line-height: 1.55;
+    margin: 0.75rem 0 1.5rem 0;
+    font-size: 0.95rem;
+}
+
+/* ---------- Hide Streamlit's "Made with Streamlit" footer ----------
+ * Local-only dashboard; upstream branding adds nothing for the user.
+ */
+footer {
+    display: none !important;
+}
+
+/* ---------- Responsive column wrap for KPI rows ----------
+ * Streamlit's `st.columns(N)` shrinks columns to fit at any viewport
+ * width, which crushes 4-card KPI rows into unreadable slivers on a
+ * half-screen tab. Force flex-wrap and a min-width floor so columns
+ * wrap to the next row when there's not enough horizontal space.
+ */
+[data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap !important;
+}
+[data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    min-width: 220px !important;
+}
+@media (max-width: 900px) {
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        flex: 1 1 240px !important;
+    }
+}
+@media (max-width: 600px) {
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        flex: 1 1 100% !important;
+    }
+}

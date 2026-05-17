@@ -772,3 +772,119 @@ def cost_by_kind(daily_report: DailyReport) -> list[dict] | None:
             }
         )
     return rows
+
+
+# --- formatting helpers (presentation-layer, but pure / unit-testable) ---
+
+
+_COMPACT_THOUSAND = 1_000
+_COMPACT_MILLION = 1_000_000
+_COMPACT_BILLION = 1_000_000_000
+
+
+def format_compact_int(n: int) -> str:
+    """Compact integer formatting for token counts.
+
+    Below 1M: thousand-separated (``7,358``).
+    1M–1B:    one-decimal M (``4.9M``, ``15.7M``).
+    >=1B:     two-decimal B (``1.60B``).
+
+    No K abbreviation — at the magnitudes Claude usage hits (tens of
+    thousands at the low end), comma-grouping is cleaner than `7.4K`
+    on a dashboard, and the user explicitly called out `7,358 /
+    4.9M / 15.7M / 1.6B` as the desired reading.
+
+    Negative inputs format as ``-`` + the positive-side formatting,
+    which is uncommon in practice (token counts are non-negative)
+    but keeps the function total over the int domain.
+    """
+    if n < 0:
+        return "-" + format_compact_int(-n)
+    if n < _COMPACT_MILLION:
+        return f"{n:,}"
+    if n < _COMPACT_BILLION:
+        return f"{n / _COMPACT_MILLION:.1f}M"
+    return f"{n / _COMPACT_BILLION:.2f}B"
+
+
+# --- Overview-page summary primitives ------------------------------------
+
+
+def spike_day(
+    daily_report: DailyReport, threshold_multiplier: float
+) -> tuple[str, float] | None:
+    """Return ``(date, cost)`` for the day with cost above
+    ``threshold_multiplier * median``, or ``None`` if no day qualifies.
+
+    Used by the Overview cost chart to annotate a single notable
+    outlier in plain language ("Apr 18 · $447") rather than leaving
+    the user to wonder why one bar dwarfs the rest. The threshold is
+    operator-tunable via ``[overview] spike_threshold_median_multiplier``;
+    the conventional outlier heuristic is ``3.0``.
+
+    Returns the highest-cost qualifying day so a window with several
+    spikes still surfaces one annotation rather than crowding the
+    chart.
+    """
+    entries = daily_report.daily
+    if len(entries) < 3:
+        return None
+    costs = [e.total_cost for e in entries]
+    med = median(costs)
+    if med <= 0:
+        return None
+    threshold = threshold_multiplier * med
+    qualifying = [(e.date, e.total_cost) for e in entries if e.total_cost > threshold]
+    if not qualifying:
+        return None
+    return max(qualifying, key=lambda r: r[1])
+
+
+def overview_insight(
+    *,
+    window_total_cost: float,
+    window_days: int,
+    prior_total: float | None,
+    spike: tuple[str, float] | None,
+    cache_hit_ratio: float,
+) -> str:
+    """Build the Overview insight-summary paragraph from rollup numbers.
+
+    Returns plain prose (no Markdown). Sentences are stitched together
+    conditionally — missing inputs (no prior period to compare, no
+    spike to call out) just omit their sentence rather than producing
+    null-laden output.
+
+    The first sentence always exists ("You spent $X over the last N
+    days."); the prior-period comparison and spike sentences are
+    conditional; the cache-hit sentence appears when the ratio is
+    non-zero.
+    """
+    sentences: list[str] = []
+
+    headline = f"You spent ${window_total_cost:,.2f} over the last {window_days} days"
+    if prior_total and prior_total > 0:
+        change = (window_total_cost - prior_total) / prior_total
+        direction = "up" if change >= 0 else "down"
+        headline += (
+            f", {direction} {abs(change):.0%} vs the prior {window_days} days."
+        )
+    else:
+        headline += "."
+    sentences.append(headline)
+
+    if spike is not None and window_total_cost > 0:
+        spike_date, spike_cost = spike
+        share = spike_cost / window_total_cost
+        sentences.append(
+            f"{spike_date} alone accounted for ${spike_cost:,.2f} "
+            f"({share:.0%} of the window)."
+        )
+
+    if cache_hit_ratio > 0:
+        sentences.append(
+            f"Cache reads served {cache_hit_ratio:.1%} of input-side tokens."
+        )
+
+    return " ".join(sentences)
+

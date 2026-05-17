@@ -203,18 +203,14 @@ def _resolved_hint(func, param_name: str):
 
 
 def test_overview_render_kpis_param_types_resolve() -> None:
-    """Audit Notable #8: _render_kpis was untyped on its first two
-    params. Slice 7 added DailyReport / BlocksReport | None. Lock that
-    in so a future refactor doesn't drop them."""
-    from tokenscope.models import BlocksReport, DailyReport
+    """`_render_kpis` carries `DailyReport` on its first param. The
+    Active-block burn KPI was retired (Live owns active-block data
+    now), so `BlocksReport` is no longer a parameter — this test was
+    updated to reflect the post-Overview-rework signature."""
+    from tokenscope.models import DailyReport
     from tokenscope.ui.overview import _render_kpis
 
     assert _resolved_hint(_render_kpis, "daily_report") is DailyReport
-    # BlocksReport | None resolves to a Union — confirm by checking
-    # both arms are present.
-    blocks_hint = _resolved_hint(_render_kpis, "blocks_report")
-    args = getattr(blocks_hint, "__args__", ())
-    assert BlocksReport in args and type(None) in args
 
 
 def test_overview_render_cost_composition_param_type_resolves() -> None:

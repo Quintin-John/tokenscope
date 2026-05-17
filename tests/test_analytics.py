@@ -29,8 +29,11 @@ from tokenscope.analytics import (
     find_block,
     find_daily_entry,
     find_session,
+    format_compact_int,
     friendly_project_label,
     last_day_cost,
+    overview_insight,
+    spike_day,
     model_breakdown,
     model_family,
     mtd_cost,
@@ -1490,3 +1493,203 @@ def test_blocks_for_session_excludes_gap_blocks() -> None:
     )
     matched = blocks_for_session(rep, sess)
     assert [b.id for b in matched] == ["b-real"]
+
+
+# ---------- format_compact_int ----------
+
+
+def test_format_compact_int_thousand_separators_under_1m() -> None:
+    """Sub-1M stays comma-grouped — `7,358` reads cleaner than `7.4K`
+    at dashboard magnitudes."""
+    assert format_compact_int(0) == "0"
+    assert format_compact_int(7) == "7"
+    assert format_compact_int(7_358) == "7,358"
+    assert format_compact_int(999_999) == "999,999"
+
+
+def test_format_compact_int_million_and_billion() -> None:
+    assert format_compact_int(1_000_000) == "1.0M"
+    assert format_compact_int(4_911_389) == "4.9M"
+    assert format_compact_int(15_697_744) == "15.7M"
+    assert format_compact_int(1_000_000_000) == "1.00B"
+    assert format_compact_int(1_602_177_029) == "1.60B"
+    assert format_compact_int(2_321_335_452) == "2.32B"
+
+
+def test_format_compact_int_negative_mirror() -> None:
+    """Defensive: negative input keeps the sign, formats the absolute
+    value through the same scale."""
+    assert format_compact_int(-7_358) == "-7,358"
+    assert format_compact_int(-4_911_389) == "-4.9M"
+
+
+# ---------- spike_day ----------
+
+
+def test_spike_day_returns_none_for_short_windows() -> None:
+    """A 2-day window has too few points to compute a meaningful
+    median + threshold. Bail out rather than annotate noise."""
+    rep = _report(
+        [
+            _entry("2026-05-15", total_cost=10.0),
+            _entry("2026-05-16", total_cost=50.0),
+        ]
+    )
+    assert spike_day(rep, threshold_multiplier=3.0) is None
+
+
+def test_spike_day_returns_none_when_no_outlier() -> None:
+    """All days within `3 × median` → no spike to annotate."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=10.0) for d in range(10, 20)]
+    )
+    assert spike_day(rep, threshold_multiplier=3.0) is None
+
+
+def test_spike_day_identifies_outlier_above_threshold() -> None:
+    """One day at ~10× median = clear spike. Returns (date, cost)."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=10.0) for d in range(10, 18)]
+        + [_entry("2026-04-18", total_cost=400.0)]
+    )
+    spike = spike_day(rep, threshold_multiplier=3.0)
+    assert spike == ("2026-04-18", 400.0)
+
+
+def test_spike_day_picks_highest_when_multiple_spikes_qualify() -> None:
+    """Multiple days exceed the threshold — return the most extreme
+    so the chart annotation calls out the loudest signal."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=10.0) for d in range(10, 18)]
+        + [
+            _entry("2026-04-18", total_cost=200.0),
+            _entry("2026-04-19", total_cost=400.0),
+        ]
+    )
+    spike = spike_day(rep, threshold_multiplier=3.0)
+    assert spike == ("2026-04-19", 400.0)
+
+
+def test_spike_day_threshold_multiplier_drives_sensitivity() -> None:
+    """Same data, two thresholds — looser threshold flags the day,
+    stricter one does not."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=10.0) for d in range(10, 18)]
+        + [_entry("2026-04-18", total_cost=25.0)]
+    )
+    # 25 vs median ~10 → 2.5×.  3× threshold leaves it alone.
+    assert spike_day(rep, threshold_multiplier=3.0) is None
+    # 2× threshold catches it.
+    assert spike_day(rep, threshold_multiplier=2.0) == ("2026-04-18", 25.0)
+
+
+def test_spike_day_zero_median_returns_none() -> None:
+    """If every day is zero, there's no meaningful threshold; bail."""
+    rep = _report(
+        [_entry(f"2026-05-{d:02d}", total_cost=0.0) for d in range(10, 18)]
+    )
+    assert spike_day(rep, threshold_multiplier=3.0) is None
+
+
+# ---------- overview_insight ----------
+
+
+def test_overview_insight_headline_includes_total_and_window() -> None:
+    text = overview_insight(
+        window_total_cost=1_020.73,
+        window_days=30,
+        prior_total=None,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "1,020.73" in text
+    assert "30 days" in text
+
+
+def test_overview_insight_appends_prior_period_comparison() -> None:
+    """When prior_total is provided, the headline gains a `, up X% vs
+    prior N days` continuation."""
+    text = overview_insight(
+        window_total_cost=2000.0,
+        window_days=30,
+        prior_total=1000.0,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "up 100% vs the prior 30 days" in text
+
+
+def test_overview_insight_uses_down_for_decreased_cost() -> None:
+    text = overview_insight(
+        window_total_cost=500.0,
+        window_days=30,
+        prior_total=1000.0,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "down 50%" in text
+
+
+def test_overview_insight_omits_prior_when_unknown() -> None:
+    """No prior data → drop the comparison sentence rather than
+    surface a null. Headline stays single-sentence."""
+    text = overview_insight(
+        window_total_cost=500.0,
+        window_days=30,
+        prior_total=None,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "vs the prior" not in text
+
+
+def test_overview_insight_includes_spike_sentence_when_provided() -> None:
+    text = overview_insight(
+        window_total_cost=1_000.0,
+        window_days=30,
+        prior_total=None,
+        spike=("2026-04-18", 400.0),
+        cache_hit_ratio=0.0,
+    )
+    assert "2026-04-18" in text
+    assert "400.00" in text
+    # 400/1000 = 40% of the window.
+    assert "40%" in text
+
+
+def test_overview_insight_includes_cache_sentence_when_ratio_nonzero() -> None:
+    text = overview_insight(
+        window_total_cost=1_000.0,
+        window_days=30,
+        prior_total=None,
+        spike=None,
+        cache_hit_ratio=0.992,
+    )
+    assert "99.2%" in text
+    assert "Cache reads" in text
+
+
+def test_overview_insight_omits_cache_sentence_at_zero() -> None:
+    """Zero cache-hit ratio = nothing to say about caching. Drop
+    the sentence rather than surface "0.0%"."""
+    text = overview_insight(
+        window_total_cost=1_000.0,
+        window_days=30,
+        prior_total=None,
+        spike=None,
+        cache_hit_ratio=0.0,
+    )
+    assert "Cache reads" not in text
+
+
+def test_overview_insight_spike_skipped_on_zero_window_cost() -> None:
+    """Defensive: window_total_cost=0 → spike share is undefined.
+    Drop the spike sentence rather than surface a nonsense ratio."""
+    text = overview_insight(
+        window_total_cost=0.0,
+        window_days=30,
+        prior_total=None,
+        spike=("2026-04-18", 0.0),
+        cache_hit_ratio=0.0,
+    )
+    assert "2026-04-18" not in text

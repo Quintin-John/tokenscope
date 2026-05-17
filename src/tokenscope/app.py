@@ -43,6 +43,15 @@ _VIEW_LABELS: dict[ViewName, str] = {
 }
 
 
+# App-wide CSS lives in `src/tokenscope/ui/_app_styles.css`. Read once
+# at import; injected on every render via `st.markdown(unsafe_allow_html)`.
+# Covers: page-nav tab restyle, card containers, code-pill suppression,
+# responsive column-flex rules, Overview H1 polish, insight callout.
+_APP_CSS = (
+    Path(__file__).parent / "ui" / "_app_styles.css"
+).read_text()
+
+
 def _build_about_text() -> str:
     """Markdown for the About entry in Streamlit's hamburger menu.
 
@@ -73,38 +82,13 @@ def render() -> None:
         layout="wide",
         menu_items={"About": _build_about_text()},
     )
-    # CSS injections:
-    #  - Hide the "Made with Streamlit vX.Y.Z" footer. This is a local-only
-    #    dashboard; the upstream branding adds nothing for the user.
-    #  - Slice 16: force `st.columns(N)` rows to flex-wrap on narrow
-    #    viewports. By default columns shrink-to-fit at any width, which
-    #    crushes 4-card KPI rows into unreadable slivers on a half-screen
-    #    tab. Below 900px columns wrap to two per row; below 600px they
-    #    stack. The `min-width` floor stops a column from shrinking below
-    #    a readable threshold even on viewports we don't have a rule for.
-    st.markdown(
-        """
-        <style>
-        footer {display: none !important;}
-        [data-testid="stHorizontalBlock"] {flex-wrap: wrap !important;}
-        [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            min-width: 220px !important;
-        }
-        @media (max-width: 900px) {
-            [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-                flex: 1 1 240px !important;
-            }
-        }
-        @media (max-width: 600px) {
-            [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-                flex: 1 1 100% !important;
-            }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.title("tokenscope")
+    st.markdown(f"<style>{_APP_CSS}</style>", unsafe_allow_html=True)
+
+    # NB: no visible `st.title("tokenscope")`. The product wordmark
+    # lives in the browser tab (`page_title`); the H1 on each page is
+    # the *view name*, rendered by the view itself (`# Overview`,
+    # `# Live`, etc.). This avoids the inverted hierarchy where the
+    # product name dominates every page.
 
     nav = Navigation.from_params(dict(st.query_params))
     _log.debug("app.render view=%s", nav.view)

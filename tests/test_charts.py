@@ -9,6 +9,7 @@ shaped flows through and that empty inputs short-circuit cleanly.
 from __future__ import annotations
 
 import plotly.graph_objects as go
+import pytest
 
 from tokenscope.models import (
     BlockEntry,
@@ -22,17 +23,18 @@ from tokenscope.models import (
     Totals,
 )
 from tokenscope.ui.charts import (
+    BRAND_HUE_SHADES,
     _daily_metric_figure,
+    apply_enterprise_style,
     burn_gauge,
     cache_hit_ratio_line,
+    cost_trend_with_rolling,
     donut_cost_by_model,
-    rolling_average_line,
     session_blocks_timeline,
     session_token_mix,
     single_family_token_bar,
-    stacked_area_cost_by_family,
     token_flow_sankey,
-    token_mix_bar,
+    token_mix_percent_bar,
 )
 
 
@@ -154,10 +156,10 @@ def test_daily_metric_figure_single_day_uncoloured_bar_no_stack_directive() -> N
     assert fig.layout.barmode != "stack"
 
 
-# ---------- stacked_area_cost_by_family / rolling_average_line ----------
+# ---------- cost_trend_with_rolling ----------
 
 
-def test_stacked_area_returns_figure_with_family_traces() -> None:
+def test_cost_trend_returns_figure_with_family_traces() -> None:
     report = _report(
         [
             _entry("2026-05-15", cost=5.0, model="claude-opus-4-7"),
@@ -165,108 +167,185 @@ def test_stacked_area_returns_figure_with_family_traces() -> None:
             _entry("2026-05-16", cost=4.0, model="claude-opus-4-7"),
         ]
     )
-    fig = stacked_area_cost_by_family(report)
+    fig = cost_trend_with_rolling(report)
     assert isinstance(fig, go.Figure)
+    # Both family bands + the rolling-average overlay are present.
     trace_names = {t.name for t in fig.data}
-    assert trace_names == {"opus", "haiku"}
+    assert "opus" in trace_names and "haiku" in trace_names
+    assert "7-day avg" in trace_names
 
 
-def test_stacked_area_empty_returns_none() -> None:
-    assert stacked_area_cost_by_family(_report([])) is None
+def test_cost_trend_empty_returns_none() -> None:
+    assert cost_trend_with_rolling(_report([])) is None
 
 
-def test_stacked_area_single_day_uses_bar_not_area() -> None:
-    """Single-day windows must render as a stacked bar — px.area paints
-    a zero-width band with one x-value, leaving the chart blank."""
+def test_cost_trend_single_day_uses_bar_not_area() -> None:
+    """Single-day windows fall back to a stacked bar — px.area paints
+    zero width with one x-value and the chart looks empty."""
     report = _report(
         [
             _entry("2026-05-16", cost=5.0, model="claude-opus-4-7"),
             _entry("2026-05-16", cost=1.0, model="claude-haiku-4-5-20251001"),
         ]
     )
-    fig = stacked_area_cost_by_family(report)
+    fig = cost_trend_with_rolling(report)
     assert isinstance(fig, go.Figure)
-    # All traces should be bars, not scatter (which is what px.area uses).
     assert all(t.type == "bar" for t in fig.data), (
-        f"expected bar traces on single-day window, got "
-        f"{[t.type for t in fig.data]}"
+        f"expected bar traces on single-day window; got {[t.type for t in fig.data]}"
     )
-    # Stacked, not grouped — barmode must be "stack" so families layer.
     assert fig.layout.barmode == "stack"
-    # The family colour split must survive the fallback.
-    assert {t.name for t in fig.data} == {"opus", "haiku"}
 
 
-def test_rolling_line_returns_figure() -> None:
+def test_cost_trend_brand_hue_palette_used() -> None:
+    """Family bands draw from the brand-hue shade sequence so the chart
+    stays in family-tonal territory rather than picking from Plotly's
+    default qualitative palette (which includes red)."""
     report = _report(
         [
-            _entry("2026-05-13", cost=1.0, model="claude-opus-4-7"),
-            _entry("2026-05-14", cost=3.0, model="claude-opus-4-7"),
             _entry("2026-05-15", cost=5.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=4.0, model="claude-opus-4-7"),
         ]
     )
-    fig = rolling_average_line(report, window_days=2)
-    assert isinstance(fig, go.Figure)
-    # Single trace = the rolling-average line.
-    assert len(fig.data) == 1
-    ys = list(fig.data[0].y)
-    assert ys == [1.0, 2.0, 4.0]  # 1, (1+3)/2, (3+5)/2
-
-
-def test_rolling_line_single_day_uses_bar_not_line() -> None:
-    """Single-day rolling average must render as a bar — a one-point
-    px.line is just a marker dot that is easy to miss next to a $-axis."""
-    report = _report([_entry("2026-05-16", cost=42.0, model="claude-opus-4-7")])
-    fig = rolling_average_line(report, window_days=7)
-    assert isinstance(fig, go.Figure)
-    assert len(fig.data) == 1
-    assert fig.data[0].type == "bar", (
-        f"expected bar trace on single-day window, got {fig.data[0].type}"
+    fig = cost_trend_with_rolling(report)
+    band = next(t for t in fig.data if t.name == "opus")
+    # The first family's fill color should match the first brand-hue shade.
+    fill = band.fillcolor if hasattr(band, "fillcolor") else None
+    line = band.line.color if hasattr(band, "line") and band.line else None
+    assert (fill in BRAND_HUE_SHADES) or (line in BRAND_HUE_SHADES), (
+        f"expected brand-hue color on `opus` band; got fill={fill!r} line={line!r}"
     )
-    assert list(fig.data[0].y) == [42.0]
 
 
-def test_rolling_line_empty_returns_none() -> None:
-    assert rolling_average_line(_report([]), window_days=7) is None
+def test_cost_trend_adds_spike_annotation_when_provided() -> None:
+    """`spike=(date, cost)` adds a Plotly annotation calling out the
+    outlier day. Without the kwarg, no annotation is drawn."""
+    report = _report(
+        [
+            _entry("2026-04-18", cost=400.0, model="claude-opus-4-7"),
+            _entry("2026-05-15", cost=5.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=4.0, model="claude-opus-4-7"),
+        ]
+    )
+    annotated = cost_trend_with_rolling(report, spike=("2026-04-18", 400.0))
+    plain = cost_trend_with_rolling(report)
+    assert annotated is not None and plain is not None
+    annotated_texts = [a.text for a in annotated.layout.annotations or []]
+    plain_texts = [a.text for a in plain.layout.annotations or []]
+    assert any(
+        "2026-04-18" in t and "400" in t for t in annotated_texts
+    ), f"expected spike annotation; got: {annotated_texts!r}"
+    assert plain_texts == [], (
+        f"expected no annotations without spike kwarg; got: {plain_texts!r}"
+    )
 
 
-def test_token_mix_bar_has_four_kinds() -> None:
+# ---------- token_mix_percent_bar ----------
+
+
+def test_token_mix_percent_returns_figure_with_four_kinds() -> None:
     report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
-    fig = token_mix_bar(report)
+    fig = token_mix_percent_bar(report)
     assert isinstance(fig, go.Figure)
     kinds = {t.name for t in fig.data}
     assert kinds == {"input", "output", "cache_create", "cache_read"}
 
 
-def test_token_mix_bar_overlay_log_scale() -> None:
-    """Regression: cache_read is typically 100–100,000× larger than the
-    other kinds. Without a log y-axis, the smaller kinds collapse to a
-    single pixel even on overlay mode."""
+def test_token_mix_percent_each_day_sums_to_one_hundred() -> None:
+    """The chart answers a composition question — each day's bars
+    must sum to 100% so the user reads the mix directly."""
     report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
-    fig = token_mix_bar(report)
-    assert fig.layout.barmode == "overlay"
-    # cache_read at the back of the z-order.
-    assert fig.data[0].name == "cache_read"
-    # Sub-1.0 opacity so the back layer remains visible under the front bars.
-    for trace in fig.data:
-        assert trace.opacity is not None and trace.opacity < 1.0
-    # Log scale so the smaller kinds aren't pixel-thin.
-    assert fig.layout.yaxis.type == "log"
+    fig = token_mix_percent_bar(report)
+    # Sum the y-values across all traces for the single day.
+    total = sum(float(t.y[0]) for t in fig.data)
+    assert total == pytest.approx(100.0, abs=0.01)
 
 
-def test_token_mix_bar_hovertemplate_shows_absolute_tokens() -> None:
-    """Log scale hides the linear truth — hover keeps the raw count one
-    mouse-move away."""
+def test_token_mix_percent_uses_stack_not_overlay() -> None:
+    """Percent-stacked = barmode='stack'. Overlay would have all four
+    kinds painting from 0 to their own percent, defeating the mix
+    visualisation."""
     report = _report([_entry("2026-05-16", cost=1.0, model="claude-opus-4-7")])
-    fig = token_mix_bar(report)
+    fig = token_mix_percent_bar(report)
+    assert fig.layout.barmode == "stack"
+    # Y-axis range is locked to [0, 100] so the percent-stacks read
+    # consistently across days.
+    assert fig.layout.yaxis.range is not None
+    assert list(fig.layout.yaxis.range) == [0, 100]
+
+
+def test_token_mix_percent_empty_returns_none() -> None:
+    assert token_mix_percent_bar(_report([])) is None
+
+
+def test_token_mix_percent_zero_day_has_zero_percents() -> None:
+    """A zero-token day mustn't trigger a divide-by-zero — its
+    percents are all 0 (no bar visible at that x)."""
+    zero_entry = DailyEntry(
+        date="2026-05-16",
+        inputTokens=0,
+        outputTokens=0,
+        cacheCreationTokens=0,
+        cacheReadTokens=0,
+        totalTokens=0,
+        totalCost=0.0,
+        modelsUsed=[],
+        modelBreakdowns=[],
+    )
+    report = DailyReport(
+        daily=[zero_entry],
+        totals=Totals(
+            inputTokens=0,
+            outputTokens=0,
+            cacheCreationTokens=0,
+            cacheReadTokens=0,
+            totalTokens=0,
+            totalCost=0.0,
+        ),
+    )
+    fig = token_mix_percent_bar(report)
+    # Figure should still build (no NaN crash), just with zero-height bars.
+    assert isinstance(fig, go.Figure)
     for trace in fig.data:
-        assert trace.hovertemplate is not None
-        assert "tokens" in trace.hovertemplate.lower()
-        assert "%{y" in trace.hovertemplate  # raw y-value, not log10
+        assert all(y == 0 for y in trace.y)
 
 
-def test_token_mix_bar_empty_returns_none() -> None:
-    assert token_mix_bar(_report([])) is None
+# ---------- apply_enterprise_style ----------
+
+
+def test_apply_enterprise_style_clears_title_and_axis_titles() -> None:
+    """The enterprise style drops any in-chart title and axis titles —
+    the section H3 above the chart owns the title, the ticks own the
+    axes."""
+    fig = go.Figure()
+    fig.update_layout(
+        title="Should be removed",
+        xaxis_title="Date",
+        yaxis_title="Cost (USD)",
+    )
+    styled = apply_enterprise_style(fig)
+    assert styled.layout.title.text is None
+    assert styled.layout.xaxis.title.text is None
+    assert styled.layout.yaxis.title.text is None
+
+
+def test_apply_enterprise_style_horizontal_gridlines_only() -> None:
+    """Horizontal dotted gridlines only — no vertical, no axis spines."""
+    fig = apply_enterprise_style(go.Figure())
+    assert fig.layout.xaxis.showgrid is False
+    assert fig.layout.yaxis.showgrid is True
+    assert fig.layout.xaxis.zeroline is False
+    assert fig.layout.yaxis.zeroline is False
+    assert fig.layout.xaxis.showline is False
+    assert fig.layout.yaxis.showline is False
+
+
+def test_apply_enterprise_style_is_idempotent() -> None:
+    """Applying the style twice produces the same layout as applying
+    it once. Builders compose freely."""
+    fig = go.Figure()
+    once = apply_enterprise_style(fig).to_dict()["layout"]
+    twice = apply_enterprise_style(apply_enterprise_style(go.Figure())).to_dict()["layout"]
+    assert once == twice
 
 
 # ---------- donut_cost_by_model ----------

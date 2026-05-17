@@ -68,6 +68,202 @@ def test_overview_renders(mock_ccusage, mock_ccusage_version) -> None:
     assert any(l.startswith("Window cost") for l in labels)
 
 
+# ---------- Overview polish: page shell ----------
+
+
+def _markdown_text(at: AppTest) -> str:
+    """Concat all top-level markdown blocks for substring assertions."""
+    return "\n".join(m.value for m in at.markdown)
+
+
+def test_overview_h1_is_view_name_not_product_name(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The Overview page H1 is the view name (`Overview`), not the
+    product wordmark. `tokenscope` lives in `page_title` / About menu,
+    not as the largest text on every page."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    headings = [h.value for h in at.heading] if hasattr(at, "heading") else []
+    # Streamlit AppTest doesn't always expose `# Overview` as an
+    # `at.title` element — it renders the markdown # as h1. Search the
+    # markdown blocks instead.
+    md_text = _markdown_text(at)
+    assert "# Overview" in md_text, (
+        f"expected `# Overview` H1 in markdown; got: {md_text!r}"
+    )
+
+
+def test_overview_does_not_render_tokenscope_title(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Regression for the inverted-hierarchy issue: the product name
+    used to render as `st.title('tokenscope')` and was the biggest
+    text on every page. With `st.title` removed, no `at.title` element
+    should carry the product wordmark."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    titles = [t.value for t in at.title]
+    assert all("tokenscope" not in t for t in titles), (
+        f"unexpected tokenscope title element: {titles!r}"
+    )
+
+
+def test_overview_subtitle_carries_window_context(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The caption under the H1 surfaces the window length + timezone
+    so the headline numbers are anchored without forcing the user to
+    look at the sidebar."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    captions = [c.value for c in at.caption]
+    window_caption = next((c for c in captions if "Window:" in c), None)
+    assert window_caption is not None, (
+        f"expected window-context caption; got: {captions!r}"
+    )
+    assert "days" in window_caption
+    assert "times in" in window_caption.lower()
+
+
+# ---------- Overview polish: KPI cards ----------
+
+
+def test_overview_kpi_cards_use_avg_daily_cost_not_active_block(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The KPI row was retired of Active-block $/hr (which belonged on
+    Live) in favour of Avg daily cost so every card describes the same
+    window."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    labels = {m.label for m in at.metric}
+    assert "Avg daily cost" in labels
+    assert "Active block $/hr" not in labels
+
+
+# ---------- Overview polish: insight summary ----------
+
+
+def test_overview_renders_insight_callout(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The dynamic insight paragraph renders under the KPI strip,
+    wrapped in the `tokenscope-insight` CSS class so the eye reads
+    it as narrative, not metric."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    md_text = _markdown_text(at)
+    assert 'class="tokenscope-insight"' in md_text, (
+        f"expected insight callout HTML; got markdown blocks: {md_text!r}"
+    )
+    # The headline sentence should always include the window total +
+    # window length.
+    assert "You spent" in md_text
+
+
+# ---------- Overview polish: cost composition (no expander) ----------
+
+
+def test_overview_composition_is_inline_not_expander(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Cost composition was buried inside `st.expander`; it's now
+    inline as a first-class panel. The H3 `Cost composition` should
+    appear in the rendered markdown without being collapsed behind a
+    chevron."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    md_text = _markdown_text(at)
+    assert "### Cost composition" in md_text, (
+        f"expected `### Cost composition` H3; got: {md_text!r}"
+    )
+    # No expander wraps the composition any more.
+    expander_labels = [e.label for e in at.expander]
+    assert not any(
+        "Cost composition" in (label or "") for label in expander_labels
+    ), f"composition is still inside an expander: {expander_labels!r}"
+
+
+def test_overview_does_not_mention_ccusage_in_visible_copy(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The composition header and subtitle used to reference `ccusage`
+    in the visible UI. The product user shouldn't see the upstream
+    library's name in their dashboard — it was CLI / developer
+    language leaking through."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    # Scan every markdown + caption block on the page.
+    visible_strings: list[str] = []
+    visible_strings.extend(m.value for m in at.markdown)
+    visible_strings.extend(c.value for c in at.caption)
+    for s in visible_strings:
+        assert "ccusage" not in s.lower(), (
+            f"`ccusage` leaked into visible copy: {s!r}"
+        )
+
+
+# ---------- Overview polish: charts ----------
+
+
+def _plotly_chart_keys(at: AppTest) -> set[str]:
+    """Walk the element tree, return every `st.plotly_chart`'s key.
+
+    AppTest doesn't expose `plotly_chart` as a top-level collection;
+    it surfaces as an `UnknownElement` with `type == "plotly_chart"`.
+    The user-provided key is the trailing segment of `proto.id`,
+    formatted as `$$ID-<hash>-<key>` (where the hash may contain
+    its own hyphens, so split with maxsplit=2 and take the rest).
+    """
+    keys: set[str] = set()
+
+    def visit(node) -> None:
+        if getattr(node, "type", None) == "plotly_chart":
+            parts = node.proto.id.split("-", 2)
+            if len(parts) == 3:
+                keys.add(parts[2])
+        children = getattr(node, "children", None)
+        if children:
+            iterator = children.values() if hasattr(children, "values") else children
+            for child in iterator:
+                visit(child)
+
+    visit(at.main)
+    return keys
+
+
+def test_overview_renders_unified_cost_trend_chart(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The Overview's two prior cost charts (`overview-stacked-area`
+    + `overview-rolling-line`) consolidated into one `overview-cost-trend`
+    that overlays the rolling-average line on top of the stacked area."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    chart_keys = _plotly_chart_keys(at)
+    assert "overview-cost-trend" in chart_keys
+    assert "overview-token-mix" in chart_keys
+    assert "overview-stacked-area" not in chart_keys
+    assert "overview-rolling-line" not in chart_keys
+
+
 def test_live_renders(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     at = _at("live")

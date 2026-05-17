@@ -1,49 +1,62 @@
-"""Overview page: KPIs + three charts. Click-to-drill on the stacked area.
+"""Overview page.
 
-Per PLAN.md §3.3 the stacked-area chart is the entry point to the day
-view — clicking a day in the chart sets `?view=day&day=YYYY-MM-DD` and
-reruns. The model filter from the sidebar is applied post-fetch via
+The landing surface: page H1 + window-context subtitle, KPI strip in
+cards, dynamic insight paragraph, inline cost composition, and two
+charts (cost trend with rolling overlay + percent-stacked token mix).
+
+Per PLAN.md §3.3 the cost-trend chart is the drill entry-point —
+clicking a day sets `?view=day&day=YYYY-MM-DD` and reruns. The
+underlying model filter from the sidebar is applied post-fetch via
 `filter_daily_by_models`.
 
-Slice 12 adds context to the Window cost KPI:
-- On Enterprise (pay-as-you-go), the value is ccusage's API cost — your
-  actual bill — and the delta compares to the prior equivalent window.
-- On flat-rate plans (Pro / Max), the value is your prorated plan fee
-  (what you actually pay) and the delta shows what the same usage would
-  have cost at API rates ("would-have-been"). The previous
-  "API-equivalent" banner is dropped because the KPI now self-explains.
+The Window-cost KPI re-frames itself based on the active plan
+(`state.plan.is_flat_rate`). Enterprise (pay-per-token) shows ccusage's
+API cost as the headline. Pro / Max-5× / Max-20× show the prorated
+plan fee as the headline with the API-equivalent figure as a
+"would-have-been" delta. The plan default lives in
+`config.DEFAULT_PLAN_NAME`.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime
 
+import pandas as pd
 import streamlit as st
 
-from tokenscope import data
+from tokenscope import config, data
 from tokenscope.analytics import (
-    active_block_burn,
     aggregate_cache_hit_ratio,
     available_models,
     cost_by_kind,
     filter_daily_by_models,
+    format_compact_int,
     last_day_cost,
+    overview_insight,
     prior_window_query,
+    spike_day,
     window_cost,
 )
 from tokenscope.ccusage import CcusageError
-from tokenscope.models import BlocksReport, DailyReport
+from tokenscope.models import DailyReport
 from tokenscope.navigation import Navigation
 from tokenscope.plans import Plan
 from tokenscope.query import Query
 from tokenscope.ui._data import load_daily
 from tokenscope.ui._nav import handle_chart_drill
 from tokenscope.ui.charts import (
-    rolling_average_line,
-    stacked_area_cost_by_family,
-    token_mix_bar,
+    cost_trend_with_rolling,
+    token_mix_percent_bar,
 )
 from tokenscope.ui.sidebar import SidebarState
+
+
+# Composition-table delta vs ccusage is suppressed below this threshold
+# — the difference is rounding noise, not a meaningful divergence, and
+# surfacing "0.0%" is just noise. Operator-tunable threshold not worth
+# the configuration weight; 1% is the natural floor for the percent
+# formatter (".1f%%").
+_COMPOSITION_DELTA_DISPLAY_THRESHOLD = 0.01
 
 
 def render(state: SidebarState, nav: Navigation, today: date | None = None) -> None:
@@ -52,11 +65,6 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
     daily_report = load_daily(state)
     if daily_report is None:
         return
-
-    try:
-        blocks_report = data.blocks(active=True, query=state.query)
-    except CcusageError:
-        blocks_report = None
 
     # Prior-period comparison fetch (cached). Only meaningful when the
     # current query has explicit since/until.
@@ -72,15 +80,18 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
         except CcusageError:
             prior_total = None
 
-    _render_kpis(daily_report, blocks_report, state.plan, state.query, prior_total)
+    window_days = _window_days(state.query) or config.DEFAULT_RANGE_DAYS
+    spike = spike_day(daily_report, threshold_multiplier=config.OVERVIEW_SPIKE_THRESHOLD)
+
+    _render_page_header(state, window_days)
+    _render_kpis(daily_report, state.plan, state.query, prior_total, window_days)
+    _render_insight(daily_report, prior_total, window_days, spike)
 
     # Enterprise users pay per token, so the per-kind composition is
-    # actionable for them. Flat-rate plans (Pro / Max) pay a fixed
-    # monthly fee regardless of mix, so this view would be noise.
+    # actionable for them. Flat-rate plans pay a fixed monthly fee
+    # regardless of mix, so this would be noise on those plans.
     if not state.plan.is_flat_rate and daily_report.daily:
         _render_cost_composition(daily_report)
-
-    st.divider()
 
     if not daily_report.daily:
         st.info(
@@ -89,180 +100,274 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
         )
         return
 
-    st.subheader("Daily cost by model family")
-    fig = stacked_area_cost_by_family(daily_report)
-    if fig is not None:
-        event = st.plotly_chart(
-            fig,
-            width="stretch",
-            key="overview-stacked-area",
-            on_select="rerun",
-            selection_mode=("points",),
-        )
-        handle_chart_drill(
-            event, lambda x: nav.to_day(x[:10]), chart_key="overview-stacked-area"
-        )
+    _render_cost_trend(daily_report, nav, spike)
+    _render_token_mix(daily_report, nav)
 
-    st.subheader("7-day rolling average cost")
-    fig = rolling_average_line(daily_report, window_days=7)
-    if fig is not None:
-        event = st.plotly_chart(
-            fig,
-            width="stretch",
-            key="overview-rolling-line",
-            on_select="rerun",
-            selection_mode=("points",),
-        )
-        handle_chart_drill(
-            event, lambda x: nav.to_day(x[:10]), chart_key="overview-rolling-line"
-        )
 
-    st.subheader("Daily token mix")
-    fig = token_mix_bar(daily_report)
-    if fig is not None:
-        event = st.plotly_chart(
-            fig,
-            width="stretch",
-            key="overview-token-mix",
-            on_select="rerun",
-            selection_mode=("points",),
-        )
-        handle_chart_drill(
-            event, lambda x: nav.to_day(x[:10]), chart_key="overview-token-mix"
-        )
+# --- header --------------------------------------------------------------
+
+
+def _render_page_header(state: SidebarState, window_days: int) -> None:
+    """Page H1 (`Overview`) + window-context subtitle. The product
+    wordmark sits in the browser tab via `st.set_page_config`; the
+    visible H1 on every page should be the *view name*, not the
+    product name."""
+    st.markdown("# Overview")
+    st.caption(
+        f"Window: last {window_days} days · times in {state.query.tz}"
+    )
+
+
+# --- KPIs ---------------------------------------------------------------
 
 
 def _render_kpis(
     daily_report: DailyReport,
-    blocks_report: BlocksReport | None,
     plan: Plan,
     query: Query,
     prior_total: float | None,
+    window_days: int,
 ) -> None:
+    """Four-card KPI strip. Each KPI lives inside a bordered container
+    so the row reads as four grouped surfaces, not as floating numbers.
+
+    The Active-block $/hr KPI was removed in favour of `Avg daily cost`
+    so every card describes the same window — the prior mix-of-time-
+    scales row forced the reader to re-anchor for each card. The Live
+    tab owns the active-block view.
+
+    Window-cost delta uses `delta_color="inverse"` so a cost *increase*
+    paints red — going up is not the good direction on a cost metric.
+    """
     api_window_cost = window_cost(daily_report)
     last_day = last_day_cost(daily_report)
-    burn = active_block_burn(blocks_report) if blocks_report is not None else None
     cache_ratio = aggregate_cache_hit_ratio(daily_report)
+    avg_daily = api_window_cost / window_days if window_days > 0 else 0.0
 
     c1, c2, c3, c4 = st.columns(4)
 
+    with c1, st.container(border=True):
+        _render_window_cost_kpi(plan, api_window_cost, prior_total, window_days)
+
+    with c2, st.container(border=True):
+        if last_day is not None:
+            st.metric(
+                "Last day",
+                f"${last_day[1]:,.2f}",
+                help=f"Cost on {last_day[0]} — the most recent day with data.",
+            )
+            st.caption(last_day[0])
+        else:
+            st.metric("Last day", "—")
+            st.caption("no data in window")
+
+    with c3, st.container(border=True):
+        st.metric("Avg daily cost", f"${avg_daily:,.2f}")
+        st.caption(f"window cost ÷ {window_days} days")
+
+    with c4, st.container(border=True):
+        st.metric("Cache hit ratio", f"{cache_ratio:.1%}")
+        st.caption("cache_read / input-side tokens")
+
+
+def _render_window_cost_kpi(
+    plan: Plan,
+    api_window_cost: float,
+    prior_total: float | None,
+    window_days: int,
+) -> None:
+    """Window-cost KPI — flips between pay-per-token (Enterprise) and
+    flat-rate (Pro / Max). Extracted so the four-card layout in
+    `_render_kpis` reads as a parallel column comp."""
     if plan.is_flat_rate:
-        # Flat-rate plans (Pro / Max): the user pays their monthly fee
-        # *regardless of window length*. Showing a prorated number was
-        # confusing — implied the price varies with date-picker selection
-        # when it doesn't. Headline is the flat monthly fee verbatim;
-        # the API-equivalent is the savings-context delta.
         savings = api_window_cost - plan.flat_rate_usd_per_month
-        c1.metric(
+        st.metric(
             f"Plan cost ({plan.name})",
             f"${plan.flat_rate_usd_per_month:,.0f}/mo",
-            delta=(
-                f"would cost ${api_window_cost:,.2f} at API rates this window"
-            ),
+            delta=f"would cost ${api_window_cost:,.2f} at API rates",
             delta_color="off",
             help=(
                 f"Your {plan.name} plan is flat-rate at "
                 f"${plan.flat_rate_usd_per_month:.0f}/month — paid regardless of "
-                f"how many tokens you push or how long this window is. "
-                f"The delta is what the same usage would have cost at API rates "
-                f"(${abs(savings):,.2f} {'saved' if savings >= 0 else 'over'} "
-                f"vs your subscription)."
+                f"window length. The delta is what the same usage would have "
+                f"cost at API rates "
+                f"(${abs(savings):,.2f} {'saved' if savings >= 0 else 'over'})."
             ),
         )
-    else:
-        # Enterprise / pay-as-you-go: ccusage's API cost is the actual bill.
-        # Delta compares to the prior equivalent window.
-        delta_kwargs: dict = {}
-        if prior_total and prior_total > 0:
-            change = (api_window_cost - prior_total) / prior_total
-            delta_kwargs["delta"] = f"{change:+.0%} vs prior {_window_days(query) or 30}d"
-        c1.metric(
-            "Window cost",
-            f"${api_window_cost:,.2f}",
-            help="Sum of total_cost across every day in the selected date range. "
-                 "Delta compares to the previous equivalent-length window.",
-            **delta_kwargs,
-        )
+        return
 
-    if last_day is not None:
-        c2.metric(
-            f"Last day ({last_day[0]})",
-            f"${last_day[1]:,.2f}",
-            help="Cost on the most recent day with data inside the window.",
-        )
-    else:
-        c2.metric("Last day", "—")
-    c3.metric(
-        "Active block $/hr",
-        f"${burn:,.2f}" if burn is not None else "—",
-        help="Cost-per-hour for the currently-active 5-hour billing window.",
+    delta_kwargs: dict = {}
+    if prior_total and prior_total > 0:
+        change = (api_window_cost - prior_total) / prior_total
+        delta_kwargs["delta"] = f"{change:+.0%} vs prior {window_days}d"
+        # Inverse: positive cost delta paints red. More spend is not
+        # the good direction on a cost dashboard.
+        delta_kwargs["delta_color"] = "inverse"
+    st.metric(
+        "Window cost",
+        f"${api_window_cost:,.2f}",
+        help=(
+            "Sum of total_cost across every day in the selected date "
+            "range. Delta compares to the previous equivalent-length window."
+        ),
+        **delta_kwargs,
     )
-    c4.metric(
-        "Cache hit ratio",
-        f"{cache_ratio:.1%}",
-        help="cache_read / (input + cache_create + cache_read), aggregated.",
+    st.caption(f"last {window_days} days")
+
+
+# --- insight summary -----------------------------------------------------
+
+
+def _render_insight(
+    daily_report: DailyReport,
+    prior_total: float | None,
+    window_days: int,
+    spike: tuple[str, float] | None,
+) -> None:
+    """One-paragraph dynamic summary of what the window contains.
+
+    Composed from the same rollups the KPI cards display, plus the
+    spike-detection output. Renders inside a left-bordered callout
+    panel (CSS-driven) so the eye reads it as narrative, not metric."""
+    paragraph = overview_insight(
+        window_total_cost=window_cost(daily_report),
+        window_days=window_days,
+        prior_total=prior_total,
+        spike=spike,
+        cache_hit_ratio=aggregate_cache_hit_ratio(daily_report),
     )
+    st.markdown(
+        f'<div class="tokenscope-insight">{paragraph}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# --- cost composition ----------------------------------------------------
 
 
 def _render_cost_composition(daily_report: DailyReport) -> None:
-    """Enterprise-only: break window cost into estimated $-per-kind so
-    the user sees where the money is actually going (mostly cache_read
-    for typical Claude Code use).
+    """Inline cost composition — section header + one-line subtitle +
+    breakdown table. Previously buried inside `st.expander`, which
+    framed it as optional drill-down content; it's actually the
+    most-cited number on the page and deserves first-class space.
 
-    The numbers are an estimate — ccusage doesn't break out per-kind
-    cost, so we multiply token counts by Anthropic's published rate
-    schedule (`tokenscope.pricing.RATES`). The estimated total
-    typically lands within a few percent of ccusage's reported total;
-    we show both so the gap is honest.
+    Token counts use `format_compact_int` (4.9M / 1.6B) so cell widths
+    don't blow past the container. Tokens column is widened so the cost
+    column never clips on a narrow viewport — the prior 4-column
+    default-width pack clipped `Est. cost (USD)` off the right edge.
+
+    The estimate-vs-ccusage delta is dropped unless it exceeds the
+    display threshold — "-0.0%" was rounding noise that surfaced the
+    upstream library's name in user-facing copy for zero signal.
     """
-    import pandas as pd
-
     rows = cost_by_kind(daily_report)
     if not rows or all(r["tokens"] == 0 for r in rows):
         return
 
     est_total = sum(r["est_cost"] for r in rows)
     actual_total = window_cost(daily_report)
-    diff_pct = ((est_total - actual_total) / actual_total) if actual_total else 0.0
+    diff_pct = (
+        (est_total - actual_total) / actual_total if actual_total else 0.0
+    )
 
-    with st.expander(
-        f"Cost composition — where the ${actual_total:,.2f} went "
-        f"(est. ${est_total:,.2f}, {diff_pct:+.1%} vs ccusage)",
-        expanded=False,
-    ):
-        st.caption(
-            "Tokens × Anthropic's per-kind rate. Cache reads cost a small "
-            "fraction of input rate, output tokens cost several times input "
-            "— that's why the mix matters more than the raw token total. "
-            "The estimate can differ from ccusage's reported total when "
-            "promotional discounts or model-version pricing nuance apply."
-        )
-        # ProgressColumn's `format` string is applied to the raw value with no
-        # implicit ×100 — so a 0–1 fraction with format "%.1f%%" renders as
-        # "0.6%" instead of "65.0%". Pre-multiply and widen min/max to 100.
-        df = pd.DataFrame(
-            [
-                {
-                    "Kind": r["kind"],
-                    "Tokens": r["tokens"],
-                    "Est. cost (USD)": r["est_cost"],
-                    "Share": r["share"] * 100,
-                }
-                for r in rows
-            ]
-        )
-        st.dataframe(
-            df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Tokens": st.column_config.NumberColumn(format="%d"),
-                "Est. cost (USD)": st.column_config.NumberColumn(format="$%.2f"),
-                "Share": st.column_config.ProgressColumn(
-                    min_value=0.0, max_value=100.0, format="%.1f%%"
-                ),
-            },
-        )
+    st.markdown("### Cost composition")
+    st.caption(
+        "Estimate of where the window's spend went, by token kind. "
+        "Tokens × Anthropic's per-kind rate — cache reads are a small "
+        "fraction of input rate, output costs several times input, "
+        "so the mix matters more than the raw token total."
+    )
+
+    df = pd.DataFrame(
+        [
+            {
+                "Kind": r["kind"],
+                "Tokens": format_compact_int(r["tokens"]),
+                "Est. cost (USD)": r["est_cost"],
+                "Share": r["share"] * 100,
+            }
+            for r in rows
+        ]
+    )
+    st.dataframe(
+        df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Kind": st.column_config.TextColumn(width="small"),
+            "Tokens": st.column_config.TextColumn(width="medium"),
+            "Est. cost (USD)": st.column_config.NumberColumn(
+                format="$%.2f", width="medium"
+            ),
+            "Share": st.column_config.ProgressColumn(
+                min_value=0.0, max_value=100.0, format="%.1f%%", width="medium"
+            ),
+        },
+    )
+    if abs(diff_pct) >= _COMPOSITION_DELTA_DISPLAY_THRESHOLD:
+        st.caption(f"Estimate accuracy: {diff_pct:+.1%} vs source.")
+
+
+# --- charts --------------------------------------------------------------
+
+
+def _render_cost_trend(
+    daily_report: DailyReport,
+    nav: Navigation,
+    spike: tuple[str, float] | None,
+) -> None:
+    """Combined cost-by-family stacked area + 7-day rolling overlay,
+    with the spike day annotated. Clicking a point still drills into
+    the day view (PLAN.md §3.1)."""
+    st.markdown("### Daily cost")
+    st.caption(
+        "Stacked area = per-family raw daily cost. Dotted line is the "
+        "7-day rolling average. Click any day to drill into the detail view."
+    )
+    fig = cost_trend_with_rolling(
+        daily_report, rolling_window_days=7, spike=spike
+    )
+    if fig is None:
+        return
+    event = st.plotly_chart(
+        fig,
+        width="stretch",
+        key="overview-cost-trend",
+        on_select="rerun",
+        selection_mode=("points",),
+    )
+    handle_chart_drill(
+        event, lambda x: nav.to_day(x[:10]), chart_key="overview-cost-trend"
+    )
+
+
+def _render_token_mix(daily_report: DailyReport, nav: Navigation) -> None:
+    """Percent-stacked token-mix bar. "Mix" is a composition question
+    — each day's bars sum to 100% so the user reads "what fraction of
+    each day went to input/output/cache_create/cache_read" directly.
+    Magnitude is one hover away via the bar's customdata."""
+    st.markdown("### Token mix")
+    st.caption(
+        "What fraction of each day's tokens went to input / output / "
+        "cache_create / cache_read. Each bar sums to 100%; absolute "
+        "token counts surface on hover."
+    )
+    fig = token_mix_percent_bar(daily_report)
+    if fig is None:
+        return
+    event = st.plotly_chart(
+        fig,
+        width="stretch",
+        key="overview-token-mix",
+        on_select="rerun",
+        selection_mode=("points",),
+    )
+    handle_chart_drill(
+        event, lambda x: nav.to_day(x[:10]), chart_key="overview-token-mix"
+    )
+
+
+# --- helpers -------------------------------------------------------------
 
 
 def _window_days(query: Query) -> int | None:
@@ -275,5 +380,3 @@ def _window_days(query: Query) -> int | None:
     except ValueError:
         return None
     return (until - since).days + 1
-
-

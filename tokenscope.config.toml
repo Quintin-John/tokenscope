@@ -21,6 +21,14 @@ data_cache_ttl_seconds = 30
 # `@st.fragment(run_every=...)` decorator uses this directly.
 refresh_seconds = 30
 
+[overview]
+# Multiplier for the daily-cost-spike detection on the Overview page.
+# A day's total cost qualifies as a spike worth annotating on the
+# trend chart when it exceeds this multiplier × the window's median
+# daily cost. Lower = more sensitive, higher = only annotate genuinely
+# extreme days. 3.0 is the conventional outlier heuristic.
+spike_threshold_median_multiplier = 3.0
+
 [pricing]
 # Source of truth for per-model rates (input / output / cache_create /
 # cache_read). LiteLLM mirrors Anthropic's public pricing and is what
