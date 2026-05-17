@@ -89,7 +89,66 @@ state expands to carry both ranges; chart builders need dual-trace
 mode (probably an optional `comparison=` kwarg).
 **Risk.** Medium-high — biggest of the five.
 
+### Slice 23 — Budget tracking + spend alerts
+
+**Scope.** Optional budgets in `tokenscope.config.toml` — any of:
+- `daily_budget_usd` (e.g. $50/day)
+- `monthly_budget_usd` (e.g. $1000/month)
+- `window_budget_usd` (the user's currently-selected date range)
+
+When *any* budget is set, the Overview gains a **"Budget remaining"**
+KPI card showing the positive — `$642.85 left of $1,000 (May)` — with
+a progress bar visualising consumption. Sits alongside Window cost.
+
+The same data drives a tiered alert banner when consumption climbs:
+- 0–80% → silent. The Budget-remaining card is the only signal.
+- 80–100% → yellow warning banner above KPIs.
+- ≥100% → red over-budget banner + KPI flips to `$X over budget`.
+
+Live view extends the check with the active block's burn rate
+projected forward: "at this rate you'll hit your daily budget by
+14:00". When running in Docker, mirror warnings to stdout
+(`docker logs`) so users polling logs can also see it.
+
+**Why.** Most users don't *want* a runaway alarm — they want to
+glance at the dashboard and see how much room they have left in the
+month. The positive framing ("$X left of $K") is the headline; the
+alert is what happens when remaining → 0. Enterprise / pay-per-API
+users on a fixed monthly cap especially want this.
+
+**Effort.** Medium. Needs:
+- Config keys (any combination of daily / monthly / window budget)
+- `analytics.budget_status(daily_report, today, budgets)` returning
+  `{remaining, consumed, percent_used, tier: ok|warn|over}` for each
+  active budget
+- KPI card component (`Budget remaining`) with progress bar
+- Banner component (`ui/_alerts.py`) for warn/over tiers
+- Banner + KPI wired into Overview; banner repeated on Live
+- Optional Live-view "ETA to limit" using the existing burn rate
+
+**Risk.** Low-medium. Three tiers + opt-in via config (default no
+budget = no card and no banner) keeps it out of the way until the
+user opts in.
+
+**Honest caveats** for whoever picks this up:
+- This is *informational*, not enforcement. We don't intercept
+  Claude Code's network calls or pause sessions. The banner is a
+  loud "hey".
+- Browser tab must be open / refreshed for the banner to appear.
+  The Live view auto-refreshes every 30s; Overview reruns on
+  sidebar interaction. A user with the tab closed sees nothing
+  until they reopen.
+- The Docker-logs mirror happens only when the script actually
+  re-runs — Streamlit's rerun model isn't a daemon. Genuine
+  background watchdog (long-running poller) would be a separate
+  slice and isn't free.
+- The flat-rate plan KPI flow (Pro / Max) already shows a fixed
+  monthly fee. The budget card should only render on Enterprise,
+  where the per-token spend actually varies; on flat-rate plans
+  the user already knows what they'll pay.
+
 ## Suggested order
 
-`18 → 19 → 20 → 21 → 22` — each independent, value-per-effort drops
-at 21 and again at 22. Stop at any rung.
+`18 → 19 → 20 → 21 → 22 → 23` — each independent, value-per-effort
+drops at 21 and again at 22. Slice 23 is its own category (alerts,
+not metrics) and can be picked up out of order. Stop at any rung.
