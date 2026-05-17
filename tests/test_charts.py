@@ -22,6 +22,7 @@ from tokenscope.models import (
     Totals,
 )
 from tokenscope.ui.charts import (
+    _daily_metric_figure,
     burn_gauge,
     cache_hit_ratio_line,
     donut_cost_by_model,
@@ -72,6 +73,90 @@ def _report(entries: list[DailyEntry]) -> DailyReport:
     )
 
 
+# ---------- _daily_metric_figure (the single-day fallback helper) ----------
+
+
+def _two_day_df():
+    import pandas as pd
+    return pd.DataFrame(
+        [
+            {"date": "2026-05-15", "y": 1.0, "g": "a"},
+            {"date": "2026-05-15", "y": 2.0, "g": "b"},
+            {"date": "2026-05-16", "y": 3.0, "g": "a"},
+            {"date": "2026-05-16", "y": 4.0, "g": "b"},
+        ]
+    )
+
+
+def _one_day_df():
+    import pandas as pd
+    return pd.DataFrame(
+        [
+            {"date": "2026-05-16", "y": 5.0, "g": "a"},
+            {"date": "2026-05-16", "y": 6.0, "g": "b"},
+        ]
+    )
+
+
+def test_daily_metric_figure_multi_day_area_uses_stackgroup() -> None:
+    fig = _daily_metric_figure(
+        _two_day_df(),
+        x="date", y="y", color="g",
+        labels={"date": "Date", "y": "Y", "g": "G"},
+        multi_day="area",
+    )
+    # px.area renders scatter traces with stackgroup set (that's how
+    # plotly_express distinguishes "area" from "line" — fill is None,
+    # the stackgroup attr carries the layering identity).
+    assert all(t.type == "scatter" for t in fig.data)
+    assert all(t.stackgroup for t in fig.data), (
+        f"expected stackgroup on every trace, got "
+        f"{[t.stackgroup for t in fig.data]}"
+    )
+
+
+def test_daily_metric_figure_multi_day_line_has_markers_and_lines() -> None:
+    fig = _daily_metric_figure(
+        _two_day_df()[["date", "y"]].drop_duplicates(subset=["date"]),
+        x="date", y="y",
+        labels={"date": "Date", "y": "Y"},
+        multi_day="line",
+    )
+    assert len(fig.data) == 1
+    assert fig.data[0].type == "scatter"
+    assert fig.data[0].mode == "lines+markers"
+
+
+def test_daily_metric_figure_single_day_forces_bar_with_stack_when_coloured() -> None:
+    fig = _daily_metric_figure(
+        _one_day_df(),
+        x="date", y="y", color="g",
+        labels={"date": "Date", "y": "Y", "g": "G"},
+        multi_day="area",
+    )
+    assert all(t.type == "bar" for t in fig.data)
+    assert fig.layout.barmode == "stack"
+
+
+def test_daily_metric_figure_single_day_uncoloured_bar_no_stack_directive() -> None:
+    """When ``color`` is None there's no series split, so barmode must not
+    be touched — leaving Plotly's default is the correct authoritative
+    behaviour (no spurious layout override)."""
+    fig = _daily_metric_figure(
+        _one_day_df()[["date", "y"]].drop_duplicates(subset=["date"]),
+        x="date", y="y",
+        labels={"date": "Date", "y": "Y"},
+        multi_day="line",
+    )
+    assert len(fig.data) == 1
+    assert fig.data[0].type == "bar"
+    # We did not set barmode in this branch — Plotly default ('group') stands.
+    assert fig.layout.barmode != "stack"
+
+
+# ---------- stacked_area_cost_by_family / rolling_average_line ----------
+
+
 def test_stacked_area_returns_figure_with_family_traces() -> None:
     report = _report(
         [
@@ -90,6 +175,28 @@ def test_stacked_area_empty_returns_none() -> None:
     assert stacked_area_cost_by_family(_report([])) is None
 
 
+def test_stacked_area_single_day_uses_bar_not_area() -> None:
+    """Single-day windows must render as a stacked bar — px.area paints
+    a zero-width band with one x-value, leaving the chart blank."""
+    report = _report(
+        [
+            _entry("2026-05-16", cost=5.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=1.0, model="claude-haiku-4-5-20251001"),
+        ]
+    )
+    fig = stacked_area_cost_by_family(report)
+    assert isinstance(fig, go.Figure)
+    # All traces should be bars, not scatter (which is what px.area uses).
+    assert all(t.type == "bar" for t in fig.data), (
+        f"expected bar traces on single-day window, got "
+        f"{[t.type for t in fig.data]}"
+    )
+    # Stacked, not grouped — barmode must be "stack" so families layer.
+    assert fig.layout.barmode == "stack"
+    # The family colour split must survive the fallback.
+    assert {t.name for t in fig.data} == {"opus", "haiku"}
+
+
 def test_rolling_line_returns_figure() -> None:
     report = _report(
         [
@@ -104,6 +211,19 @@ def test_rolling_line_returns_figure() -> None:
     assert len(fig.data) == 1
     ys = list(fig.data[0].y)
     assert ys == [1.0, 2.0, 4.0]  # 1, (1+3)/2, (3+5)/2
+
+
+def test_rolling_line_single_day_uses_bar_not_line() -> None:
+    """Single-day rolling average must render as a bar — a one-point
+    px.line is just a marker dot that is easy to miss next to a $-axis."""
+    report = _report([_entry("2026-05-16", cost=42.0, model="claude-opus-4-7")])
+    fig = rolling_average_line(report, window_days=7)
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) == 1
+    assert fig.data[0].type == "bar", (
+        f"expected bar trace on single-day window, got {fig.data[0].type}"
+    )
+    assert list(fig.data[0].y) == [42.0]
 
 
 def test_rolling_line_empty_returns_none() -> None:

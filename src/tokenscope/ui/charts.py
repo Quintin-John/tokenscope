@@ -10,6 +10,8 @@ renders an empty-state message instead of an empty chart.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -25,12 +27,41 @@ from tokenscope.analytics import (
 from tokenscope.models import BlockEntry, DailyEntry, DailyReport, SessionEntry
 
 
+def _daily_metric_figure(
+    df: pd.DataFrame,
+    *,
+    x: str,
+    y: str,
+    labels: dict[str, str],
+    color: str | None = None,
+    multi_day: Literal["area", "line"],
+) -> go.Figure:
+    """Single-day-safe per-day metric figure.
+
+    `px.area` paints a zero-width band when only one x-value is
+    present; `px.line` shrinks to a marker that's easy to miss next to
+    a $-axis. Both fall back to `px.bar` (stacked when ``color`` is
+    set) so the data stays visible in every window length. This is the
+    one authoritative path for that fallback — chart builders compose
+    it instead of duplicating the branching logic.
+    """
+    if df[x].nunique() == 1:
+        fig = px.bar(df, x=x, y=y, color=color, labels=labels)
+        if color is not None:
+            fig.update_layout(barmode="stack")
+        return fig
+    if multi_day == "area":
+        return px.area(df, x=x, y=y, color=color, labels=labels)
+    fig = px.line(df, x=x, y=y, color=color, labels=labels)
+    fig.update_traces(mode="lines+markers")
+    return fig
+
+
 def stacked_area_cost_by_family(daily_report: DailyReport) -> go.Figure | None:
     """Stacked area: per-day cost, coloured by model family (opus/haiku/...).
 
-    Single-day windows fall back to a stacked bar — `px.area` paints a
-    zero-width band when there's only one x-value, so the chart appears
-    blank even though the data is there.
+    Single-day windows fall back to a stacked bar via
+    `_daily_metric_figure`.
     """
     rows = daily_cost_by_model(daily_report)
     if not rows:
@@ -38,12 +69,14 @@ def stacked_area_cost_by_family(daily_report: DailyReport) -> go.Figure | None:
     df = pd.DataFrame(rows)
     # Collapse same-day-same-family into one row so the area is a single band per family.
     grouped = df.groupby(["date", "family"], as_index=False)["cost"].sum()
-    labels = {"date": "Date", "cost": "Cost (USD)", "family": "Model family"}
-    if grouped["date"].nunique() == 1:
-        fig = px.bar(grouped, x="date", y="cost", color="family", labels=labels)
-        fig.update_layout(barmode="stack")
-    else:
-        fig = px.area(grouped, x="date", y="cost", color="family", labels=labels)
+    fig = _daily_metric_figure(
+        grouped,
+        x="date",
+        y="cost",
+        color="family",
+        labels={"date": "Date", "cost": "Cost (USD)", "family": "Model family"},
+        multi_day="area",
+    )
     fig.update_layout(
         margin=dict(l=10, r=10, t=30, b=10),
         legend_title_text="",
@@ -53,21 +86,20 @@ def stacked_area_cost_by_family(daily_report: DailyReport) -> go.Figure | None:
 
 
 def rolling_average_line(daily_report: DailyReport, window_days: int = 7) -> go.Figure | None:
-    """7-day rolling average of daily cost as a line chart.
-
-    Single-day windows fall back to a bar — a one-point line is just a
-    marker dot that is easy to miss next to a $-axis.
+    """N-day rolling average of daily cost. Single-day windows fall back
+    to a bar via `_daily_metric_figure`.
     """
     points = rolling_cost_average(daily_report, window_days=window_days)
     if not points:
         return None
     df = pd.DataFrame(points, columns=["date", "avg_cost"])
-    labels = {"date": "Date", "avg_cost": f"{window_days}-day avg cost (USD)"}
-    if len(df) == 1:
-        fig = px.bar(df, x="date", y="avg_cost", labels=labels)
-    else:
-        fig = px.line(df, x="date", y="avg_cost", labels=labels)
-        fig.update_traces(mode="lines+markers")
+    fig = _daily_metric_figure(
+        df,
+        x="date",
+        y="avg_cost",
+        labels={"date": "Date", "avg_cost": f"{window_days}-day avg cost (USD)"},
+        multi_day="line",
+    )
     fig.update_layout(
         margin=dict(l=10, r=10, t=30, b=10),
         yaxis_tickprefix="$",

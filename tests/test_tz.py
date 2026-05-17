@@ -15,10 +15,12 @@ from tokenscope.tz import (
 )
 
 
-def test_detect_local_iana_returns_some_string() -> None:
+def test_detect_local_iana_returns_some_string(monkeypatch) -> None:
     """Whatever the host environment, we must return a non-empty string —
     every consumer can pass the result straight to ccusage without
-    nil-checks."""
+    nil-checks. TZ unset so the test isn't accidentally exercising the
+    env-var probe (which is covered separately)."""
+    monkeypatch.delenv("TZ", raising=False)
     name = detect_local_iana()
     assert isinstance(name, str)
     assert name  # never empty
@@ -54,6 +56,80 @@ def test_detect_local_iana_ignores_posix_tz(monkeypatch) -> None:
     name = detect_local_iana()
     assert name == "America/Chicago"
     assert "," not in name  # Definitely not the POSIX rule string.
+
+
+def test_detect_local_iana_empty_tz_falls_through(monkeypatch) -> None:
+    """TZ set to "" (e.g. a Docker compose-file with ``TZ:`` left blank)
+    must not satisfy the env probe — `.strip()` on an empty string is
+    falsy so the if-guard skips it and the symlink probe runs instead."""
+    import tokenscope.tz as tz_mod
+
+    monkeypatch.setenv("TZ", "")
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+    monkeypatch.setattr(
+        tz_mod.os, "readlink",
+        lambda _: "/usr/share/zoneinfo/Europe/Berlin",
+    )
+    assert detect_local_iana() == "Europe/Berlin"
+
+
+def test_detect_local_iana_whitespace_only_tz_falls_through(monkeypatch) -> None:
+    """TZ set to whitespace ("   ") is functionally unset — `.strip()`
+    normalises it. Skipping the env probe avoids handing whitespace to
+    ZoneInfo, which would raise and we'd swallow."""
+    import tokenscope.tz as tz_mod
+
+    monkeypatch.setenv("TZ", "   ")
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+    monkeypatch.setattr(
+        tz_mod.os, "readlink",
+        lambda _: "/usr/share/zoneinfo/Pacific/Auckland",
+    )
+    assert detect_local_iana() == "Pacific/Auckland"
+
+
+def test_detect_local_iana_malformed_iana_falls_through(monkeypatch) -> None:
+    """A typo'd IANA-looking value (`Atlantis/Lost_City`) is not a real
+    zone — ZoneInfo raises, we fall through rather than return junk
+    that would crash ccusage."""
+    import tokenscope.tz as tz_mod
+
+    monkeypatch.setenv("TZ", "Atlantis/Lost_City")
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+    monkeypatch.setattr(
+        tz_mod.os, "readlink",
+        lambda _: "/usr/share/zoneinfo/Asia/Tokyo",
+    )
+    assert detect_local_iana() == "Asia/Tokyo"
+
+
+def test_detect_local_iana_path_like_tz_falls_through(monkeypatch) -> None:
+    """TZ set to a path (`/etc/foo`) — ZoneInfo treats it as a key,
+    can't find it, raises. Must fall through."""
+    import tokenscope.tz as tz_mod
+
+    monkeypatch.setenv("TZ", "/etc/foo")
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+    monkeypatch.setattr(
+        tz_mod.os, "readlink",
+        lambda _: "/usr/share/zoneinfo/America/Denver",
+    )
+    assert detect_local_iana() == "America/Denver"
+
+
+def test_detect_local_iana_bare_utc_in_tz_returns_utc(monkeypatch) -> None:
+    """TZ="UTC" is a valid IANA zone (ZoneInfo accepts it). Returned as
+    the literal "UTC" — no '/' in the name, but still authoritative."""
+    monkeypatch.setenv("TZ", "UTC")
+    assert detect_local_iana() == "UTC"
 
 
 def test_detect_local_iana_symlink_fallback(monkeypatch, tmp_path) -> None:
