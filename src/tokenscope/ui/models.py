@@ -137,14 +137,35 @@ def _render_composition(daily_report, rows: list[dict]) -> None:
 
     st.markdown("**Token flow: kind → model family**")
     st.caption(
-        "How your token traffic splits across model families. Width = tokens "
-        "(cache_read typically dominates). Numbers next to each family = "
-        "total cost this window. Hover for the absolute token count."
+        "How your token traffic splits across model families. Numbers next "
+        "to each family = total cost this window. Hover any band to see "
+        "tokens and cost together."
     )
+
+    # Segmented controls — only useful when there are 2+ families.
+    control_cols = st.columns([2, 2, 6])
+    width_mode = control_cols[0].segmented_control(
+        "Width represents",
+        options=["Tokens", "Cost"],
+        default="Tokens",
+        key="models-sankey-width-mode",
+    ) or "Tokens"
+    top_n_label = control_cols[1].segmented_control(
+        "Show",
+        options=["Top 3", "Top 5", "Top 10", "All"],
+        default="Top 5" if len(families) > 5 else "All",
+        key="models-sankey-top-n",
+    ) or "All"
+    top_n = (
+        None
+        if top_n_label == "All"
+        else int(top_n_label.split()[-1])
+    )
+    value_mode = "cost" if width_mode == "Cost" else "tokens"
 
     left, right = st.columns([2, 1])
     with left:
-        fig = token_flow_sankey(daily_report)
+        fig = token_flow_sankey(daily_report, value_mode=value_mode, top_n=top_n)
         if fig is not None:
             st.plotly_chart(fig, width="stretch")
     with right:

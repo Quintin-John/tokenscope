@@ -217,11 +217,38 @@ def single_family_token_bar(daily_report: DailyReport) -> go.Figure | None:
     return fig
 
 
-def token_flow_sankey(daily_report: DailyReport) -> go.Figure | None:
-    """Sankey: token-kind → model family. Family labels carry the family's cost."""
-    data_ = token_flow_sankey_data(daily_report)
+def token_flow_sankey(
+    daily_report: DailyReport,
+    *,
+    value_mode: str = "tokens",
+    top_n: int | None = None,
+) -> go.Figure | None:
+    """Sankey: token-kind → model family.
+
+    ``value_mode``:
+      * ``"tokens"`` — link widths proportional to token counts.
+      * ``"cost"``  — link widths proportional to per-family cost,
+        proportionally attributed across kinds. Total Sankey width then
+        equals total window cost.
+
+    ``top_n`` collapses smaller families into an "Others" node.
+
+    Family labels always carry the family's aggregate cost. Hover detail
+    shows both the raw token count and the family's total cost so the
+    user reads both dimensions regardless of which mode is active.
+    """
+    data_ = token_flow_sankey_data(daily_report, value_mode=value_mode, top_n=top_n)
     if not data_["values"]:
         return None
+    customdata = data_["customdata"]
+    value_label = "Cost share" if value_mode == "cost" else "Tokens"
+    value_format = "$,.2f" if value_mode == "cost" else ",d"
+    link_hover = (
+        "<b>%{source.label}</b> → <b>%{target.label}</b><br>"
+        f"{value_label}: %{{value:{value_format}}}<br>"
+        "Tokens (absolute): %{customdata[0]:,d}<br>"
+        "Family total cost: $%{customdata[1]:,.2f}<extra></extra>"
+    )
     fig = go.Figure(
         go.Sankey(
             node=dict(
@@ -233,6 +260,8 @@ def token_flow_sankey(daily_report: DailyReport) -> go.Figure | None:
                 source=data_["sources"],
                 target=data_["targets"],
                 value=data_["values"],
+                customdata=customdata,
+                hovertemplate=link_hover,
             ),
         )
     )
