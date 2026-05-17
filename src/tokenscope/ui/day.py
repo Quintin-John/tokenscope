@@ -73,7 +73,7 @@ def render(state: SidebarState, nav: Navigation) -> None:
                 _session_row(session, nav)
 
     st.markdown("**Blocks starting on this day** (UTC)")
-    blocks = blocks_on_day(blocks_report, nav.day)
+    blocks = blocks_on_day(blocks_report, nav.day, tz=state.query.tz)
     if not blocks:
         st.caption("No blocks started on this day.")
     else:

@@ -16,6 +16,7 @@ class Query:
     until: str | None = None
     project: str | None = None
     offline: bool = False
+    tz: str | None = None  # IANA timezone, e.g. "America/Los_Angeles"
 
     def to_args(self) -> list[str]:
         """Render the query as a ccusage argv slice (no command name).
@@ -33,6 +34,8 @@ class Query:
             args.append(f"--until={self.until}")
         if self.project:
             args.append(f"--project={self.project}")
+        if self.tz:
+            args.append(f"--timezone={self.tz}")
         if self.offline:
             args.append("--offline")
         return args
