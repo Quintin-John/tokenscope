@@ -687,3 +687,65 @@ def typical_burn_rate(blocks_report: BlocksReport) -> float | None:
     if len(rates) < 3:
         return None
     return float(median(rates))
+
+
+def cost_by_kind(daily_report: DailyReport) -> list[dict] | None:
+    """Estimate per-kind cost for the window using LiteLLM's pricing.
+
+    For each model in the window:
+      cost_per_kind = tokens_of_kind × LiteLLM_rate_for_that_kind / 1M
+
+    Returns one row per kind (input / output / cache_create / cache_read):
+      {kind, tokens, est_cost, share}
+
+    `share` is the fraction of the *estimated* total — sums to 1.0.
+
+    Returns ``None`` when LiteLLM pricing isn't reachable AND no cached
+    copy exists (offline + first run). The caller should hide the
+    Cost-composition panel rather than showing made-up numbers.
+
+    Note: ccusage doesn't break out per-kind cost in its JSON; we apply
+    LiteLLM's published rate schedule (same source ccusage uses) to the
+    user's token counts. The sum across kinds typically lands within a
+    few percent of ccusage's reported total — the gap is model-version
+    pricing nuance + promotional discounts.
+    """
+    from tokenscope.pricing import KINDS, rates_for_model
+
+    tokens_by_kind: dict[str, int] = {k: 0 for k in KINDS}
+    cost_by_kind: dict[str, float] = {k: 0.0 for k in KINDS}
+    any_rates_available = False
+    for entry in daily_report.daily:
+        for b in entry.model_breakdowns:
+            rates = rates_for_model(b.model_name)
+            if rates is None:
+                continue
+            any_rates_available = True
+            counts = {
+                "input": b.input_tokens,
+                "output": b.output_tokens,
+                "cache_create": b.cache_creation_tokens,
+                "cache_read": b.cache_read_tokens,
+            }
+            for kind, n in counts.items():
+                tokens_by_kind[kind] += n
+                cost_by_kind[kind] += n / 1_000_000 * rates[kind]
+
+    # If we never resolved a single rate (e.g. offline + no cache),
+    # signal to the caller to hide the panel rather than render zeroes
+    # that would look like "no usage" when in fact rates are unknown.
+    if not any_rates_available and any(daily_report.daily):
+        return None
+
+    total_est = sum(cost_by_kind.values())
+    rows: list[dict] = []
+    for kind in KINDS:
+        rows.append(
+            {
+                "kind": kind,
+                "tokens": tokens_by_kind[kind],
+                "est_cost": cost_by_kind[kind],
+                "share": (cost_by_kind[kind] / total_est) if total_est else 0.0,
+            }
+        )
+    return rows

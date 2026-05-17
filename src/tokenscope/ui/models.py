@@ -182,6 +182,32 @@ def _render_composition(daily_report, rows: list[dict]) -> None:
             )
             st.plotly_chart(donut, width="stretch")
 
+    # Slice 15: drill-to-overview affordance per family. Plotly Sankey
+    # node-click selection through Streamlit is finicky; explicit buttons
+    # give the user a clear "drill into opus" action that piggybacks on
+    # the new sidebar URL state — the model filter survives the jump.
+    st.markdown("**Drill into a family**")
+    st.caption(
+        "Pre-fills the Models filter and routes to the Overview. "
+        "Use the page selector or breadcrumbs to come back."
+    )
+    drill_cols = st.columns(min(len(rows), 6) or 1)
+    for idx, fam in enumerate(sorted(families)):
+        fam_models = [r["model"] for r in rows if r["family"] == fam]
+        if not fam_models:
+            continue
+        col = drill_cols[idx % len(drill_cols)]
+        if col.button(f"→ {fam}", key=f"drill-family-{fam}"):
+            st.query_params["view"] = "overview"
+            st.query_params["models"] = ",".join(fam_models)
+            # Wipe deeper drill state if present.
+            for k in ("day", "session", "block"):
+                if k in st.query_params:
+                    del st.query_params[k]
+            # session_state must agree with the URL after we've set it.
+            st.session_state["sidebar-models"] = fam_models
+            st.rerun()
+
 
 def _family_donut_rows(rows: list[dict]) -> list[dict]:
     """Roll model-level rows up to family level for the donut."""

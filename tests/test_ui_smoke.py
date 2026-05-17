@@ -201,7 +201,7 @@ def test_plan_switch_to_pro_flips_window_cost_kpi(
     at.run()
     _assert_clean(at)
     pro_metric = next(
-        (m for m in at.metric if m.label and m.label.startswith("Window cost (Pro)")),
+        (m for m in at.metric if m.label and m.label.startswith("Plan cost (Pro)")),
         None,
     )
     assert pro_metric is not None
