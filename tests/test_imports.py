@@ -179,3 +179,64 @@ def test_models_public_surface() -> None:
 
     for cls in (DailyReport, WeeklyReport, MonthlyReport, SessionReport, BlocksReport):
         assert hasattr(cls, "model_validate")
+
+
+# ---------- type-annotation resolution (slice 7) ----------
+#
+# `from __future__ import annotations` stores annotations as strings.
+# A typo in a type name wouldn't fail at module load — it would just
+# resolve to nothing during runtime introspection. We rely on these
+# annotations being correct (mypy is NOT installed as a dev dep, so
+# we can't fall back on a type-checker), so the test resolves them
+# explicitly via `typing.get_type_hints` and asserts identity. If
+# someone later mistypes one, this fails immediately.
+
+
+def _resolved_hint(func, param_name: str):
+    """Return the resolved (class, not string) annotation for `param_name`
+    on `func`. `include_extras=False` strips Annotated[] wrappers we
+    don't currently use."""
+    from typing import get_type_hints
+
+    hints = get_type_hints(func, include_extras=False)
+    return hints[param_name]
+
+
+def test_overview_render_kpis_param_types_resolve() -> None:
+    """Audit Notable #8: _render_kpis was untyped on its first two
+    params. Slice 7 added DailyReport / BlocksReport | None. Lock that
+    in so a future refactor doesn't drop them."""
+    from tokenscope.models import BlocksReport, DailyReport
+    from tokenscope.ui.overview import _render_kpis
+
+    assert _resolved_hint(_render_kpis, "daily_report") is DailyReport
+    # BlocksReport | None resolves to a Union — confirm by checking
+    # both arms are present.
+    blocks_hint = _resolved_hint(_render_kpis, "blocks_report")
+    args = getattr(blocks_hint, "__args__", ())
+    assert BlocksReport in args and type(None) in args
+
+
+def test_overview_render_cost_composition_param_type_resolves() -> None:
+    from tokenscope.models import DailyReport
+    from tokenscope.ui.overview import _render_cost_composition
+
+    assert _resolved_hint(_render_cost_composition, "daily_report") is DailyReport
+
+
+def test_models_view_render_composition_param_type_resolves() -> None:
+    from tokenscope.models import DailyReport
+    from tokenscope.ui.models import _render_composition
+
+    assert _resolved_hint(_render_composition, "daily_report") is DailyReport
+
+
+def test_day_view_row_entity_param_types_resolve() -> None:
+    """Audit Notable #8: _session_row and _block_row added types in
+    slice 5. Pin them here so the type-hint sweep covers the whole
+    audit finding in one regression net."""
+    from tokenscope.models import BlockEntry, SessionEntry
+    from tokenscope.ui.day import _block_row, _session_row
+
+    assert _resolved_hint(_session_row, "session") is SessionEntry
+    assert _resolved_hint(_block_row, "block") is BlockEntry

@@ -23,6 +23,7 @@ import pandas as pd
 import streamlit as st
 
 from tokenscope.analytics import model_breakdown
+from tokenscope.models import DailyReport
 from tokenscope.navigation import Navigation
 from tokenscope.ui._data import load_daily
 from tokenscope.ui._nav import route_to
@@ -109,7 +110,7 @@ def _render_breakdown_table(rows: list[dict]) -> None:
     )
 
 
-def _render_composition(daily_report, rows: list[dict]) -> None:
+def _render_composition(daily_report: DailyReport, rows: list[dict]) -> None:
     families = {row["family"] for row in rows}
     if len(families) <= 1:
         st.markdown("**Token composition**")
