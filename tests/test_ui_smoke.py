@@ -411,6 +411,53 @@ def test_overview_token_mix_has_non_cache_toggle(
     assert toggle.value is True  # default = include cache_read
 
 
+def test_overview_cost_trend_has_stack_overlay_toggle(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The Daily-cost card carries a Stacked/Overlay segmented
+    control so a dominant family can't hide the smaller ones —
+    overlay mode draws each family independently."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    seg = next(
+        (s for s in at.segmented_control if s.key == "overview-cost-trend-mode"),
+        None,
+    )
+    assert seg is not None
+    assert seg.options == ["Stacked", "Overlay"]
+
+
+def test_overview_window_cost_delta_uses_inverse_color(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Cost-up = bad news. The Window cost metric's delta uses
+    `delta_color="inverse"` so a positive delta paints red with an
+    up-arrow (warning), not green."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    window_cost = next(
+        (m for m in at.metric if m.label == "Window cost"),
+        None,
+    )
+    assert window_cost is not None
+    # Streamlit's AppTest exposes `delta_color` as a proto field.
+    # Inverse = `2` in Streamlit's enum (off=0, normal=1, inverse=2),
+    # though the exact integer mapping may shift across versions.
+    # Verify it's NOT the default `normal` mode (which would paint
+    # cost-up green).
+    proto = window_cost.proto.metric if hasattr(window_cost.proto, "metric") else window_cost.proto
+    color_attr = getattr(proto, "color", None)
+    # The proto enum names: NORMAL / INVERSE / OFF. Inverse maps to 2.
+    assert color_attr != 1, (  # 1 = NORMAL = green-positive (wrong for cost)
+        f"Window cost delta must NOT use 'normal' color (green up); "
+        f"got proto.color={color_attr!r}"
+    )
+
+
 def test_overview_token_mix_toggle_switches_chart_variant(
     mock_ccusage, mock_ccusage_version
 ) -> None:

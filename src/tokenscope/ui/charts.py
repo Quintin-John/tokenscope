@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+import logging
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -35,6 +37,8 @@ from tokenscope.analytics import (
     token_flow_sankey_data,
 )
 from tokenscope.models import BlockEntry, DailyEntry, DailyReport, SessionEntry
+
+_log = logging.getLogger("tokenscope.ui.charts")
 
 
 # --- enterprise chart style ----------------------------------------------
@@ -62,36 +66,27 @@ BRAND_HUE_SHADES: tuple[str, ...] = (
 
 # --- categorical palettes -------------------------------------------------
 #
-# Earlier slices used `BRAND_HUE_SHADES` as a `color_discrete_sequence` for
-# every multi-series chart. That collapsed categorical data (model
-# families, token kinds — unrelated buckets) into a tonal cascade that
-# made adjacent series indistinguishable. Categorical data needs
-# distinguishable HUES, not shades of one.
+# Categorical data needs distinguishable hues, not shades of one. The
+# palette below uses TWO disjoint hue families:
 #
-# The palette below is a Stripe/Vercel-inspired 5-color set. Red is
-# deliberately absent — reserved for warnings throughout the product.
-# Hues were chosen for distinguishability under both normal vision and
-# common color-vision deficiencies; pure brightness contrast also
-# carries the difference for users with monochrome displays.
+#   * Token kinds  — blue / emerald / amber / teal (cool + warm)
+#   * Model families — violet / pink / cyan / slate (cool, distinct from
+#                       the kind palette so two unrelated categories
+#                       across the dashboard never share a color)
+#
+# Red is deliberately absent throughout — reserved for warnings and
+# errors. Every hue is also distinguishable on a grayscale display
+# (different luminance), so users with color-vision deficiencies still
+# read the chart correctly.
 
-_CATEGORICAL_PALETTE: tuple[str, ...] = (
-    "#4F46E5",  # indigo-600
-    "#0891B2",  # cyan-600
-    "#059669",  # emerald-600
-    "#D97706",  # amber-600
-    "#DB2777",  # pink-600
-)
-
-
-# Stable mapping from token-kind label → color. Used as `color_discrete_map`
-# in `token_mix_percent_bar` so Plotly emits exactly one trace per kind
-# with an explicit name — no phantom `undefined` traces from data-driven
-# enumeration.
+# Token-kind palette. Used as `color_discrete_map` in token-mix charts
+# so Plotly emits one trace per known kind with an explicit name + a
+# stable color. No `undefined` can sneak in.
 TOKEN_KIND_COLORS: dict[str, str] = {
-    "input": _CATEGORICAL_PALETTE[0],
-    "output": _CATEGORICAL_PALETTE[2],
-    "cache_create": _CATEGORICAL_PALETTE[3],
-    "cache_read": _CATEGORICAL_PALETTE[1],
+    "input": "#3B82F6",         # blue-500
+    "output": "#10B981",        # emerald-500
+    "cache_create": "#F59E0B",  # amber-500
+    "cache_read": "#14B8A6",    # teal-500
 }
 
 # The valid set of token-kind labels. Defensive filter: rows whose `kind`
@@ -103,20 +98,29 @@ TOKEN_KIND_LABELS: frozenset[str] = frozenset(TOKEN_KIND_COLORS)
 # Canonical brand colors for the currently-known Anthropic model
 # families. Each family keeps the same hue across every render
 # regardless of which other families happen to be in the window —
-# users build muscle memory ("opus is the indigo band"). Pulled from
-# `_CATEGORICAL_PALETTE` so the brand colors stay coordinated; the
-# specific index per family is the assignment.
+# users build muscle memory ("opus is the pink band"). Hues are
+# DISJOINT from the token-kind palette above so no two distinct
+# categories across the dashboard share a color.
 _FAMILY_CANONICAL_COLORS: dict[str, str] = {
-    "opus": _CATEGORICAL_PALETTE[0],     # indigo — most-capable
-    "sonnet": _CATEGORICAL_PALETTE[1],   # cyan
-    "haiku": _CATEGORICAL_PALETTE[2],    # emerald
+    "opus": "#EC4899",     # pink-500 — most-capable
+    "sonnet": "#06B6D4",   # cyan-500
+    "haiku": "#8B5CF6",    # violet-500
 }
+
+# Fallback colors for non-Claude / future families that aren't in
+# `_FAMILY_CANONICAL_COLORS`. Drawn from a separate slot so they don't
+# collide with the token-kind palette either.
+_FAMILY_FALLBACK_POOL: tuple[str, ...] = (
+    "#F472B6",  # pink-400 (lighter pink)
+    "#A78BFA",  # violet-400
+    "#67E8F9",  # cyan-300
+    "#FBBF24",  # amber-400 (only if nothing else fits)
+)
 
 # Color reserved for the "I couldn't classify this family" sentinel
 # (`analytics.UNKNOWN_MODEL_FAMILY`). Neutral slate so the band reads
-# as "not categorised" rather than competing with the branded
-# Anthropic-family colors.
-_UNKNOWN_FAMILY_COLOR = "#94a3b8"  # slate-400
+# as "not categorised" rather than competing with the branded colors.
+_UNKNOWN_FAMILY_COLOR = "#94A3B8"  # slate-400
 
 
 def family_color_map(families: list[str]) -> dict[str, str]:
@@ -139,9 +143,7 @@ def family_color_map(families: list[str]) -> dict[str, str]:
     Stable under input reordering (the result is a dict; the colors
     are deterministic per family name).
     """
-    fallback_pool = [
-        c for c in _CATEGORICAL_PALETTE if c not in _FAMILY_CANONICAL_COLORS.values()
-    ]
+    fallback_pool = list(_FAMILY_FALLBACK_POOL)
     fallback_index = 0
     out: dict[str, str] = {}
     # Sort the unknown families so successive renders see a
@@ -169,6 +171,47 @@ _GRID_COLOR = "rgba(15, 23, 42, 0.06)"
 _BORDER_COLOR = "#e2e8f0"
 
 
+def _scrub_undefined_traces(fig: go.Figure) -> go.Figure:
+    """Nuclear defensive: drop any trace whose name renders as the
+    literal `undefined` in Plotly's JS legend.
+
+    Production-side data should never produce these — the
+    `color_discrete_map` + row-level filter in each chart builder
+    prevents it — but this scrubber is the belt-and-braces last
+    line. The cost is trivial (linear scan of trace list) and the
+    payoff is that no phantom legend entry can ever reach the user
+    regardless of what schema drift, classifier failure, or
+    Pandas/Plotly internal quirk produces.
+
+    Drops traces whose name is `None`, empty-string, `"undefined"`,
+    `"nan"`, or `"None"` — every case where the JS legend would
+    show stub text. Idempotent.
+    """
+    bad = {"", "undefined", "nan", "None"}
+    cleaned = [
+        trace
+        for trace in fig.data
+        if trace.name is not None and trace.name not in bad
+    ]
+    if len(cleaned) != len(fig.data):
+        # The chart builders are supposed to make this impossible.
+        # If a phantom trace reaches here, something earlier in the
+        # pipeline let it through — log so the issue is visible in
+        # production logs even though the user never sees the bad
+        # trace.
+        import logging
+
+        bad_names = [
+            repr(t.name) for t in fig.data
+            if t.name is None or t.name in bad
+        ]
+        logging.getLogger("tokenscope.ui.charts").warning(
+            "chart.phantom_trace_scrubbed names=%s", bad_names
+        )
+    fig.data = tuple(cleaned)
+    return fig
+
+
 def apply_enterprise_style(fig: go.Figure) -> go.Figure:
     """Apply the shared Overview chart styling. Idempotent.
 
@@ -178,6 +221,9 @@ def apply_enterprise_style(fig: go.Figure) -> go.Figure:
     gridlines with light dotted horizontals only (no vertical, no
     axis spines), and replaces Plotly's default tooltip with a
     bordered branded card.
+
+    Also scrubs any phantom `undefined`-named traces as the final
+    pipeline step — see `_scrub_undefined_traces`.
     """
     fig.update_layout(
         title=None,
@@ -220,7 +266,7 @@ def apply_enterprise_style(fig: go.Figure) -> go.Figure:
             ),
         ),
     )
-    return fig
+    return _scrub_undefined_traces(fig)
 
 
 __all_style_exports__ = ("apply_enterprise_style", "BRAND_HUE_SHADES")
@@ -293,56 +339,117 @@ def cost_trend_with_rolling(
     *,
     rolling_window_days: int = 7,
     spike: tuple[str, float] | None = None,
+    mode: str = "stacked",
 ) -> go.Figure | None:
-    """Combined daily-cost-by-family stacked area + N-day rolling
-    average overlay + optional spike annotation.
+    """Combined daily-cost-by-family + N-day rolling average overlay
+    + optional spike annotation.
 
     Replaces the previous two-chart layout (`stacked_area` +
     `rolling_average_line`) — both plotted the same underlying data,
     the rolling line just being the smoothed envelope of the area.
     One chart shows spikes (area) and trend (line) without duplication.
 
+    ``mode``:
+
+    - ``"stacked"`` (default): stacked area, family bands sum to the
+      total cost height. Familiar "where did the money go" reading,
+      but a dominant family can crush small ones into invisible
+      slivers near the baseline.
+    - ``"overlay"``: each family rendered as its own non-stacked area,
+      transparent fill. Small families stay visible because they
+      paint their own absolute trajectory rather than getting buried
+      under cumulative summing. Bands are drawn smallest-cost-first
+      so the loudest family is on top and doesn't fully occlude the
+      quieter ones.
+
     Categorical coloring uses `family_color_map(families)` so the
     chart emits exactly one trace per family with an explicit name
-    bound to a distinct hue. The rolling-average overlay line uses
-    the brand's darkest slate shade so it reads as the "summary
-    line" sitting on top of the colored bands.
+    bound to a distinct, brand-stable hue. The rolling-average
+    overlay line uses the brand's darkest slate so it reads as the
+    "summary line" above the family bands.
 
-    ``spike``: optional ``(date, cost)`` tuple identifying an outlier
-    day worth calling out. Rendered as a Plotly annotation arrow with
-    the day's value inline. Computed by `analytics.spike_day` — kept
-    out of this builder so the threshold logic stays in analytics.
+    ``spike``: optional ``(date, cost)`` tuple identifying an
+    outlier day worth calling out. Rendered as a Plotly annotation
+    arrow with the day's value inline.
 
     Single-day windows fall back to a stacked bar so the chart stays
     visible (an area chart with one x-value paints zero width).
     """
+    if mode not in ("stacked", "overlay"):
+        raise ValueError(
+            f"cost_trend_with_rolling mode must be 'stacked' or 'overlay'; "
+            f"got {mode!r}"
+        )
+
     grouped = _normalised_cost_rows(daily_report)
     if grouped is None:
         return None
 
-    families = sorted(grouped["family"].unique())
+    # Order families by total cost in the window. Stacked mode draws
+    # largest first (so the family at the bottom of the stack is the
+    # biggest, which is the conventional reading). Overlay mode draws
+    # smallest LAST (last-drawn = on-top in Plotly), so a small
+    # family stays visible above a dominant one's fill.
+    family_totals = grouped.groupby("family")["cost"].sum().sort_values(
+        ascending=False
+    )
+    families = list(family_totals.index)
     color_map = family_color_map(families)
 
     if grouped["date"].nunique() == 1:
-        fig = px.bar(
-            grouped,
-            x="date",
-            y="cost",
-            color="family",
-            color_discrete_map=color_map,
-            category_orders={"family": families},
-        )
+        fig = go.Figure()
+        for family in families:
+            sub = grouped[grouped["family"] == family].sort_values("date")
+            fig.add_trace(
+                go.Bar(
+                    x=sub["date"],
+                    y=sub["cost"],
+                    name=family,
+                    marker_color=color_map[family],
+                    hovertemplate=(
+                        f"<b>{family}</b><br>%{{x}}<br>$%{{y:,.2f}}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
         fig.update_layout(barmode="stack", yaxis_tickprefix="$")
         return apply_enterprise_style(fig)
 
-    fig = px.area(
-        grouped,
-        x="date",
-        y="cost",
-        color="family",
-        color_discrete_map=color_map,
-        category_orders={"family": families},
-    )
+    # Multi-day: build family bands manually with `go.Scatter`. Earlier
+    # iterations used `px.area(..., color="family", ...)`; Plotly Express
+    # can auto-introduce a phantom category trace when the DataFrame
+    # has any ambiguous category value (NaN, None, empty string,
+    # uncategorised entry). Hand-building one go.Scatter per known
+    # family guarantees that only the families we explicitly enumerated
+    # produce traces — no auto-generated "undefined" can slip through.
+    #
+    # Stacked vs overlay differs only by `stackgroup`: a non-None value
+    # makes Plotly stack the traces into a cumulative area; None gives
+    # each family its own absolute trajectory.
+    fig = go.Figure()
+    stackgroup = "cost" if mode == "stacked" else None
+    for family in families:
+        sub = grouped[grouped["family"] == family].sort_values("date")
+        fig.add_trace(
+            go.Scatter(
+                x=sub["date"],
+                y=sub["cost"],
+                mode="lines",
+                name=family,
+                legendgroup=family,
+                stackgroup=stackgroup,
+                fillcolor=(
+                    color_map[family]
+                    if mode == "stacked"
+                    else _with_alpha(color_map[family], 0.18)
+                ),
+                line=dict(color=color_map[family], width=2),
+                hovertemplate=(
+                    f"<b>{family}</b><br>%{{x}}<br>$%{{y:,.2f}}"
+                    "<extra></extra>"
+                ),
+            )
+        )
 
     rolling_label = f"{rolling_window_days}-day avg"
     rolling = rolling_cost_average(daily_report, window_days=rolling_window_days)
@@ -385,11 +492,29 @@ def cost_trend_with_rolling(
             ),
         )
 
-    return apply_enterprise_style(fig).update_layout(
+    styled = apply_enterprise_style(fig).update_layout(
         yaxis_tickprefix="$",
         xaxis_type="date",
         xaxis_tickformat="%b %d",
     )
+    _log.info(
+        "chart.cost_trend.built mode=%s trace_names=%s family_count=%d",
+        mode,
+        [t.name for t in styled.data],
+        len(families),
+    )
+    return styled
+
+
+def _with_alpha(hex_color: str, alpha: float) -> str:
+    """Convert `#RRGGBB` to `rgba(R,G,B,A)`. Used to give overlay
+    family bands a semi-transparent fill so they layer without
+    fully occluding the bands behind them."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha:.3f})"
 
 
 def token_mix_percent_bar(daily_report: DailyReport) -> go.Figure | None:
@@ -424,9 +549,9 @@ def token_mix_percent_bar(daily_report: DailyReport) -> go.Figure | None:
         return None
     df = pd.DataFrame(rows)
     # Defensive filter: drop any row whose kind isn't one of the four
-    # documented values. The upstream emitter (`daily_token_mix`) only
-    # produces those four today, but the chart layer doesn't trust
-    # that — schema drift can't leak a phantom legend entry.
+    # documented values. `daily_token_mix` only emits those four today,
+    # but the chart layer doesn't trust that — schema drift can't leak
+    # a phantom legend entry.
     df = df[df["kind"].isin(TOKEN_KIND_LABELS)].copy()
     df["tokens"] = df["tokens"].fillna(0)
     if df.empty:
@@ -438,30 +563,45 @@ def token_mix_percent_bar(daily_report: DailyReport) -> go.Figure | None:
     )
 
     kind_order = ["input", "output", "cache_create", "cache_read"]
-    fig = px.bar(
-        df,
-        x="date",
-        y="pct",
-        color="kind",
-        color_discrete_map=TOKEN_KIND_COLORS,
-        category_orders={"kind": kind_order},
-        custom_data=["tokens"],
-    )
-    fig.update_traces(
-        hovertemplate=(
-            "<b>%{fullData.name}</b><br>%{x}<br>"
-            "%{y:.1f}% · %{customdata[0]:,d} tokens<extra></extra>"
-        ),
-    )
+
+    # Hand-build one go.Bar per known kind rather than `px.bar(...,
+    # color="kind", ...)`. Plotly Express can auto-introduce a phantom
+    # category trace when the DataFrame has any ambiguous value (NaN,
+    # None, empty string). Manual traces guarantee that only the four
+    # kinds we explicitly enumerated produce legend entries.
+    fig = go.Figure()
+    for kind in kind_order:
+        sub = df[df["kind"] == kind].sort_values("date")
+        if sub.empty:
+            continue
+        fig.add_trace(
+            go.Bar(
+                x=sub["date"],
+                y=sub["pct"],
+                customdata=sub["tokens"].astype("int64").to_numpy().reshape(-1, 1),
+                name=kind,
+                legendgroup=kind,
+                marker_color=TOKEN_KIND_COLORS[kind],
+                hovertemplate=(
+                    f"<b>{kind}</b><br>%{{x}}<br>"
+                    "%{y:.1f}% · %{customdata[0]:,d} tokens<extra></extra>"
+                ),
+            )
+        )
     fig.update_layout(
         barmode="stack",
         yaxis_ticksuffix="%",
         yaxis_range=[0, 100],
     )
-    return apply_enterprise_style(fig).update_layout(
+    styled = apply_enterprise_style(fig).update_layout(
         xaxis_type="date",
         xaxis_tickformat="%b %d",
     )
+    _log.info(
+        "chart.token_mix.built trace_names=%s",
+        [t.name for t in styled.data],
+    )
+    return styled
 
 
 # Kinds rendered by the non-cache mini chart — same shape as
@@ -506,31 +646,40 @@ def token_mix_non_cache_percent_bar(
     )
 
     kind_order = ["input", "output", "cache_create"]
-    fig = px.bar(
-        df,
-        x="date",
-        y="pct",
-        color="kind",
-        color_discrete_map=TOKEN_KIND_COLORS,
-        category_orders={"kind": kind_order},
-        custom_data=["tokens"],
-    )
-    fig.update_traces(
-        hovertemplate=(
-            "<b>%{fullData.name}</b><br>%{x}<br>"
-            "%{y:.1f}% of non-cache · %{customdata[0]:,d} tokens"
-            "<extra></extra>"
-        ),
-    )
+    fig = go.Figure()
+    for kind in kind_order:
+        sub = df[df["kind"] == kind].sort_values("date")
+        if sub.empty:
+            continue
+        fig.add_trace(
+            go.Bar(
+                x=sub["date"],
+                y=sub["pct"],
+                customdata=sub["tokens"].astype("int64").to_numpy().reshape(-1, 1),
+                name=kind,
+                legendgroup=kind,
+                marker_color=TOKEN_KIND_COLORS[kind],
+                hovertemplate=(
+                    f"<b>{kind}</b><br>%{{x}}<br>"
+                    "%{y:.1f}% of non-cache · %{customdata[0]:,d} tokens"
+                    "<extra></extra>"
+                ),
+            )
+        )
     fig.update_layout(
         barmode="stack",
         yaxis_ticksuffix="%",
         yaxis_range=[0, 100],
     )
-    return apply_enterprise_style(fig).update_layout(
+    styled = apply_enterprise_style(fig).update_layout(
         xaxis_type="date",
         xaxis_tickformat="%b %d",
     )
+    _log.info(
+        "chart.token_mix_non_cache.built trace_names=%s",
+        [t.name for t in styled.data],
+    )
+    return styled
 
 
 def donut_cost_by_model(entry: DailyEntry | SessionEntry) -> go.Figure | None:

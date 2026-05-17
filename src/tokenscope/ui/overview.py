@@ -238,7 +238,13 @@ def _render_window_cost_kpi(
     if prior_total and prior_total > 0:
         change = (api_window_cost - prior_total) / prior_total
         delta_kwargs["delta"] = f"{change:+.0%} vs prior {window_days}d"
-        delta_kwargs["delta_color"] = "off"
+        # Cost dashboard semantics: spending more is bad news.
+        # Streamlit's `inverse` mode paints positive deltas red with an
+        # up arrow (cost up = warning) and negative deltas green with a
+        # down arrow (cost down = good). That matches user expectation
+        # for cost metrics specifically; the default `normal` mode
+        # would paint "+91% more spend" in green, which is misleading.
+        delta_kwargs["delta_color"] = "inverse"
     st.metric("Window cost", f"${api_window_cost:,.2f}", **delta_kwargs)
     st.caption(f"over the last {window_days} days")
 
@@ -347,29 +353,54 @@ def _render_cost_composition(daily_report: DailyReport) -> None:
 # --- charts --------------------------------------------------------------
 
 
+_COST_TREND_MODE_KEY = "overview-cost-trend-mode"
+
+
 def _render_cost_trend(
     daily_report: DailyReport,
     nav: Navigation,
     spike: tuple[str, float] | None,
 ) -> None:
-    """Combined cost-by-family stacked area + 7-day rolling overlay,
-    with the spike day annotated. Wrapped in a bordered container so
-    the chart reads as a card matching the KPI strip.
+    """Cost-by-family chart with a Stack/Overlay toggle.
 
-    The annotation arrow is the source of truth for the spike date —
-    if the user reads a tick label and reaches a different date, the
-    annotation is what they should trust (Plotly's date-axis ticks
-    are spaced ~5 days apart, and the spike day will often fall
-    between labels).
+    - **Stacked** (default): family bands sum to total cost height.
+      The conventional "where the money went" reading.
+    - **Overlay**: each family rendered as its own non-stacked area
+      with transparent fill, smallest-cost drawn last (so it sits
+      ON TOP of dominant families). Surfaces small-usage families
+      that the stacked view crushes against the baseline.
+
+    Both modes carry the dotted 7-day rolling-average line and the
+    spike annotation. Clicking a point still drills into the day view.
     """
     with st.container(border=True):
-        st.markdown("### Daily cost")
+        title_cols = st.columns([3, 2])
+        with title_cols[0]:
+            st.markdown("### Daily cost")
+        with title_cols[1]:
+            mode_choice = st.segmented_control(
+                "View",
+                options=["Stacked", "Overlay"],
+                default="Stacked",
+                key=_COST_TREND_MODE_KEY,
+                label_visibility="collapsed",
+                help=(
+                    "Stacked: family bands sum to total cost. "
+                    "Overlay: each family plotted independently — "
+                    "small-usage families stay visible even when one "
+                    "family dominates."
+                ),
+            )
+        mode = "overlay" if mode_choice == "Overlay" else "stacked"
         st.caption(
-            "Stacked area = per-family raw daily cost. Dotted line is "
-            "the 7-day rolling average. Click any day to drill in."
+            "Dotted line is the 7-day rolling average. "
+            "Click any day to drill in."
         )
         fig = cost_trend_with_rolling(
-            daily_report, rolling_window_days=7, spike=spike
+            daily_report,
+            rolling_window_days=7,
+            spike=spike,
+            mode=mode,
         )
         if fig is None:
             return

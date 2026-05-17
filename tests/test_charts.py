@@ -429,6 +429,61 @@ def test_cost_trend_chart_has_no_undefined_trace(fixture_name: str) -> None:
         )
 
 
+def _figure_contains_undefined(fig) -> bool:
+    """Walk the full figure JSON and return True if the literal string
+    `undefined` appears anywhere — legend, axis labels, hover, names,
+    annotations, anything. Plotly's JS renderer surfaces this string
+    when any field-level value stringifies that way."""
+    import json
+
+    serialized = json.dumps(fig.to_dict(), default=str).lower()
+    return "undefined" in serialized
+
+
+@pytest.mark.parametrize("fixture_name", list(_PATHOLOGICAL_DAILY_FIXTURES))
+def test_no_undefined_anywhere_in_cost_trend_figure_json(
+    fixture_name: str,
+) -> None:
+    """End-to-end JSON-walk: serialize the entire figure and scan the
+    whole structure for the string `undefined`. If the chart is built
+    correctly, this string never appears in legend / axes / hover /
+    annotations regardless of what pathological input the data layer
+    produces."""
+    entries = _PATHOLOGICAL_DAILY_FIXTURES[fixture_name]
+    fig = cost_trend_with_rolling(_report(entries))
+    assert fig is not None
+    assert not _figure_contains_undefined(fig), (
+        f"[{fixture_name}] cost_trend figure contains `undefined` "
+        f"somewhere in its serialized form"
+    )
+
+
+@pytest.mark.parametrize("fixture_name", list(_PATHOLOGICAL_DAILY_FIXTURES))
+def test_no_undefined_anywhere_in_token_mix_figure_json(
+    fixture_name: str,
+) -> None:
+    """Same JSON-walk contract for the Token-mix chart."""
+    entries = _PATHOLOGICAL_DAILY_FIXTURES[fixture_name]
+    fig = token_mix_percent_bar(_report(entries))
+    assert fig is not None
+    assert not _figure_contains_undefined(fig), (
+        f"[{fixture_name}] token_mix figure contains `undefined` "
+        f"somewhere in its serialized form"
+    )
+
+
+@pytest.mark.parametrize("fixture_name", list(_PATHOLOGICAL_DAILY_FIXTURES))
+def test_no_undefined_anywhere_in_cost_trend_overlay_mode(
+    fixture_name: str,
+) -> None:
+    """Overlay mode (the user's small-family-visible variant) carries
+    the same `undefined`-free contract."""
+    entries = _PATHOLOGICAL_DAILY_FIXTURES[fixture_name]
+    fig = cost_trend_with_rolling(_report(entries), mode="overlay")
+    assert fig is not None
+    assert not _figure_contains_undefined(fig)
+
+
 @pytest.mark.parametrize("fixture_name", list(_PATHOLOGICAL_DAILY_FIXTURES))
 def test_token_mix_chart_has_exactly_four_documented_kinds(
     fixture_name: str,
@@ -448,6 +503,90 @@ def test_token_mix_chart_has_exactly_four_documented_kinds(
     assert names == {"input", "output", "cache_create", "cache_read"}, (
         f"[{fixture_name}] expected exactly the four kinds; got {names!r}"
     )
+
+
+def test_scrub_undefined_traces_strips_falsy_and_undefined_names(caplog) -> None:
+    """The final scrubber in `apply_enterprise_style` drops any trace
+    whose name would render as `undefined` in the Plotly JS legend.
+    Defensive: chart builders are supposed to make this impossible,
+    but a future regression in any builder is caught here."""
+    import logging
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[1, 2], y=[1, 2], name="real"))
+    fig.add_trace(go.Scatter(x=[1, 2], y=[3, 4], name=""))
+    fig.add_trace(go.Scatter(x=[1, 2], y=[5, 6], name="undefined"))
+    fig.add_trace(go.Scatter(x=[1, 2], y=[7, 8], name=None))
+    fig.add_trace(go.Scatter(x=[1, 2], y=[9, 10], name="nan"))
+
+    caplog.set_level(logging.WARNING, logger="tokenscope.ui.charts")
+    styled = apply_enterprise_style(fig)
+    names = {t.name for t in styled.data}
+    assert names == {"real"}, (
+        f"only `real` should survive; got {names!r}"
+    )
+    # Production-side data is supposed to make this impossible; the
+    # warning log gives operators a signal that something upstream
+    # produced phantom names.
+    assert any(
+        "chart.phantom_trace_scrubbed" in r.message
+        for r in caplog.records
+    ), f"expected scrub warning; got records: {[r.message for r in caplog.records]}"
+
+
+def test_scrub_undefined_traces_is_idempotent_when_all_clean() -> None:
+    """No-op when every trace already has a real name. No log fires,
+    no traces dropped."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=[1], y=[1], name="a"))
+    fig.add_trace(go.Scatter(x=[1], y=[2], name="b"))
+    styled = apply_enterprise_style(fig)
+    assert [t.name for t in styled.data] == ["a", "b"]
+
+
+def test_cost_trend_overlay_mode_keeps_small_family_visible() -> None:
+    """Overlay mode: each family gets its own non-stacked area so a
+    dominant family can't crush the smaller ones against the
+    baseline. Small-family band is drawn LAST so it sits on top
+    visually."""
+    report = _report(
+        [
+            _entry("2026-05-14", cost=400.0, model="claude-opus-4-7"),
+            _entry("2026-05-14", cost=1.0, model="claude-haiku-4-5-20251001"),
+            _entry("2026-05-15", cost=380.0, model="claude-opus-4-7"),
+            _entry("2026-05-15", cost=2.0, model="claude-haiku-4-5-20251001"),
+        ]
+    )
+    fig = cost_trend_with_rolling(report, mode="overlay")
+    family_traces = [t for t in fig.data if t.name in {"opus", "haiku"}]
+    # Both families present, drawn smallest-last (haiku traces AFTER opus).
+    assert [t.name for t in family_traces] == ["opus", "haiku"]
+    # Bands are non-stacked: each has its own y trajectory matching
+    # the per-family raw cost (not cumulative).
+    haiku = next(t for t in family_traces if t.name == "haiku")
+    haiku_ys = list(haiku.y)
+    # haiku's costs were 1 and 2 — not opus+haiku=401 / 382.
+    assert max(haiku_ys) <= 2.5, (
+        f"haiku band carries non-stacked absolute values; got {haiku_ys!r}"
+    )
+
+
+def test_with_alpha_helper_passes_through_invalid_hex() -> None:
+    """`_with_alpha` accepts `#RRGGBB`. Defensive: shorter / longer
+    inputs (in case a future palette has 3-digit hex or named colors)
+    pass through unchanged rather than crashing."""
+    from tokenscope.ui.charts import _with_alpha
+
+    assert _with_alpha("#FF0000", 0.5) == "rgba(255,0,0,0.500)"
+    assert _with_alpha("not-a-hex", 0.5) == "not-a-hex"
+    assert _with_alpha("#FFF", 0.5) == "#FFF"
+
+
+def test_cost_trend_rejects_unknown_mode() -> None:
+    """Defensive: a typo'd mode argument fails loudly rather than
+    silently picking one branch."""
+    report = _report([_entry("2026-05-15", cost=5.0, model="claude-opus-4-7")])
+    with pytest.raises(ValueError, match="mode must be"):
+        cost_trend_with_rolling(report, mode="bogus")
 
 
 def test_token_mix_returns_none_when_all_kinds_unknown() -> None:
@@ -558,6 +697,20 @@ def test_family_color_map_unknown_family_gets_palette_fallback() -> None:
     mapping = family_color_map(["opus", "future-family-x"])
     assert mapping["opus"] != mapping["future-family-x"]
     assert mapping["future-family-x"].startswith("#")
+
+
+def test_token_kind_and_family_palettes_share_no_color() -> None:
+    """Different concept-groups in the dashboard (token kinds vs
+    model families) must NOT share colors — if `input` and `opus`
+    both painted indigo, users would conflate the two across the
+    Token-mix and Daily-cost charts."""
+    family_palette = family_color_map(["opus", "sonnet", "haiku"])
+    family_colors = set(family_palette.values())
+    kind_colors = set(TOKEN_KIND_COLORS.values())
+    overlap = family_colors & kind_colors
+    assert not overlap, (
+        f"token-kind and family palettes share color(s): {overlap!r}"
+    )
 
 
 def test_family_color_map_unknown_sentinel_gets_neutral() -> None:
