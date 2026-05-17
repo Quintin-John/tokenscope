@@ -95,20 +95,46 @@ def _q(query: Query | None) -> list[str]:
     return query.to_args() if query is not None else []
 
 
+_EMPTY_TOTALS = {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "totalTokens": 0,
+    "totalCost": 0,
+}
+
+
+def _coerce_empty(raw, key: str, *, container_type=list):
+    """ccusage emits a bare ``[]`` instead of the expected
+    ``{"<key>": [], "totals": {...}}`` dict when a daily / session /
+    daily --instances query returns no entries (empty range, project
+    with no activity in window, etc.). Normalise it so pydantic
+    validation doesn't crash with a misleading "model_type" error.
+    """
+    if raw is None or raw == [] or raw == {}:
+        return {key: container_type(), "totals": dict(_EMPTY_TOTALS)}
+    return raw
+
+
 def daily(query: Query | None = None) -> DailyReport:
-    return DailyReport.model_validate(_run_json(["daily", *_q(query)]))
+    raw = _coerce_empty(_run_json(["daily", *_q(query)]), "daily")
+    return DailyReport.model_validate(raw)
 
 
 def weekly(query: Query | None = None) -> WeeklyReport:
-    return WeeklyReport.model_validate(_run_json(["weekly", *_q(query)]))
+    raw = _coerce_empty(_run_json(["weekly", *_q(query)]), "weekly")
+    return WeeklyReport.model_validate(raw)
 
 
 def monthly(query: Query | None = None) -> MonthlyReport:
-    return MonthlyReport.model_validate(_run_json(["monthly", *_q(query)]))
+    raw = _coerce_empty(_run_json(["monthly", *_q(query)]), "monthly")
+    return MonthlyReport.model_validate(raw)
 
 
 def session(query: Query | None = None) -> SessionReport:
-    return SessionReport.model_validate(_run_json(["session", *_q(query)]))
+    raw = _coerce_empty(_run_json(["session", *_q(query)]), "sessions")
+    return SessionReport.model_validate(raw)
 
 
 def blocks(active: bool = False, query: Query | None = None) -> BlocksReport:
@@ -116,22 +142,33 @@ def blocks(active: bool = False, query: Query | None = None) -> BlocksReport:
     if active:
         args.append("--active")
     args += _q(query)
+    # blocks already returns a proper `{"blocks": [], "message": "..."}`
+    # shape for empty ranges, so no coercion needed.
     return BlocksReport.model_validate(_run_json(["blocks", *args]))
 
 
 def daily_by_project(query: Query | None = None) -> DailyByProjectReport:
-    return DailyByProjectReport.model_validate(
-        _run_json(["daily", "--instances", *_q(query)])
+    raw = _coerce_empty(
+        _run_json(["daily", "--instances", *_q(query)]),
+        "projects",
+        container_type=dict,
     )
+    return DailyByProjectReport.model_validate(raw)
 
 
 def weekly_by_project(query: Query | None = None) -> WeeklyByProjectReport:
-    return WeeklyByProjectReport.model_validate(
-        _run_json(["weekly", "--instances", *_q(query)])
+    raw = _coerce_empty(
+        _run_json(["weekly", "--instances", *_q(query)]),
+        "projects",
+        container_type=dict,
     )
+    return WeeklyByProjectReport.model_validate(raw)
 
 
 def monthly_by_project(query: Query | None = None) -> MonthlyByProjectReport:
-    return MonthlyByProjectReport.model_validate(
-        _run_json(["monthly", "--instances", *_q(query)])
+    raw = _coerce_empty(
+        _run_json(["monthly", "--instances", *_q(query)]),
+        "projects",
+        container_type=dict,
     )
+    return MonthlyByProjectReport.model_validate(raw)

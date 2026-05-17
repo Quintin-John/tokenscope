@@ -883,7 +883,132 @@ def test_token_flow_sankey_data_skips_zero_links() -> None:
 
 def test_token_flow_sankey_data_empty_report() -> None:
     data_ = token_flow_sankey_data(_report([]))
-    assert data_ == {"labels": [], "sources": [], "targets": [], "values": []}
+    assert data_["labels"] == []
+    assert data_["values"] == []
+    assert data_["customdata"] == []
+    assert data_["value_mode"] == "tokens"
+
+
+def test_token_flow_sankey_data_customdata_carries_tokens_and_cost() -> None:
+    """Every link carries (absolute_tokens, family_total_cost) for the hover."""
+    b = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=10,
+        outputTokens=20,
+        cacheCreationTokens=30,
+        cacheReadTokens=40,
+        cost=5.0,
+    )
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                model_breakdowns=[b],
+                total_cost=5.0,
+            )
+        ]
+    )
+    data_ = token_flow_sankey_data(report)
+    # 4 links (one per kind), each carrying (tokens, family_cost).
+    assert len(data_["customdata"]) == 4
+    for tokens, cost in data_["customdata"]:
+        assert tokens > 0
+        assert cost == pytest.approx(5.0)
+
+
+def test_token_flow_sankey_data_cost_mode_widths_sum_to_window_cost() -> None:
+    """In cost mode, total link width equals total window cost (within rounding).
+    Proportional attribution conserves cost at family level."""
+    opus = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=10,
+        outputTokens=20,
+        cacheCreationTokens=30,
+        cacheReadTokens=40,
+        cost=10.0,
+    )
+    haiku = ModelBreakdown(
+        modelName="claude-haiku-4-5",
+        inputTokens=1,
+        outputTokens=2,
+        cacheCreationTokens=3,
+        cacheReadTokens=4,
+        cost=1.0,
+    )
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                model_breakdowns=[opus, haiku],
+                models=["claude-opus-4-7", "claude-haiku-4-5"],
+                total_cost=11.0,
+            )
+        ]
+    )
+    data_ = token_flow_sankey_data(report, value_mode="cost")
+    assert sum(data_["values"]) == pytest.approx(11.0, rel=1e-6)
+    assert data_["value_mode"] == "cost"
+
+
+def test_token_flow_sankey_data_invalid_mode_raises() -> None:
+    with pytest.raises(ValueError):
+        token_flow_sankey_data(_report([]), value_mode="dollars")
+
+
+def test_token_flow_sankey_data_top_n_collapses_into_others() -> None:
+    """top_n=2 keeps the 2 most-expensive families and folds the rest into Others."""
+    families = [
+        ("claude-opus-4-7", 100.0),
+        ("claude-haiku-4-5", 50.0),
+        ("claude-sonnet-4-6", 10.0),
+        ("claude-3-5-sonnet", 5.0),
+    ]
+    breakdowns = [
+        ModelBreakdown(
+            modelName=name,
+            inputTokens=10,
+            outputTokens=10,
+            cacheCreationTokens=10,
+            cacheReadTokens=10,
+            cost=cost,
+        )
+        for name, cost in families
+    ]
+    report = _report(
+        [
+            _entry(
+                "2026-05-16",
+                model_breakdowns=breakdowns,
+                models=[n for n, _ in families],
+                total_cost=sum(c for _, c in families),
+            )
+        ]
+    )
+    data_ = token_flow_sankey_data(report, top_n=2)
+    # 4 kinds + (top 2 families + "Others") = 7 labels.
+    assert len(data_["labels"]) == 7
+    family_labels = data_["labels"][4:]
+    # Top 2 by cost: opus (100) and haiku (50). Then Others = sonnet+legacy = 15.
+    assert any(lbl.startswith("Others ($") for lbl in family_labels)
+    assert any(lbl.startswith("opus ($100.00)") for lbl in family_labels)
+    assert any(lbl.startswith("haiku ($50.00)") for lbl in family_labels)
+    others_label = next(lbl for lbl in family_labels if lbl.startswith("Others"))
+    assert "$15.00" in others_label
+
+
+def test_token_flow_sankey_data_top_n_larger_than_families_is_noop() -> None:
+    """top_n bigger than the actual count → no Others node, no collapse."""
+    b = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=10,
+        outputTokens=10,
+        cacheCreationTokens=10,
+        cacheReadTokens=10,
+        cost=1.0,
+    )
+    report = _report([_entry("2026-05-16", model_breakdowns=[b], total_cost=1.0)])
+    data_ = token_flow_sankey_data(report, top_n=10)
+    assert not any("Others" in lbl for lbl in data_["labels"])
 
 
 # ---------- model_breakdown ----------

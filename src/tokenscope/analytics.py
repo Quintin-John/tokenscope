@@ -386,22 +386,47 @@ def model_breakdown(daily_report: DailyReport) -> list[dict]:
     return rows
 
 
-def token_flow_sankey_data(daily_report: DailyReport) -> dict:
+def token_flow_sankey_data(
+    daily_report: DailyReport,
+    *,
+    value_mode: str = "tokens",
+    top_n: int | None = None,
+) -> dict:
     """Build Sankey-compatible nodes + links for the models view.
 
     Flow: token-kind (input/output/cache_create/cache_read) → model family.
-    Family nodes are labelled with the family's aggregate cost so the
-    "→ cost" direction PLAN.md §3.2 calls for is conveyed in the node
-    label rather than as a separate (mis-scaled) layer.
+    Family nodes carry the family's aggregate cost in their label so the
+    "→ cost" direction PLAN.md §3.2 calls for is conveyed without an
+    additional mis-scaled layer.
 
-    Returns a dict shaped for `go.Sankey`:
-        {labels: [str], sources: [int], targets: [int], values: [int]}
+    Parameters:
+        value_mode: ``"tokens"`` (default) makes link widths proportional
+            to token counts. ``"cost"`` proportionally attributes each
+            family's total cost across its kinds, so total link width
+            equals total window cost. The cost-mode value is necessarily
+            an approximation — ccusage doesn't break out per-kind
+            pricing, so we apportion by token share. The header label
+            on each family stays in dollars either way.
+        top_n: when given, keep the N highest-cost families and collapse
+            the rest into a single "Others" node. Useful when 8+
+            families turn the Sankey into spaghetti.
+
+    Each link's ``customdata`` carries two extra fields for the Plotly
+    hovertemplate: the absolute token count and the family's aggregate
+    cost — so the user sees both axes regardless of which mode they're in.
+
+    Returns a dict shaped for ``go.Sankey``:
+        {labels, sources, targets, values, customdata, value_mode}
 
     Empty report → all-empty lists (caller short-circuits).
     """
+    if value_mode not in ("tokens", "cost"):
+        raise ValueError(f"value_mode must be 'tokens' or 'cost', got {value_mode!r}")
+
     KINDS = ("input", "output", "cache_create", "cache_read")
     tokens_by_kind_family: dict[tuple[str, str], int] = {}
     cost_by_family: dict[str, float] = {}
+    tokens_by_family: dict[str, int] = {}
 
     for entry in daily_report.daily:
         for b in entry.model_breakdowns:
@@ -413,13 +438,47 @@ def token_flow_sankey_data(daily_report: DailyReport) -> dict:
                 "cache_create": b.cache_creation_tokens,
                 "cache_read": b.cache_read_tokens,
             }
+            family_total = 0
             for kind, n in counts.items():
                 key = (kind, family)
                 tokens_by_kind_family[key] = tokens_by_kind_family.get(key, 0) + n
+                family_total += n
+            tokens_by_family[family] = tokens_by_family.get(family, 0) + family_total
 
     families = sorted(cost_by_family.keys())
     if not families:
-        return {"labels": [], "sources": [], "targets": [], "values": []}
+        return {
+            "labels": [],
+            "sources": [],
+            "targets": [],
+            "values": [],
+            "customdata": [],
+            "value_mode": value_mode,
+        }
+
+    # Top-N collapse: keep the N highest-cost families, fold the rest
+    # into an "Others" bucket. Costs and tokens accumulate into the bucket
+    # so node labels and link values stay correct.
+    if top_n is not None and 0 < top_n < len(families):
+        ranked = sorted(families, key=lambda f: cost_by_family[f], reverse=True)
+        kept = set(ranked[:top_n])
+        OTHERS = "Others"
+        cost_by_family[OTHERS] = sum(
+            cost_by_family[f] for f in families if f not in kept
+        )
+        tokens_by_family[OTHERS] = sum(
+            tokens_by_family[f] for f in families if f not in kept
+        )
+        for (kind, fam), v in list(tokens_by_kind_family.items()):
+            if fam not in kept:
+                key = (kind, OTHERS)
+                tokens_by_kind_family[key] = tokens_by_kind_family.get(key, 0) + v
+                del tokens_by_kind_family[(kind, fam)]
+        for f in list(families):
+            if f not in kept:
+                del cost_by_family[f]
+                del tokens_by_family[f]
+        families = sorted(cost_by_family.keys())
 
     labels = list(KINDS) + [
         f"{fam} (${cost_by_family[fam]:,.2f})" for fam in families
@@ -428,15 +487,31 @@ def token_flow_sankey_data(daily_report: DailyReport) -> dict:
 
     sources: list[int] = []
     targets: list[int] = []
-    values: list[int] = []
+    values: list[float] = []
+    customdata: list[tuple[int, float]] = []
     for kind_idx, kind in enumerate(KINDS):
         for fam in families:
-            v = tokens_by_kind_family.get((kind, fam), 0)
-            if v > 0:
-                sources.append(kind_idx)
-                targets.append(family_idx[fam])
-                values.append(v)
-    return {"labels": labels, "sources": sources, "targets": targets, "values": values}
+            token_count = tokens_by_kind_family.get((kind, fam), 0)
+            if token_count <= 0:
+                continue
+            if value_mode == "cost":
+                # Proportionally attribute the family's cost across kinds.
+                fam_tokens = tokens_by_family[fam] or 1
+                width = cost_by_family[fam] * token_count / fam_tokens
+            else:
+                width = float(token_count)
+            sources.append(kind_idx)
+            targets.append(family_idx[fam])
+            values.append(width)
+            customdata.append((token_count, cost_by_family[fam]))
+    return {
+        "labels": labels,
+        "sources": sources,
+        "targets": targets,
+        "values": values,
+        "customdata": customdata,
+        "value_mode": value_mode,
+    }
 
 
 def friendly_project_label(slug: str, home_slug: str | None = None) -> str:
