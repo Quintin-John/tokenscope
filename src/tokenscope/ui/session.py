@@ -106,4 +106,4 @@ def _render_blocks_timeline(state: SidebarState, nav: Navigation, entry) -> None
         on_select="rerun",
         selection_mode=("points",),
     )
-    handle_chart_drill(event, nav.to_block)
+    handle_chart_drill(event, nav.to_block, chart_key="session-blocks-timeline")

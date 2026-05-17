@@ -21,8 +21,11 @@ import streamlit as st
 from tokenscope import data
 from tokenscope.analytics import available_models, filter_daily_by_models
 from tokenscope.ccusage import CcusageError
+from tokenscope.log import get_logger
 from tokenscope.models import DailyReport
 from tokenscope.ui.sidebar import SidebarState
+
+_log = get_logger(__name__)
 
 
 def load_daily(state: SidebarState) -> DailyReport | None:
@@ -36,6 +39,7 @@ def load_daily(state: SidebarState) -> DailyReport | None:
     try:
         report = data.daily(state.query)
     except CcusageError as exc:
+        _log.error("data.load.daily_failed exc=%s", exc)
         st.error(f"ccusage failed:\n\n```\n{exc}\n```")
         return None
 

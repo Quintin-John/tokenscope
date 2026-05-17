@@ -79,13 +79,13 @@ def test_route_to_writes_extra_params(fake_streamlit) -> None:
 
 
 def test_handle_chart_drill_no_event_is_noop(fake_streamlit) -> None:
-    _nav.handle_chart_drill(None, Navigation.to_day)
+    _nav.handle_chart_drill(None, Navigation.to_day, chart_key="test-chart")
     assert fake_streamlit["rerun_called"] == 0
 
 
 def test_handle_chart_drill_empty_selection_is_noop(fake_streamlit) -> None:
     event = SimpleNamespace(selection=SimpleNamespace(points=[]))
-    _nav.handle_chart_drill(event, Navigation.to_day)
+    _nav.handle_chart_drill(event, Navigation.to_day, chart_key="test-chart")
     assert fake_streamlit["rerun_called"] == 0
 
 
@@ -95,7 +95,7 @@ def test_handle_chart_drill_routes_on_point_click(fake_streamlit) -> None:
         selection=SimpleNamespace(points=[{"x": "2026-05-16T00:00:00"}])
     )
     nav = Navigation(view="overview")
-    _nav.handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
+    _nav.handle_chart_drill(event, lambda x: nav.to_day(x[:10]), chart_key="test-chart")
     assert fake_streamlit["params"] == {"view": "day", "day": "2026-05-16"}
     assert fake_streamlit["rerun_called"] == 1
 
@@ -106,7 +106,7 @@ def test_handle_chart_drill_uses_y_when_no_x(fake_streamlit) -> None:
         selection=SimpleNamespace(points=[{"y": "2026-05-16T13:00:00.000Z"}])
     )
     nav = Navigation(view="session", session="sess-a")
-    _nav.handle_chart_drill(event, nav.to_block)
+    _nav.handle_chart_drill(event, nav.to_block, chart_key="test-chart")
     # Block id passed through verbatim (no truncation).
     assert fake_streamlit["params"]["block"] == "2026-05-16T13:00:00.000Z"
 
@@ -116,11 +116,11 @@ def test_handle_chart_drill_falls_back_to_label(fake_streamlit) -> None:
         selection=SimpleNamespace(points=[{"label": "2026-05-16"}])
     )
     nav = Navigation(view="overview")
-    _nav.handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
+    _nav.handle_chart_drill(event, lambda x: nav.to_day(x[:10]), chart_key="test-chart")
     assert fake_streamlit["params"] == {"view": "day", "day": "2026-05-16"}
 
 
 def test_handle_chart_drill_missing_keys_is_noop(fake_streamlit) -> None:
     event = SimpleNamespace(selection=SimpleNamespace(points=[{"foo": "bar"}]))
-    _nav.handle_chart_drill(event, Navigation.to_day)
+    _nav.handle_chart_drill(event, Navigation.to_day, chart_key="test-chart")
     assert fake_streamlit["rerun_called"] == 0

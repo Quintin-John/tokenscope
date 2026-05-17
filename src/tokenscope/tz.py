@@ -21,6 +21,10 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from tokenscope.log import get_logger
+
+_log = get_logger(__name__)
+
 DEFAULT_FALLBACK = "UTC"
 _LOCALTIME_MARKER = "/zoneinfo/"
 # ZoneInfo(key) raises ZoneInfoNotFoundError for unknown IANA names and
@@ -58,13 +62,13 @@ def detect_local_iana() -> str:
         try:
             ZoneInfo(tz_env)
             return tz_env
-        except _ZONE_INVALID:
+        except _ZONE_INVALID as exc:
             # TZ set to a POSIX-style string ("EST5EDT,M3.2.0,M11.1.0"),
             # an absolute path, an empty string, or junk — fall through
             # to the other probes rather than confidently returning
             # garbage. Anything that isn't a zone-resolution failure
             # (e.g. an OSError from a corrupt tzdata file) surfaces.
-            pass
+            _log.debug("tz.probe.env_invalid value=%r reason=%s", tz_env, exc)
 
     tz = datetime.now().astimezone().tzinfo
     key = getattr(tz, "key", None)
@@ -79,6 +83,9 @@ def detect_local_iana() -> str:
             target = ""
         if _LOCALTIME_MARKER in target:
             return target.rsplit(_LOCALTIME_MARKER, 1)[1]
+    _log.warning(
+        "tz.fallback_to_utc all_probes_failed — ccusage will bucket by UTC"
+    )
     return DEFAULT_FALLBACK
 
 

@@ -30,9 +30,12 @@ from tokenscope.analytics import (
     short_model_label,
 )
 from tokenscope.ccusage import CcusageError
+from tokenscope.log import get_logger
 from tokenscope.plans import Plan, get_plan, plan_names
 from tokenscope.query import Query
 from tokenscope.tz import detect_local_iana
+
+_log = get_logger(__name__)
 
 
 DEFAULT_RANGE_DAYS = config.DEFAULT_RANGE_DAYS
@@ -132,7 +135,147 @@ def _sync_url_from_session(
             st.query_params[key] = value
 
 
+def _render_date_range(today: date, default_start: date) -> tuple[date, date]:
+    """Date-range widget. Returns (since, until) — when the user has
+    selected a single day, both values are that day."""
+    date_kwargs: dict = {"key": _KEY_DATE_RANGE, "max_value": today}
+    if _KEY_DATE_RANGE not in st.session_state:
+        date_kwargs["value"] = (default_start, today)
+    range_value = st.date_input(
+        "Date range",
+        help="Trims the ccusage report via --since / --until (YYYYMMDD).",
+        **date_kwargs,
+    )
+    if isinstance(range_value, tuple) and len(range_value) == 2:
+        return range_value
+    single = range_value if isinstance(range_value, date) else default_start
+    return single, single
+
+
+def _render_offline_toggle() -> bool:
+    """Offline-pricing toggle. Drives ccusage's --offline flag."""
+    offline_kwargs: dict = {"key": _KEY_OFFLINE}
+    if _KEY_OFFLINE not in st.session_state:
+        offline_kwargs["value"] = False
+    return st.toggle(
+        "Offline pricing",
+        help="Pass --offline to ccusage so pricing comes from its cached data.",
+        **offline_kwargs,
+    )
+
+
+def _fetch_discovery_options(query: Query) -> tuple[list[str], list[str]]:
+    """Populate the Project / Models dropdown option lists.
+
+    Two ccusage calls (daily for models, daily_by_project for projects)
+    cached via `data.*`. Failures are swallowed so a first-run user
+    without ccusage configured still gets a usable sidebar — the
+    dropdowns just render empty option lists, the rest of the dashboard
+    surfaces the underlying error via its own `st.error` paths.
+    """
+    model_options: list[str] = []
+    project_options: list[str] = []
+    try:
+        discovery_daily = data.daily(query)
+        model_options = available_models(discovery_daily)
+    except CcusageError as exc:
+        _log.warning("sidebar.discovery.daily_failed exc=%s", exc)
+    try:
+        discovery_proj = data.daily_by_project(query)
+        project_options = sorted(discovery_proj.projects.keys())
+    except CcusageError as exc:
+        _log.warning("sidebar.discovery.by_project_failed exc=%s", exc)
+    return model_options, project_options
+
+
+def _render_project_selectbox(project_options: list[str]) -> str | None:
+    """Project filter. Returns None for "All projects" so the caller can
+    plumb it straight into `Query.project`."""
+    project_kwargs: dict = {"key": _KEY_PROJECT}
+    if _KEY_PROJECT not in st.session_state:
+        project_kwargs["index"] = 0
+    home = _home_slug()
+    project_choice = st.selectbox(
+        "Project",
+        options=[ALL_PROJECTS, *project_options],
+        help="Filters via ccusage's -p flag. Choose 'All projects' to disable.",
+        format_func=lambda v: (
+            v if v == ALL_PROJECTS else friendly_project_label(v, home_slug=home)
+        ),
+        **project_kwargs,
+    )
+    return None if project_choice == ALL_PROJECTS else project_choice
+
+
+def _render_models_multiselect(model_options: list[str]) -> list[str]:
+    """Models filter (post-fetch). On first render every available model
+    is selected by default so the dashboard shows everything until the
+    user narrows in."""
+    models_kwargs: dict = {"key": _KEY_MODELS}
+    if _KEY_MODELS not in st.session_state:
+        models_kwargs["default"] = model_options
+    return list(
+        st.multiselect(
+            "Models",
+            options=model_options,
+            help="Post-fetch filter on the model breakdowns within each entry.",
+            format_func=short_model_label,
+            **models_kwargs,
+        )
+    )
+
+
+def _render_plan_selectbox() -> str:
+    """Subscription-plan selector. Pure labelling — does not modify any
+    cost number; only swaps the KPI presentation in overview.py."""
+    plan_kwargs: dict = {"key": _KEY_PLAN}
+    if _KEY_PLAN not in st.session_state:
+        plan_kwargs["index"] = 0
+    return st.selectbox(
+        "Subscription",
+        options=plan_names(),
+        help="Pure labelling — does not change any cost numbers.",
+        **plan_kwargs,
+    )
+
+
+def _render_reset_button() -> None:
+    """Reset-filters button. Clears the five sidebar widget keys from
+    session_state and drops the corresponding URL params, then reruns —
+    so a shared link doesn't reload the state the user just cleared."""
+    if not st.button(
+        "Reset filters",
+        key="sidebar-reset",
+        help="Clears date range, project, models, offline, and plan back "
+             "to defaults (last 30 days, all projects, all models, online, "
+             "Enterprise).",
+        width="stretch",
+    ):
+        return
+    _log.info("sidebar.reset_clicked")
+    for k in (_KEY_DATE_RANGE, _KEY_OFFLINE, _KEY_PROJECT, _KEY_MODELS, _KEY_PLAN):
+        st.session_state.pop(k, None)
+    for url_key in ("since", "until", "offline", "project", "models", "plan"):
+        if url_key in st.query_params:
+            del st.query_params[url_key]
+    st.rerun()
+
+
+def _render_timezone_caption(local_tz: str) -> None:
+    """Self-diagnostic caption — if it reads `Etc/UTC` the user knows
+    the Docker `-e TZ=...` flag didn't take and their date buckets are
+    UTC (see README §Docker)."""
+    st.caption(
+        f"Times in `{local_tz}` (auto-detected). Override with the `TZ` "
+        "env var if it's wrong."
+    )
+
+
 def render(today: date | None = None) -> SidebarState:
+    """Render the sidebar and return the SidebarState that drives every
+    downstream view. Composes the section renderers in fixed order;
+    each renderer owns exactly one widget plus its session_state /
+    URL-param wiring."""
     today = today or date.today()
     default_start = today - timedelta(days=DEFAULT_RANGE_DAYS - 1)
     local_tz = detect_local_iana()
@@ -140,130 +283,48 @@ def render(today: date | None = None) -> SidebarState:
 
     with st.sidebar:
         st.markdown("### Filters")
+        since_date, until_date = _render_date_range(today, default_start)
+        offline = _render_offline_toggle()
 
-        # date_input reads from session_state when the key is set; falls back
-        # to the 30d default on first render.
-        date_kwargs: dict = {"key": _KEY_DATE_RANGE, "max_value": today}
-        if _KEY_DATE_RANGE not in st.session_state:
-            date_kwargs["value"] = (default_start, today)
-        range_value = st.date_input(
-            "Date range",
-            help="Trims the ccusage report via --since / --until (YYYYMMDD).",
-            **date_kwargs,
-        )
-        if isinstance(range_value, tuple) and len(range_value) == 2:
-            since_date, until_date = range_value
-        else:
-            single = range_value if isinstance(range_value, date) else default_start
-            since_date, until_date = single, single
-
-        offline_kwargs: dict = {"key": _KEY_OFFLINE}
-        if _KEY_OFFLINE not in st.session_state:
-            offline_kwargs["value"] = False
-        offline = st.toggle(
-            "Offline pricing",
-            help="Pass --offline to ccusage so pricing comes from its cached data.",
-            **offline_kwargs,
-        )
-
-        # Discovery query: same date range + offline, no model/project filter.
-        # Cached via @st.cache_data, so reopening the page within 30s is free.
+        # Discovery query: same date range + offline, no model/project
+        # filter. Cached via @st.cache_data, so reopening the page within
+        # 30s is free.
         discovery_query = Query(
             since=_to_ccusage_date(since_date),
             until=_to_ccusage_date(until_date),
             offline=offline,
             tz=local_tz,
         )
+        model_options, project_options = _fetch_discovery_options(discovery_query)
 
-        model_options: list[str] = []
-        project_options: list[str] = []
-        try:
-            discovery_daily = data.daily(discovery_query)
-            model_options = available_models(discovery_daily)
-        except CcusageError:
-            pass
-        try:
-            discovery_proj = data.daily_by_project(discovery_query)
-            project_options = sorted(discovery_proj.projects.keys())
-        except CcusageError:
-            pass
-
-        project_kwargs: dict = {"key": _KEY_PROJECT}
-        if _KEY_PROJECT not in st.session_state:
-            project_kwargs["index"] = 0
-        home = _home_slug()
-        project_choice = st.selectbox(
-            "Project",
-            options=[ALL_PROJECTS, *project_options],
-            help="Filters via ccusage's -p flag. Choose 'All projects' to disable.",
-            format_func=lambda v: (
-                v if v == ALL_PROJECTS else friendly_project_label(v, home_slug=home)
-            ),
-            **project_kwargs,
-        )
-        project_value: str | None = (
-            None if project_choice == ALL_PROJECTS else project_choice
-        )
-
-        models_kwargs: dict = {"key": _KEY_MODELS}
-        if _KEY_MODELS not in st.session_state:
-            models_kwargs["default"] = model_options
-        selected_models = st.multiselect(
-            "Models",
-            options=model_options,
-            help="Post-fetch filter on the model breakdowns within each entry.",
-            format_func=short_model_label,
-            **models_kwargs,
-        )
+        project_value = _render_project_selectbox(project_options)
+        selected_models = _render_models_multiselect(model_options)
 
         st.markdown("### Plan")
-        plan_kwargs: dict = {"key": _KEY_PLAN}
-        if _KEY_PLAN not in st.session_state:
-            plan_kwargs["index"] = 0
-        plan_name = st.selectbox(
-            "Subscription",
-            options=plan_names(),
-            help="Pure labelling — does not change any cost numbers.",
-            **plan_kwargs,
-        )
+        plan_name = _render_plan_selectbox()
 
         st.markdown("")
-        if st.button(
-            "Reset filters",
-            key="sidebar-reset",
-            help="Clears date range, project, models, offline, and plan back "
-                 "to defaults (last 30 days, all projects, all models, online, "
-                 "Enterprise).",
-            width="stretch",
-        ):
-            for k in (
-                _KEY_DATE_RANGE,
-                _KEY_OFFLINE,
-                _KEY_PROJECT,
-                _KEY_MODELS,
-                _KEY_PLAN,
-            ):
-                st.session_state.pop(k, None)
-            # Drop the URL params too so a shared link doesn't reload the
-            # same state the user just cleared.
-            for url_key in ("since", "until", "offline", "project", "models", "plan"):
-                if url_key in st.query_params:
-                    del st.query_params[url_key]
-            st.rerun()
+        _render_reset_button()
 
-        st.caption(
-            f"Times in `{local_tz}` (auto-detected). Override with the `TZ` "
-            "env var if it's wrong."
-        )
+        _render_timezone_caption(local_tz)
 
-    # Mirror the sidebar state into the URL so the page is shareable.
     _sync_url_from_session(
         since_date=since_date,
         until_date=until_date,
         offline=offline,
         project_value=project_value,
-        selected_models=list(selected_models),
+        selected_models=selected_models,
         plan_name=plan_name,
+    )
+
+    _log.debug(
+        "sidebar.state since=%s until=%s project=%s offline=%s models=%s plan=%s",
+        since_date,
+        until_date,
+        project_value,
+        offline,
+        selected_models,
+        plan_name,
     )
 
     return SidebarState(

@@ -23,7 +23,11 @@ import pandas as pd
 import streamlit as st
 
 from tokenscope.analytics import model_breakdown
+from tokenscope.log import get_logger
+from tokenscope.models import DailyReport
 from tokenscope.navigation import Navigation
+
+_log = get_logger(__name__)
 from tokenscope.ui._data import load_daily
 from tokenscope.ui._nav import route_to
 from tokenscope.ui.charts import (
@@ -109,7 +113,7 @@ def _render_breakdown_table(rows: list[dict]) -> None:
     )
 
 
-def _render_composition(daily_report, rows: list[dict]) -> None:
+def _render_composition(daily_report: DailyReport, rows: list[dict]) -> None:
     families = {row["family"] for row in rows}
     if len(families) <= 1:
         st.markdown("**Token composition**")
@@ -187,6 +191,7 @@ def _render_composition(daily_report, rows: list[dict]) -> None:
             continue
         col = drill_cols[idx % len(drill_cols)]
         if col.button(f"→ {fam}", key=f"drill-family-{fam}"):
+            _log.info("models.family_drill family=%s", fam)
             # Seed the sidebar's models multiselect before the rerun so
             # the widget initialises with the family pre-selected.
             st.session_state["sidebar-models"] = fam_models

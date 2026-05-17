@@ -32,6 +32,7 @@ from tokenscope.analytics import (
     window_cost,
 )
 from tokenscope.ccusage import CcusageError
+from tokenscope.models import BlocksReport, DailyReport
 from tokenscope.navigation import Navigation
 from tokenscope.plans import Plan
 from tokenscope.query import Query
@@ -98,7 +99,9 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             on_select="rerun",
             selection_mode=("points",),
         )
-        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
+        handle_chart_drill(
+            event, lambda x: nav.to_day(x[:10]), chart_key="overview-stacked-area"
+        )
 
     st.subheader("7-day rolling average cost")
     fig = rolling_average_line(daily_report, window_days=7)
@@ -110,7 +113,9 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             on_select="rerun",
             selection_mode=("points",),
         )
-        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
+        handle_chart_drill(
+            event, lambda x: nav.to_day(x[:10]), chart_key="overview-rolling-line"
+        )
 
     st.subheader("Daily token mix")
     fig = token_mix_bar(daily_report)
@@ -122,12 +127,14 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
             on_select="rerun",
             selection_mode=("points",),
         )
-        handle_chart_drill(event, lambda x: nav.to_day(x[:10]))
+        handle_chart_drill(
+            event, lambda x: nav.to_day(x[:10]), chart_key="overview-token-mix"
+        )
 
 
 def _render_kpis(
-    daily_report,
-    blocks_report,
+    daily_report: DailyReport,
+    blocks_report: BlocksReport | None,
     plan: Plan,
     query: Query,
     prior_total: float | None,
@@ -197,7 +204,7 @@ def _render_kpis(
     )
 
 
-def _render_cost_composition(daily_report) -> None:
+def _render_cost_composition(daily_report: DailyReport) -> None:
     """Enterprise-only: break window cost into estimated $-per-kind so
     the user sees where the money is actually going (mostly cache_read
     for typical Claude Code use).

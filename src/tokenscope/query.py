@@ -39,3 +39,13 @@ class Query:
         if self.offline:
             args.append("--offline")
         return args
+
+    @staticmethod
+    def argv(query: "Query | None") -> list[str]:
+        """Null-safe variant of `to_args()`. Replaces the two identical
+        one-line helpers (`ccusage._q`, `data._q_args`) that previously
+        wrapped this conditional. A bare ``Query()`` already means "no
+        filters" (every field defaults to None), so `Query.argv(q)` is
+        the single authoritative way to build the argv slice when the
+        caller may have been handed `None`."""
+        return query.to_args() if query is not None else []

@@ -21,7 +21,10 @@ from typing import Callable
 
 import streamlit as st
 
+from tokenscope.log import get_logger
 from tokenscope.navigation import Navigation
+
+_log = get_logger(__name__)
 
 
 def route_to(
@@ -37,6 +40,7 @@ def route_to(
     relies on — e.g. the Models view's "drill into a family" button
     seeds the sidebar's `models=` filter while routing to Overview.
     """
+    _log.info("nav.route target=%s extra_params=%s", target, extra_params or {})
     st.query_params.clear()
     for key, value in target.to_params().items():
         st.query_params[key] = value
@@ -49,6 +53,8 @@ def route_to(
 def handle_chart_drill(
     event,
     target_factory: Callable[[str], Navigation],
+    *,
+    chart_key: str,
 ) -> None:
     """If the user clicked a Plotly selection, route to the drill target.
 
@@ -57,18 +63,35 @@ def handle_chart_drill(
     `target_factory`. The factory chooses how to interpret the string
     (slice to YYYY-MM-DD for day drills, pass through for block ids).
 
+    `chart_key` is the same string the caller passes to
+    `st.plotly_chart(..., key=...)`. Required so every log line below
+    is attributable to a specific chart — absence of "event received"
+    log lines for a given chart is itself diagnostic data ("clicks
+    aren't reaching us from that chart at all").
+
     Quietly does nothing for empty / non-point selections so the helper
     can be dropped inline next to the chart.
     """
+    _log.debug(
+        "chart.event.received chart=%s has_event=%s", chart_key, bool(event)
+    )
     if not event:
         return
     selection = getattr(event, "selection", None)
     if not selection:
+        _log.debug("chart.event.empty_selection chart=%s", chart_key)
         return
     points = getattr(selection, "points", None) or []
     if not points:
+        _log.debug("chart.event.no_points chart=%s", chart_key)
         return
     raw = points[0].get("x") or points[0].get("y") or points[0].get("label")
     if not raw:
+        _log.debug(
+            "chart.event.point_missing_axes chart=%s point=%r",
+            chart_key,
+            points[0],
+        )
         return
+    _log.info("chart.drill chart=%s raw=%r", chart_key, raw)
     route_to(target_factory(str(raw)))

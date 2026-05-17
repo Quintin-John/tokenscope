@@ -12,21 +12,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from tokenscope.models import (
-    BlocksReport,
-    DailyByProjectReport,
-    DailyReport,
-    MonthlyByProjectReport,
-    MonthlyReport,
-    SessionReport,
-    WeeklyByProjectReport,
-    WeeklyReport,
-)
+from tokenscope.log import get_logger
+from tokenscope.models import BlocksReport, DailyReport
 from tokenscope.query import Query
+
+_log = get_logger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CCUSAGE_BIN = REPO_ROOT / "node_modules" / ".bin" / "ccusage"
@@ -38,6 +33,7 @@ class CcusageError(RuntimeError):
 
 def _check_installed() -> Path:
     if not CCUSAGE_BIN.exists():
+        _log.error("ccusage.not_installed path=%s", CCUSAGE_BIN)
         raise CcusageError(
             f"ccusage binary not found at {CCUSAGE_BIN}. "
             f"Run `npm ci` (or `./scripts/setup.sh`) in {REPO_ROOT}."
@@ -56,6 +52,8 @@ def _run_json(args: list[str]) -> dict[str, Any]:
     """
     binary = _check_installed()
     cmd = [str(binary), *args, "--json"]
+    _log.debug("ccusage.start argv=%s", args)
+    start = time.monotonic()
     try:
         result = subprocess.run(
             cmd,
@@ -64,18 +62,37 @@ def _run_json(args: list[str]) -> dict[str, Any]:
             check=True,
         )
     except subprocess.CalledProcessError as exc:
+        _log.error(
+            "ccusage.exit_nonzero returncode=%d argv=%s stderr=%r",
+            exc.returncode,
+            args,
+            exc.stderr.strip()[:300],
+        )
         raise CcusageError(
             f"ccusage exited with code {exc.returncode}: {exc.stderr.strip()}"
         ) from exc
+    duration_ms = int((time.monotonic() - start) * 1000)
     try:
-        return json.loads(result.stdout)
+        parsed = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
+        _log.error(
+            "ccusage.bad_json argv=%s stdout_head=%r",
+            args,
+            result.stdout[:300],
+        )
         raise CcusageError(
             f"ccusage produced invalid JSON: {exc}\n"
             f"argv: {args}\n"
             f"stdout (first 300 chars): {result.stdout[:300]!r}\n"
             f"stderr (first 300 chars): {result.stderr[:300]!r}"
         ) from exc
+    _log.debug(
+        "ccusage.ok argv=%s duration_ms=%d stdout_bytes=%d",
+        args,
+        duration_ms,
+        len(result.stdout),
+    )
+    return parsed
 
 
 @lru_cache(maxsize=1)
@@ -89,10 +106,6 @@ def get_ccusage_version() -> str:
         check=True,
     )
     return result.stdout.strip()
-
-
-def _q(query: Query | None) -> list[str]:
-    return query.to_args() if query is not None else []
 
 
 _EMPTY_TOTALS = {
@@ -118,57 +131,22 @@ def _coerce_empty(raw, key: str, *, container_type=list):
 
 
 def daily(query: Query | None = None) -> DailyReport:
-    raw = _coerce_empty(_run_json(["daily", *_q(query)]), "daily")
+    """Uncached daily report. Used only by the live ccusage integration
+    tests; production code goes through `tokenscope.data.daily` for the
+    Streamlit cache layer."""
+    raw = _coerce_empty(_run_json(["daily", *Query.argv(query)]), "daily")
     return DailyReport.model_validate(raw)
 
 
-def weekly(query: Query | None = None) -> WeeklyReport:
-    raw = _coerce_empty(_run_json(["weekly", *_q(query)]), "weekly")
-    return WeeklyReport.model_validate(raw)
-
-
-def monthly(query: Query | None = None) -> MonthlyReport:
-    raw = _coerce_empty(_run_json(["monthly", *_q(query)]), "monthly")
-    return MonthlyReport.model_validate(raw)
-
-
-def session(query: Query | None = None) -> SessionReport:
-    raw = _coerce_empty(_run_json(["session", *_q(query)]), "sessions")
-    return SessionReport.model_validate(raw)
-
-
 def blocks(active: bool = False, query: Query | None = None) -> BlocksReport:
+    """Uncached blocks report. Used only by the live ccusage integration
+    tests; production code goes through `tokenscope.data.blocks`.
+
+    `blocks` already returns a proper `{"blocks": [], "message": "..."}`
+    shape for empty ranges, so no _coerce_empty wrapping is needed.
+    """
     args: list[str] = []
     if active:
         args.append("--active")
-    args += _q(query)
-    # blocks already returns a proper `{"blocks": [], "message": "..."}`
-    # shape for empty ranges, so no coercion needed.
+    args.extend(Query.argv(query))
     return BlocksReport.model_validate(_run_json(["blocks", *args]))
-
-
-def daily_by_project(query: Query | None = None) -> DailyByProjectReport:
-    raw = _coerce_empty(
-        _run_json(["daily", "--instances", *_q(query)]),
-        "projects",
-        container_type=dict,
-    )
-    return DailyByProjectReport.model_validate(raw)
-
-
-def weekly_by_project(query: Query | None = None) -> WeeklyByProjectReport:
-    raw = _coerce_empty(
-        _run_json(["weekly", "--instances", *_q(query)]),
-        "projects",
-        container_type=dict,
-    )
-    return WeeklyByProjectReport.model_validate(raw)
-
-
-def monthly_by_project(query: Query | None = None) -> MonthlyByProjectReport:
-    raw = _coerce_empty(
-        _run_json(["monthly", "--instances", *_q(query)]),
-        "projects",
-        container_type=dict,
-    )
-    return MonthlyByProjectReport.model_validate(raw)

@@ -119,6 +119,76 @@ def test_day_with_no_day_param_shows_back_affordance(
     assert back_buttons
 
 
+def test_drill_view_does_not_revert_when_page_selector_has_stale_state(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Regression: the page selector's `st.session_state["top-page-selector"]`
+    persists across renders. After the user interacts with the selector
+    (e.g. clicks "Overview" to leave a drill), session_state holds
+    "Overview". On the NEXT drill (e.g. clicking a chart day), Streamlit
+    resurrects "Overview" ahead of the `index=None` argument and the
+    page-selector handler reroutes the user back out of the drill.
+
+    Diagnosed via the logging slice:
+        chart.drill chart=overview-token-mix raw='2026-04-24'
+        nav.route target=Navigation(view='day', ...)
+        app.render view=day        ← drill succeeded
+        app.render view=overview   ← reverted by stale page-selector
+
+    Fix: pop `top-page-selector` from session_state before rendering
+    the radio whenever the current view is not a top-level view.
+    """
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("day", day="2026-04-05")
+    # Simulate the user having previously picked "Overview" via the
+    # page-selector — exactly the state that triggered the bug.
+    at.session_state["top-page-selector"] = "Overview"
+    at.run()
+    _assert_clean(at)
+    # The user-facing proof of fix: URL stays on the drill view. Pre-fix
+    # the radio would resurrect "Overview", `chosen_view != nav.view`,
+    # query_params get cleared and rewritten to `view=overview`, and
+    # st.rerun fires. The fix pops the stale session_state so the radio
+    # sees index=None and returns None → no reroute.
+    #
+    # AppTest exposes query_params with multidict semantics; values come
+    # back as lists. Compare the first entry.
+    view = at.query_params["view"]
+    day = at.query_params["day"]
+    assert (view[0] if isinstance(view, list) else view) == "day"
+    assert (day[0] if isinstance(day, list) else day) == "2026-04-05"
+
+
+def test_day_renders_session_and_block_rows_via_shared_helper(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Slice 5 regression: _session_row and _block_row both compose
+    _entity_row, which must emit:
+      - one Open-session button keyed `open-session-<id>`
+      - one Open-block button keyed `open-block-<id>`
+    on a day where the session.json and blocks.json fixtures overlap.
+
+    The shared helper is correct iff the buttons appear with the
+    expected key prefixes for both entity types.
+    """
+    _wire_default_fixtures(mock_ccusage)
+    # 2026-04-05 is the first overlap date in the fixtures (1 session,
+    # 4 blocks all starting on that date).
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+
+    button_keys = [b.key for b in at.button if b.key]
+    session_buttons = [k for k in button_keys if k.startswith("open-session-")]
+    block_buttons = [k for k in button_keys if k.startswith("open-block-")]
+    assert len(session_buttons) >= 1, (
+        f"expected at least one 'open-session-*' button; got keys={button_keys}"
+    )
+    assert len(block_buttons) >= 1, (
+        f"expected at least one 'open-block-*' button; got keys={button_keys}"
+    )
+
+
 def test_session_renders_with_valid_id(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     session = json.loads((FIXTURES / "session.json").read_text())
