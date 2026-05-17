@@ -25,31 +25,41 @@ def test_detect_local_iana_returns_some_string() -> None:
 
 
 def test_detect_local_iana_honours_tz_env(monkeypatch) -> None:
-    """Setting the `TZ` env var should propagate through Python's tz
-    detection (Python 3.9+ with zoneinfo)."""
+    """A valid IANA name in TZ must be returned verbatim — this is the
+    Docker-container path. The slim Python images symlink
+    /etc/localtime → Etc/UTC, so without an explicit TZ check we'd
+    silently bucket data in UTC even when the user passes
+    -e TZ=America/New_York. The TZ probe is what makes the user's
+    flag take effect."""
     monkeypatch.setenv("TZ", "Asia/Tokyo")
-    # `time.tzset()` is needed on some platforms to make TZ effective.
-    try:
-        import time
+    assert detect_local_iana() == "Asia/Tokyo"
 
-        time.tzset()
-    except (AttributeError, OSError):
-        pass
+
+def test_detect_local_iana_ignores_posix_tz(monkeypatch) -> None:
+    """A POSIX-style TZ rule (e.g. ``EST5EDT,M3.2.0,M11.1.0``) is *not*
+    an IANA zone — passing it to ccusage would error. Fall through to
+    the next probe instead of returning the rule string."""
+    import tokenscope.tz as tz_mod
+
+    monkeypatch.setenv("TZ", "EST5EDT,M3.2.0,M11.1.0")
+    # Force the symlink probe to a known IANA target so we can verify
+    # we didn't return the POSIX junk.
+    monkeypatch.setattr(
+        tz_mod.Path, "is_symlink", lambda self: True, raising=False
+    )
+    monkeypatch.setattr(
+        tz_mod.os, "readlink",
+        lambda _: "/usr/share/zoneinfo/America/Chicago",
+    )
     name = detect_local_iana()
-    # On a host that supports tzset, the returned name should be Asia/Tokyo
-    # (or contain the same key). On platforms where tzset isn't available
-    # we just confirm we got *something* IANA-ish.
-    assert isinstance(name, str)
-    # On macOS/Linux with tzdata: should be the env zone.
-    if "/" in name:
-        # Either we got the env-set zone, or the symlink fallback gave us
-        # the host's actual zone — both are valid.
-        assert name == "Asia/Tokyo" or "/" in name
+    assert name == "America/Chicago"
+    assert "," not in name  # Definitely not the POSIX rule string.
 
 
 def test_detect_local_iana_symlink_fallback(monkeypatch, tmp_path) -> None:
     """If `datetime.astimezone().tzinfo` doesn't have a `key` attr, we
     fall back to reading the `/etc/localtime` symlink target."""
+    monkeypatch.delenv("TZ", raising=False)
     # Patch the datetime path to force the fallback.
     import tokenscope.tz as tz_mod
 
@@ -82,6 +92,7 @@ def test_detect_local_iana_symlink_fallback(monkeypatch, tmp_path) -> None:
 
 def test_detect_local_iana_returns_utc_when_all_else_fails(monkeypatch) -> None:
     """Force the most pessimistic path: tzinfo has no key, no symlink."""
+    monkeypatch.delenv("TZ", raising=False)
     import tokenscope.tz as tz_mod
 
     class _NoKeyTzInfo:

@@ -28,15 +28,38 @@ def detect_local_iana() -> str:
     """Return the user's IANA timezone name, best-effort.
 
     Lookup order:
-      1. `datetime.now().astimezone().tzinfo` — Python 3.9+ returns a
+      1. ``TZ`` env var, if it names a valid IANA zone. Why first:
+         in slim Docker images the host TZ is passed in via
+         ``-e TZ=America/New_York``, but Python's
+         ``datetime.now().astimezone()`` parses it into a fixed-offset
+         ``datetime.timezone(..., 'EDT')`` object that has no ``.key``
+         attribute — so probe (2) silently misses it. Reading TZ
+         explicitly and validating via ``ZoneInfo`` skips that wart.
+      2. `datetime.now().astimezone().tzinfo` — Python 3.9+ returns a
          `zoneinfo.ZoneInfo` with a `key` when the system tz database
-         is available. That's the canonical answer.
-      2. `/etc/localtime` symlink target on Unix (macOS: typically
+         resolved a zone-named symlink. Works on macOS / non-Dockerised
+         Linux; doesn't fire in slim containers (see above).
+      3. `/etc/localtime` symlink target on Unix (macOS: typically
          `/var/db/timezone/zoneinfo/<Zone>`; Linux: `/usr/share/zoneinfo/<Zone>`).
-         Extract everything after the last `/zoneinfo/` segment.
-      3. Final fallback: "UTC" (never None — every consumer can pass
+         Extract everything after the last `/zoneinfo/` segment. In
+         slim Docker images this points at `Etc/UTC` regardless of
+         host zone — that's why probe (1) has to come first.
+      4. Final fallback: "UTC" (never None — every consumer can pass
          the result straight to ccusage without nil-checks).
     """
+    tz_env = os.environ.get("TZ", "").strip()
+    if tz_env:
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(tz_env)
+            return tz_env
+        except Exception:
+            # TZ set to a POSIX-style string ("EST5EDT") or junk — fall
+            # through to the other probes rather than confidently
+            # returning garbage.
+            pass
+
     tz = datetime.now().astimezone().tzinfo
     key = getattr(tz, "key", None)
     if isinstance(key, str) and "/" in key:
