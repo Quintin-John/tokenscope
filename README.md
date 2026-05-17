@@ -48,6 +48,7 @@ git clone https://github.com/Quintin-John/tokenscope.git
 cd tokenscope
 docker build -t tokenscope .
 docker run --rm -p 8501:8501 \
+    -e TZ="$(readlink /etc/localtime | sed -E 's|.*/zoneinfo/||')" \
     -v "$HOME/.claude":/root/.claude:ro \
     tokenscope
 # open http://127.0.0.1:8501
@@ -56,6 +57,20 @@ docker run --rm -p 8501:8501 \
 The volume mount exposes Claude Code's session history read-only into
 the container so ccusage can read it; without it the dashboard loads
 with an empty data set. On macOS the path is `~/.claude`.
+
+The `-e TZ=...` line passes your host timezone into the container.
+**Skip it and your costs will be wrong.** The container defaults to
+`Etc/UTC`, which makes ccusage bucket day boundaries by UTC. For a
+US-east user that pushes late-evening sessions onto the *next* UTC
+date — so a 12-hour project shows up split across two days, and
+sessions past 8pm on the window's `--until` date silently disappear
+because they belong to "tomorrow" in UTC. On a 6-week window we saw
+$206 (~9%) go missing this way. The shell expression resolves your
+host's IANA zone (`America/New_York`, `Europe/London`, etc.) by
+inspecting `/etc/localtime`; if it doesn't work on your system, pass
+the zone explicitly: `-e TZ=America/New_York`. The dashboard's
+sidebar caption shows which zone got detected — if it says
+`Etc/UTC`, the flag didn't take.
 
 The Dockerfile is multi-stage and pinned: Node 20.19.4 from the
 official `node:20-bookworm-slim` image (no third-party setup script
