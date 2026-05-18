@@ -178,3 +178,105 @@ def test_live_view_parses() -> None:
 
 def test_live_view_trail_is_root_only() -> None:
     assert Navigation(view="live").trail() == [("Overview", Navigation(view="overview"))]
+
+
+# --- Slice F: view registry invariants ----------------------------------
+#
+# `navigation._VIEWS` is the single source of truth for the dashboard's
+# view set. `VALID_VIEWS`, `TOP_LEVEL_VIEWS`, and `TOP_LEVEL_LABELS` are
+# all derived from it; the `ViewName` Literal is kept in sync via the
+# module-load assertion. These tests pin the registry contract so a
+# future change can't accidentally desynchronize the derivations.
+
+
+def test_view_registry_literal_and_runtime_set_agree() -> None:
+    """The `ViewName` Literal and the `_VIEWS` runtime registry must
+    cover the same set of view names. The module-load assertion
+    already enforces this — this test makes the contract explicit
+    in the test suite so a regression that loosened or removed the
+    assertion still fails loudly."""
+    from typing import get_args
+
+    from tokenscope.navigation import _VIEWS, ViewName
+
+    assert set(get_args(ViewName)) == {v.name for v in _VIEWS}
+
+
+def test_valid_views_derives_from_registry_in_order() -> None:
+    """`VALID_VIEWS` is the tuple of names in `_VIEWS` order (no
+    sorting, no filtering). Registration order matters for the page
+    selector's left-to-right rendering."""
+    from tokenscope.navigation import _VIEWS, VALID_VIEWS
+
+    assert VALID_VIEWS == tuple(v.name for v in _VIEWS)
+
+
+def test_top_level_views_excludes_drill_views() -> None:
+    """A view is "top-level" iff its `_ViewMeta.label` is not None.
+    Drill views (day / session / block) have `label is None` and are
+    reachable only via chart-click or breadcrumb — never the page
+    selector."""
+    from tokenscope.navigation import _VIEWS, TOP_LEVEL_VIEWS
+
+    expected = tuple(v.name for v in _VIEWS if v.label is not None)
+    assert TOP_LEVEL_VIEWS == expected
+
+    drill_views = {v.name for v in _VIEWS if v.label is None}
+    assert drill_views == {"day", "session", "block"}
+    assert drill_views.isdisjoint(TOP_LEVEL_VIEWS)
+
+
+def test_top_level_labels_keys_match_top_level_views() -> None:
+    """`TOP_LEVEL_LABELS` is keyed by exactly the top-level view names.
+    The page selector reads from this dict; an out-of-sync key set
+    would raise `KeyError` at render time."""
+    from tokenscope.navigation import TOP_LEVEL_LABELS, TOP_LEVEL_VIEWS
+
+    assert set(TOP_LEVEL_LABELS) == set(TOP_LEVEL_VIEWS)
+
+
+def test_app_renderer_map_covers_every_valid_view() -> None:
+    """`app._RENDERERS` must have an entry for every name in
+    `VALID_VIEWS` and no extras. The app's module-load assertion
+    enforces this; this test makes the contract visible to the
+    test suite so a regression that loosened the assertion still
+    fails loudly here.
+
+    Drift in either direction is dangerous: a missing renderer
+    would `KeyError` on the first request to the new view; an
+    orphan renderer is dead code that lies about what views are
+    actually reachable."""
+    from tokenscope.app import _RENDERERS
+    from tokenscope.navigation import VALID_VIEWS
+
+    assert set(_RENDERERS) == set(VALID_VIEWS)
+
+
+def test_app_renderer_map_dispatches_each_view_to_its_module() -> None:
+    """Each `ViewName` resolves to the `render` callable from the
+    corresponding view module. Asserts the mapping itself (no
+    Streamlit runtime needed) — the end-to-end click-and-render
+    behaviour is covered by the parametrized
+    `test_top_level_page_selector_click_navigates` matrix in
+    `test_ui_smoke.py`."""
+    from tokenscope.app import _RENDERERS
+    from tokenscope.ui import (
+        block as block_view,
+        cache as cache_view,
+        day as day_view,
+        live as live_view,
+        models as models_view,
+        overview,
+        session as session_view,
+    )
+
+    expected = {
+        "overview": overview.render,
+        "live": live_view.render,
+        "cache": cache_view.render,
+        "models": models_view.render,
+        "day": day_view.render,
+        "session": session_view.render,
+        "block": block_view.render,
+    }
+    assert _RENDERERS == expected

@@ -14,12 +14,19 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 import streamlit as st
 
 from tokenscope.ccusage import CcusageError, get_ccusage_version
 from tokenscope.log import get_logger, setup_logging
-from tokenscope.navigation import TOP_LEVEL_VIEWS, Navigation, ViewName
+from tokenscope.navigation import (
+    TOP_LEVEL_LABELS,
+    TOP_LEVEL_VIEWS,
+    VALID_VIEWS,
+    Navigation,
+    ViewName,
+)
 from tokenscope.ui import block as block_view
 from tokenscope.ui import cache as cache_view
 from tokenscope.ui import day as day_view
@@ -28,6 +35,7 @@ from tokenscope.ui import models as models_view
 from tokenscope.ui import overview, sidebar
 from tokenscope.ui import session as session_view
 from tokenscope.ui._nav import PROGRAMMATIC_NAV_FLAG
+from tokenscope.ui.sidebar import SidebarState
 
 # Hardcoded module name: app.py is launched as `__main__` by both
 # `streamlit run` and pytest's AppTest (runpy semantics), so
@@ -36,12 +44,35 @@ from tokenscope.ui._nav import PROGRAMMATIC_NAV_FLAG
 _log = get_logger("tokenscope.app")
 
 
-_VIEW_LABELS: dict[ViewName, str] = {
-    "overview": "Overview",
-    "live": "Live",
-    "cache": "Cache",
-    "models": "Models",
+# View → renderer registry. Single dispatch source replaces the prior
+# 14-line if/elif chain in `render()`. Adding a new view requires one
+# entry here AND one entry in `navigation._VIEWS`; the assertion below
+# catches drift between the two at module-load time.
+#
+# Display labels for the page selector live in `navigation.TOP_LEVEL_LABELS`
+# (derived from the same registry that owns view names), not here —
+# renderers and labels are independent concerns kept in their respective
+# modules.
+_RENDERERS: dict[ViewName, Callable[[SidebarState, Navigation], None]] = {
+    "overview": overview.render,
+    "live": live_view.render,
+    "cache": cache_view.render,
+    "models": models_view.render,
+    "day": day_view.render,
+    "session": session_view.render,
+    "block": block_view.render,
 }
+
+
+# Drift guard: every declared view must have a renderer, and no orphan
+# renderers may exist. Catches "added a `_ViewMeta` but forgot the
+# renderer" (or vice versa) at module-load time rather than at the
+# first user request that hits the missing dispatch arm.
+assert set(_RENDERERS) == set(VALID_VIEWS), (
+    f"_RENDERERS / VALID_VIEWS mismatch: "
+    f"missing={set(VALID_VIEWS) - set(_RENDERERS)!r}, "
+    f"extra={set(_RENDERERS) - set(VALID_VIEWS)!r}"
+)
 
 
 # App-wide CSS lives in `src/tokenscope/ui/_app_styles.css`. Read once
@@ -125,20 +156,10 @@ def render() -> None:
     # view in one tap.
     nav = _render_page_selector(nav)
 
-    if nav.view == "day":
-        day_view.render(state, nav)
-    elif nav.view == "session":
-        session_view.render(state, nav)
-    elif nav.view == "block":
-        block_view.render(state, nav)
-    elif nav.view == "cache":
-        cache_view.render(state, nav)
-    elif nav.view == "models":
-        models_view.render(state, nav)
-    elif nav.view == "live":
-        live_view.render(state, nav)
-    else:
-        overview.render(state, nav)
+    # Registry dispatch — single source of truth (see `_RENDERERS`
+    # above). `Navigation.from_params` clamps unknown values to
+    # "overview", so the lookup is guaranteed to hit.
+    _RENDERERS[nav.view](state, nav)
 
 
 _PAGE_SELECTOR_KEY = "top-page-selector"
@@ -188,7 +209,7 @@ def _render_page_selector(nav: Navigation) -> Navigation:
     programmatic_nav = st.session_state.pop(PROGRAMMATIC_NAV_FLAG, False)
     if programmatic_nav:
         if nav.view in TOP_LEVEL_VIEWS:
-            st.session_state[_PAGE_SELECTOR_KEY] = _VIEW_LABELS[nav.view]
+            st.session_state[_PAGE_SELECTOR_KEY] = TOP_LEVEL_LABELS[nav.view]
         else:
             # Programmatic nav into a drill view — clear the persisted
             # top-level label so the radio renders with no selection,
@@ -203,9 +224,9 @@ def _render_page_selector(nav: Navigation) -> Navigation:
         # `chosen_view != nav.view` path below.
         st.session_state.pop(_PAGE_SELECTOR_KEY, None)
 
-    label_to_view = {v: k for k, v in _VIEW_LABELS.items()}
-    options = [_VIEW_LABELS[v] for v in TOP_LEVEL_VIEWS]
-    index = options.index(_VIEW_LABELS[nav.view]) if nav.view in TOP_LEVEL_VIEWS else None
+    label_to_view = {v: k for k, v in TOP_LEVEL_LABELS.items()}
+    options = [TOP_LEVEL_LABELS[v] for v in TOP_LEVEL_VIEWS]
+    index = options.index(TOP_LEVEL_LABELS[nav.view]) if nav.view in TOP_LEVEL_VIEWS else None
     chosen_label = st.radio(
         "Page",
         options=options,

@@ -13,21 +13,69 @@ routing logic is unit-testable.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Mapping
+from typing import Literal, Mapping, get_args
 
 ViewName = Literal[
-    "overview", "day", "session", "block", "cache", "models", "live"
+    "overview", "live", "cache", "models",
+    "day", "session", "block",
 ]
-VALID_VIEWS: tuple[ViewName, ...] = (
-    "overview",
-    "day",
-    "session",
-    "block",
-    "cache",
-    "models",
-    "live",
+
+
+@dataclass(frozen=True, slots=True)
+class _ViewMeta:
+    """Static metadata for one view in the dashboard.
+
+    Top-level views (Overview / Live / Cache / Models) appear in the
+    page selector and carry a display label. Drill views (Day /
+    Session / Block) are reachable only via chart-click or breadcrumb;
+    they have `label is None` and are excluded from the page selector
+    but still dispatched through the renderer registry in `app.py`.
+    """
+
+    name: ViewName
+    label: str | None  # None → drill view, hidden from page selector
+
+
+# Single source of truth for the dashboard's view registry. Adding a
+# view requires one entry here (plus a renderer in `app._RENDERERS`,
+# which is drift-checked at module-load time against this tuple).
+# Pre-Slice-F the same view set was redeclared in four places
+# (this module's `VALID_VIEWS` + `TOP_LEVEL_VIEWS` constants, `app.py`'s
+# `_VIEW_LABELS` dict, and the `app.render` if/elif dispatch chain).
+_VIEWS: tuple[_ViewMeta, ...] = (
+    _ViewMeta("overview", "Overview"),
+    _ViewMeta("live", "Live"),
+    _ViewMeta("cache", "Cache"),
+    _ViewMeta("models", "Models"),
+    _ViewMeta("day", None),
+    _ViewMeta("session", None),
+    _ViewMeta("block", None),
 )
-TOP_LEVEL_VIEWS: tuple[ViewName, ...] = ("overview", "live", "cache", "models")
+
+
+# Drift guard: the static `ViewName` Literal and the runtime `_VIEWS`
+# registry must agree on the view name set. Python's `Literal` can't
+# be derived from runtime data (it must be a literal expression at
+# class-statement time), so the two are physically separate sources
+# that this assertion keeps logically aligned. Catches the failure
+# mode "added a `_ViewMeta` but forgot the Literal entry" (or vice
+# versa) at module-load time rather than at first request.
+assert set(get_args(ViewName)) == {v.name for v in _VIEWS}, (
+    "ViewName Literal and _VIEWS registry diverged: "
+    f"Literal={set(get_args(ViewName))!r}, "
+    f"_VIEWS={ {v.name for v in _VIEWS}!r }"
+)
+
+
+# Public derivations — every view-related constant below comes from
+# `_VIEWS`. No hand-maintained duplicates.
+VALID_VIEWS: tuple[ViewName, ...] = tuple(v.name for v in _VIEWS)
+TOP_LEVEL_VIEWS: tuple[ViewName, ...] = tuple(
+    v.name for v in _VIEWS if v.label is not None
+)
+TOP_LEVEL_LABELS: dict[ViewName, str] = {
+    v.name: v.label for v in _VIEWS if v.label is not None
+}
 
 
 @dataclass(frozen=True, slots=True)
