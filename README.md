@@ -117,6 +117,65 @@ runs), Python 3.12.7 from `python:3.12-slim-bookworm`, `uv` and
 ccusage at their lockfile versions. Verified end-to-end on macOS arm64
 against Docker Desktop 29.4.3 — image ~880 MB, ready in a few seconds.
 
+#### Windows (Docker Desktop / WSL2)
+
+The Docker path is the same; only the host-side path syntax and
+timezone handling change. The maintainer doesn't run Windows, so the
+recipe below is the documented intent — the image itself is OS-agnostic
+and Docker isolates everything inside it, but the host-shell parts
+(volume source path, TZ resolution) are untested on a Windows host.
+
+In **PowerShell**:
+
+```powershell
+git clone https://github.com/Quintin-John/tokenscope.git
+cd tokenscope
+docker build -t tokenscope .
+docker run --rm -p 8501:8501 `
+    -e TZ=America/New_York `
+    -v "${env:USERPROFILE}\.claude:/root/.claude:ro" `
+    tokenscope
+# open http://127.0.0.1:8501
+```
+
+In **Command Prompt (cmd)**:
+
+```bat
+git clone https://github.com/Quintin-John/tokenscope.git
+cd tokenscope
+docker build -t tokenscope .
+docker run --rm -p 8501:8501 ^
+    -e TZ=America/New_York ^
+    -v "%USERPROFILE%\.claude:/root/.claude:ro" ^
+    tokenscope
+```
+
+Two things differ from the macOS recipe:
+
+1. **Volume source.** Claude Code stores its session history under
+   `%USERPROFILE%\.claude` on Windows (typically
+   `C:\Users\<you>\.claude`). Substitute that for `$HOME/.claude`.
+   Docker Desktop maps the Windows path into the Linux-side container
+   transparently.
+2. **TZ value.** The macOS shell expression
+   `$(readlink /etc/localtime | sed ...)` resolves the host's IANA
+   zone from `/etc/localtime`. Windows uses its own zone names
+   (`Eastern Standard Time`, not `America/New_York`) and has no
+   `/etc/localtime`, so there's no portable one-liner. Pass the IANA
+   zone explicitly — common values: `America/New_York`,
+   `America/Chicago`, `America/Denver`, `America/Los_Angeles`,
+   `Europe/London`, `Europe/Berlin`, `Asia/Tokyo`,
+   `Australia/Sydney`. The dashboard's sidebar caption shows which
+   zone got detected — if it says `Etc/UTC`, the `-e TZ=...` flag
+   didn't take and your costs will bucket on UTC day-boundaries
+   (see the macOS section above for why that matters).
+
+WSL2 users can also run the macOS recipe verbatim from inside their
+WSL distro (the WSL2 filesystem provides `/etc/localtime` and a Unix
+`$HOME`), but Claude Code typically writes its `.claude` directory on
+the Windows side — point the volume at `/mnt/c/Users/<you>/.claude`
+in that case.
+
 ### Source install (for development)
 
 ```bash
@@ -205,19 +264,18 @@ fast and Streamlit-free.
 
 ```bash
 ./scripts/setup.sh                 # idempotent — uv sync --frozen + npm ci
-uv run pytest                      # full suite (~227 tests, ~2s)
+uv run pytest                      # full suite (~676 tests, ~5s)
 uv run pytest -m integration       # opt-in: shells out to real ccusage
-uv run pytest --cov=tokenscope     # full coverage report (~87% total)
+uv run pytest --cov=tokenscope     # full coverage report (~96% total)
 ```
 
 Coverage targets: `analytics.py`, `models.py`, `navigation.py`,
 `plans.py`, `query.py`, `__init__.py` all hold **100%** line coverage.
-Total project coverage sits at 87% — UI modules covered via
+Total project coverage sits at 96% — UI modules covered via
 `streamlit.testing.v1.AppTest` against a `mock_ccusage` fixture so unit
 tests don't shell out.
 
 Phase boundaries are described in [PLAN.md §6](PLAN.md#6-proposed-phases).
-Every PLAN.md §3.1 drill path is implemented as of slice 17.
 
 ## PyPI publish path
 
