@@ -13,7 +13,7 @@ figures.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from statistics import median
 from typing import Iterable, Protocol
 
@@ -593,20 +593,18 @@ def prior_window_query(query: Query) -> Query | None:
     prior window is `2026-03-18 → 2026-04-16` (also 30 days, ending the
     day before the current window starts).
 
-    Returns None when the query has no explicit `since`/`until` — without
-    bounds we don't have a "prior" to compare against. Date strings are
-    parsed/emitted in ccusage's `YYYYMMDD` format so the returned Query
-    is a drop-in for `data.daily(...)`.
+    Returns None when the query has no explicit `since`/`until`, or
+    when either bound is malformed — without parseable bounds we don't
+    have a "prior" to compare against. Date strings are emitted in
+    ccusage's `YYYYMMDD` format so the returned Query is a drop-in for
+    `data.daily(...)`.
 
     Project / offline flags are carried over unchanged so the comparison
     fetches the same slice of data, just shifted in time.
     """
-    if not query.since or not query.until:
-        return None
-    try:
-        since = datetime.strptime(query.since, "%Y%m%d").date()
-        until = datetime.strptime(query.until, "%Y%m%d").date()
-    except ValueError:
+    since = query.since_date()
+    until = query.until_date()
+    if since is None or until is None:
         return None
     length = (until - since).days
     if length < 0:

@@ -137,7 +137,7 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
         except CcusageError:
             prior_total = None
 
-    window_days = _window_days(state.query) or config.DEFAULT_RANGE_DAYS
+    window_days = state.query.window_days() or config.DEFAULT_RANGE_DAYS
     spike = spike_day(daily_report, threshold_multiplier=config.OVERVIEW_SPIKE_THRESHOLD)
 
     _render_page_header(state, window_days, refresh_time)
@@ -514,16 +514,3 @@ def _render_token_mix(daily_report: DailyReport, nav: Navigation) -> None:
         )
 
 
-# --- helpers -------------------------------------------------------------
-
-
-def _window_days(query: Query) -> int | None:
-    """Length of the current window in days, or None when unbounded."""
-    if not query.since or not query.until:
-        return None
-    try:
-        since = datetime.strptime(query.since, "%Y%m%d").date()
-        until = datetime.strptime(query.until, "%Y%m%d").date()
-    except ValueError:
-        return None
-    return (until - since).days + 1
