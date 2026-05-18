@@ -2075,6 +2075,251 @@ def test_cache_renders(mock_ccusage, mock_ccusage_version) -> None:
     assert "Effective $ / 1M tokens" in labels
 
 
+# --- Cache Slice 1 (plan-usage-updates): plan-aware savings hero + subtitle ---
+#
+# Caching delivers different value on different plans. On Enterprise
+# (pay-per-token) the savings ARE real dollars; on flat-rate (Pro /
+# Max 5× / Max 20×) the dollar figure is API-equivalent VALUE — the
+# user pays the monthly fee regardless. The Cache view's page
+# subtitle, savings-hero label, and savings-hero context branch on
+# `plan.is_flat_rate` to name the right reality per plan.
+#
+# Tests parametrized over all three flat-rate plans where copy is
+# uniform across them (hero label, page subtitle) — proves no
+# `plan.name`-based hardcoding. Tests use parametrize(Enterprise +
+# Pro) for surfaces where the assertions are symmetric.
+
+
+def test_cache_page_subtitle_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Default Enterprise plan keeps the current `How much caching
+    is saving you` framing — pay-per-token users genuinely ARE
+    saving money."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "saving you, and where it's working" in captions, (
+        f"Enterprise page subtitle missing expected copy: {captions!r}"
+    )
+    # Flat-rate framing must NOT leak on Enterprise.
+    assert "API-equivalent" not in captions, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise "
+        f"subtitle: {captions!r}"
+    )
+    assert "plan covers" not in captions
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_cache_page_subtitle_explains_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """Flat-rate page subtitle names the API-equivalent framing AND
+    the plan-covers-actual-billing decoupling. Parametrized over all
+    three flat-rate plans to prove branching is on
+    `plan.is_flat_rate`, not hardcoded to a specific plan name."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent" in captions, (
+        f"flat-rate page subtitle on {flat_rate_plan} missing "
+        f"`API-equivalent`: {captions!r}"
+    )
+    assert "plan covers" in captions, (
+        f"flat-rate page subtitle on {flat_rate_plan} missing "
+        f"`plan covers` decoupling: {captions!r}"
+    )
+    # Enterprise framing must NOT leak.
+    assert "saving you, and where it's working" not in captions, (
+        f"Enterprise framing leaked on {flat_rate_plan} subtitle"
+    )
+
+
+def test_cache_savings_hero_label_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Default Enterprise plan keeps the `Estimated savings from
+    caching` hero label — the savings are real money saved."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Estimated savings from caching" in md, (
+        f"Enterprise hero missing `Estimated savings from caching` label"
+    )
+    assert "API-equivalent savings" not in md, (
+        f"flat-rate `API-equivalent savings` framing leaked on "
+        f"Enterprise hero"
+    )
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_cache_savings_hero_label_says_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """Flat-rate hero label is `API-equivalent savings from
+    caching` — the dollar isn't money out of pocket; it's the
+    API-equivalent value caching adds to throughput. Parametrized
+    over all three flat-rate plans for plan-name hardcoding
+    protection."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "API-equivalent savings from caching" in md, (
+        f"flat-rate hero on {flat_rate_plan} missing "
+        f"`API-equivalent savings from caching` label"
+    )
+    # Enterprise label is `Estimated savings from caching`. That
+    # exact phrase is NOT a substring of `API-equivalent savings
+    # from caching`, so this assertion catches an accidental
+    # double-render or leak.
+    assert "Estimated savings from caching" not in md, (
+        f"Enterprise label leaked on {flat_rate_plan} hero"
+    )
+
+
+def test_cache_savings_hero_context_explains_actual_billing_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When LiteLLM rates ARE available, Enterprise hero context
+    explains real billing semantics — "you actually paid $X" — and
+    must not pick up the flat-rate plan-fee framing."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "you actually paid" in md, (
+        f"Enterprise hero context missing `you actually paid`"
+    )
+    assert "monthly fee is fixed" not in md, (
+        f"flat-rate `monthly fee is fixed` leaked on Enterprise hero"
+    )
+    assert "API-equivalent" not in md, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise hero"
+    )
+
+
+def test_cache_savings_hero_context_explains_plan_decoupling_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When LiteLLM rates ARE available, flat-rate hero context
+    explains BOTH the API-equivalent framing AND the plan-fee
+    decoupling — the user must understand the dollar figure isn't
+    money out of pocket."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "API-equivalent" in md, (
+        f"flat-rate hero context missing `API-equivalent` framing"
+    )
+    assert "monthly fee is fixed" in md, (
+        f"flat-rate hero context missing `monthly fee is fixed` "
+        f"decoupling note"
+    )
+    # Enterprise framing must NOT leak.
+    assert "you actually paid" not in md, (
+        f"Enterprise `you actually paid` framing leaked on flat-rate"
+    )
+
+
+def test_cache_savings_hero_no_rates_context_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When LiteLLM rates aren't reachable on Enterprise, the hero
+    context keeps the current wording — the LiteLLM-unreachable
+    notice plus the reconnect/refresh suggestion. No plan-fee
+    framing leaks in."""
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model", lambda _name: None
+    )
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Pricing rates from LiteLLM aren't reachable" in md, (
+        f"Enterprise no-rates context missing LiteLLM unreachable note"
+    )
+    assert "the savings calculation can't run" in md, (
+        f"Enterprise no-rates context missing `savings calculation` "
+        f"explanation"
+    )
+    assert "monthly fee is fixed" not in md, (
+        f"flat-rate framing leaked on Enterprise no-rates context"
+    )
+    assert "monthly fee is unchanged" not in md, (
+        f"flat-rate framing leaked on Enterprise no-rates context"
+    )
+    assert "API-equivalent" not in md, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise "
+        f"no-rates context"
+    )
+
+
+def test_cache_savings_hero_no_rates_context_mentions_plan_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When LiteLLM rates aren't reachable on flat-rate, the hero
+    context explains BOTH that the API-equivalent calculation can't
+    run AND that the user's plan fee is unchanged — the pricing
+    outage doesn't cost them money."""
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model", lambda _name: None
+    )
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Pricing rates from LiteLLM aren't reachable" in md, (
+        f"flat-rate no-rates context missing LiteLLM unreachable note"
+    )
+    assert "API-equivalent" in md, (
+        f"flat-rate no-rates context missing `API-equivalent` framing"
+    )
+    assert "monthly fee is unchanged" in md, (
+        f"flat-rate no-rates context missing plan-fee unchanged note"
+    )
+
+
 # --- Pre-slice P2: compute-once invariant for Cache view per-model rows ---
 #
 # Pinning the CURRENT call count of `per_model_cache_performance` on the

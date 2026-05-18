@@ -42,6 +42,7 @@ from tokenscope.analytics import (
 )
 from tokenscope.models import DailyReport
 from tokenscope.navigation import Navigation
+from tokenscope.plans import Plan
 from tokenscope.ui._data import load_daily
 from tokenscope.ui.charts import (
     cache_hit_sparkline,
@@ -52,9 +53,96 @@ from tokenscope.ui.charts import (
 from tokenscope.ui.sidebar import SidebarState
 
 
+# --- plan-aware copy (single source of truth) ---------------------------
+#
+# Caching delivers different value on different plans:
+#   * Enterprise / pay-per-token: real dollars saved (cache_read tokens
+#     billed at a fraction of the input rate).
+#   * Flat-rate (Pro / Max 5× / Max 20×): the dollar figure is the
+#     API-equivalent value caching adds to throughput — NOT money out
+#     of pocket. The user pays the fixed monthly fee regardless.
+#
+# Every plan-aware string the Cache view renders lives in these
+# module-private helpers, keyed off `plan.is_flat_rate`. The render
+# functions never embed plan-keyed literals inline — they call the
+# helpers. Branching is always on `plan.is_flat_rate`, never on
+# `plan.name`.
+
+
+def _page_caption(plan: Plan) -> str:
+    """One-line subtitle under the `# Cache` H1. Names the user's
+    actual billing reality: flat-rate users see "API-equivalent;
+    your plan covers actual billing"; Enterprise sees the simpler
+    "saving you money" framing because that's literally true."""
+    if plan.is_flat_rate:
+        return (
+            "How much value caching adds to your throughput, and where "
+            "it's working. Costs are API-equivalent; your plan covers "
+            "actual billing."
+        )
+    return "How much caching is saving you, and where it's working."
+
+
+def _hero_label(plan: Plan) -> str:
+    """Label inside the savings hero. Flat-rate gets the explicit
+    `API-equivalent` qualifier so the dollar figure beneath it
+    isn't mistaken for money out of pocket."""
+    if plan.is_flat_rate:
+        return "API-equivalent savings from caching"
+    return "Estimated savings from caching"
+
+
+def _hero_savings_context_html(
+    plan: Plan,
+    *,
+    savings_usd: float,
+    actual: float,
+    uncached: float,
+) -> str:
+    """Inner HTML for the savings-hero context div when LiteLLM
+    rates ARE available. Flat-rate names the API-equivalent semantics
+    AND the flat-fee decoupling — the user must understand the
+    dollar isn't a real saving from their pocket."""
+    if plan.is_flat_rate:
+        return (
+            f"Over the selected window, caching saved an estimated "
+            f"<strong>${savings_usd:,.2f}</strong> in API-equivalent "
+            f"costs (you'd have paid <strong>${uncached:,.2f}</strong> "
+            f"at API rates without caching, vs <strong>${actual:,.2f}"
+            f"</strong> with). Your plan's monthly fee is fixed "
+            "regardless — this is the value caching adds to your "
+            "throughput budget, not money out of pocket."
+        )
+    return (
+        f"Over the selected window. Without caching, your spend would "
+        f"have been <strong>${uncached:,.2f}</strong> — you actually "
+        f"paid <strong>${actual:,.2f}</strong>. The saving is the rate "
+        "delta on cache_read tokens: (input rate − cache_read rate) × "
+        "tokens, summed per model."
+    )
+
+
+def _hero_no_rates_context(plan: Plan) -> str:
+    """Inner text for the savings-hero context div when LiteLLM
+    rates are NOT reachable (savings is None). Flat-rate
+    additionally notes that the plan fee is unchanged — the user
+    isn't losing money to the pricing outage."""
+    if plan.is_flat_rate:
+        return (
+            "Pricing rates from LiteLLM aren't reachable right now, "
+            "so the API-equivalent savings calculation can't run. "
+            "Your plan's monthly fee is unchanged regardless."
+        )
+    return (
+        "Pricing rates from LiteLLM aren't reachable right now, "
+        "so the savings calculation can't run. Reconnect or wait "
+        "for the cached pricing snapshot to refresh."
+    )
+
+
 def render(state: SidebarState, nav: Navigation) -> None:
     st.markdown("# Cache")
-    st.caption("How much caching is saving you, and where it's working.")
+    st.caption(_page_caption(state.plan))
 
     daily_report = load_daily(state)
     if daily_report is None:
@@ -71,7 +159,7 @@ def render(state: SidebarState, nav: Navigation) -> None:
         return
 
     savings = cache_savings(daily_report)
-    _render_savings_hero(savings)
+    _render_savings_hero(savings, plan=state.plan)
     _render_kpi_row(daily_report, savings=savings)
     _render_reads_vs_writes(daily_report)
     _render_daily_savings(daily_report)
@@ -127,27 +215,36 @@ def _render_data_range_banner(
 # --- savings hero -------------------------------------------------------
 
 
-def _render_savings_hero(savings: dict | None) -> None:
-    """Large `$ saved` headline + the "without caching" comparison.
+def _render_savings_hero(savings: dict | None, *, plan: Plan) -> None:
+    """Large `$ saved` headline + plan-aware framing.
 
     The hero is the page's reason for existing — caching's value
-    proposition stated in money. When pricing rates aren't
-    resolvable (offline + no cache), the panel renders a neutral
-    fallback that explains why the figure is missing rather than
-    a placeholder $0.
+    proposition stated in money. Plan-aware: on Enterprise the
+    dollar IS real money saved; on flat-rate it's the API-equivalent
+    value caching adds to throughput (the user pays the fixed
+    monthly fee regardless).
+
+    Label / context / no-rates fallback all come from module-private
+    helpers (`_hero_label`, `_hero_savings_context_html`,
+    `_hero_no_rates_context`) — single source of truth per plan
+    branch.
+
+    When pricing rates aren't resolvable (offline + no cache), the
+    panel renders a neutral fallback that explains why the figure
+    is missing rather than a placeholder $0.
     """
+    label = _hero_label(plan)
     if savings is None:
+        context = _hero_no_rates_context(plan)
         st.markdown(
-            """
+            f"""
             <div class="tokenscope-cache-hero">
               <div class="tokenscope-cache-hero-label">
-                Estimated savings from caching
+                {label}
               </div>
               <div class="tokenscope-cache-hero-value">—</div>
               <div class="tokenscope-cache-hero-context">
-                Pricing rates from LiteLLM aren't reachable right now,
-                so the savings calculation can't run. Reconnect or wait
-                for the cached pricing snapshot to refresh.
+                {context}
               </div>
             </div>
             """,
@@ -158,19 +255,21 @@ def _render_savings_hero(savings: dict | None) -> None:
     savings_usd = savings["savings_usd"]
     actual = savings["actual_cost_usd"]
     uncached = savings["uncached_cost_usd"]
+    context = _hero_savings_context_html(
+        plan,
+        savings_usd=savings_usd,
+        actual=actual,
+        uncached=uncached,
+    )
     st.markdown(
         f"""
         <div class="tokenscope-cache-hero">
           <div class="tokenscope-cache-hero-label">
-            Estimated savings from caching
+            {label}
           </div>
           <div class="tokenscope-cache-hero-value">${savings_usd:,.2f}</div>
           <div class="tokenscope-cache-hero-context">
-            Over the selected window. Without caching, your spend would
-            have been <strong>${uncached:,.2f}</strong> — you actually
-            paid <strong>${actual:,.2f}</strong>. The saving is the rate
-            delta on cache_read tokens: (input rate − cache_read rate) ×
-            tokens, summed per model.
+            {context}
           </div>
         </div>
         """,
