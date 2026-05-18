@@ -432,6 +432,81 @@ def test_live_no_utc_strings_in_rendered_html(
     )
 
 
+# --- Pre-slice (plan-usage-updates branch): banner clock-time rendering -
+#
+# The Live view's window banner renders the active block's start and end
+# times in the user's IANA zone via `utc_iso_to_local_clock`
+# (live.py:172-177). The branch `plan-usage-updates` will rewrite
+# `_render_window_banner` to plan-aware copy ("Quota window · X – Y ·
+# resets in N min" on Pro/Max, "Current activity · X – Y" on Enterprise),
+# touching the same code that calls those conversions.
+#
+# Existing banner coverage (test_ui_smoke.py:658-673) asserts the
+# `tokenscope-live-banner` CSS class, the "Models in use" line, and
+# the literal "Active block" substring — but does NOT assert that the
+# converted clock-time substrings actually appear in the rendered
+# banner. A rewrite that accidentally dropped `start_disp` or `end_disp`
+# from the markdown template would produce a banner with the format
+# label intact but the times missing, and no existing test would catch
+# it.
+#
+# This pin locks the clock-time render path. Slice 1 must preserve it.
+
+
+def test_live_banner_renders_start_and_end_times_in_local_zone(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """The window banner renders both the active block's start and end
+    clock times in the user's IANA zone, converted via
+    `utc_iso_to_local_clock`.
+
+    Fixture: block starts 13:00 UTC, ends 18:00 UTC. With
+    `America/New_York` (EDT, UTC-4 in May), the rendered banner must
+    contain `09:00` (start) AND `14:00` (end). A rewrite that drops
+    either substring is caught here."""
+    monkeypatch.setattr(
+        "tokenscope.tz.detect_local_iana",
+        lambda: "America/New_York",
+    )
+    _wire_live_fixtures(
+        mock_ccusage,
+        _make_active_block_payload(
+            "2026-05-16T13:00:00.000Z",
+            "2026-05-16T18:00:00.000Z",
+        ),
+    )
+
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "live"
+    at.run()
+    assert not at.exception, [str(e.value)[:200] for e in at.exception]
+
+    # Locate the SPECIFIC markdown element that is the banner. The
+    # `tokenscope-live-banner` substring also appears in the page's
+    # injected CSS block as a rule selector (`.tokenscope-live-banner
+    # { ... }`), so a naive concat-and-substring search would match
+    # the stylesheet instead of the rendered banner div. The banner
+    # element is uniquely identified by carrying "Models in use:"
+    # (the second-line label) — that text appears nowhere else on
+    # the page.
+    banner_element = next(
+        (m for m in at.markdown if "Models in use" in m.value),
+        None,
+    )
+    assert banner_element is not None, (
+        "banner element missing — the banner failed to render"
+    )
+
+    assert "09:00" in banner_element.value, (
+        f"start-time `09:00` missing from banner element; value was: "
+        f"{banner_element.value!r}"
+    )
+    assert "14:00" in banner_element.value, (
+        f"end-time `14:00` missing from banner element; value was: "
+        f"{banner_element.value!r}"
+    )
+
+
 # --- helpers ------------------------------------------------------------
 
 
