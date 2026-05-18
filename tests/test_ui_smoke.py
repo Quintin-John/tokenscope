@@ -655,12 +655,18 @@ def test_live_renders_spend_trajectory_chart(
     assert "live-spend-trajectory" in chart_keys
 
 
-def test_live_renders_window_banner_with_models_and_remaining(
+def test_live_renders_window_banner_with_models(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """The window context (start–end clock time, minutes remaining,
-    models in use) lives in a banner under the H1 — not inside a
-    KPI delta pill."""
+    """The window context (start–end clock time, models in use)
+    lives in a banner under the H1 — not inside a KPI delta pill.
+
+    Plan-aware label text (`Quota window` on flat-rate, `Current
+    activity` on Enterprise) and the reset-countdown suffix are
+    pinned by the per-plan tests later in this section. This test
+    locks the structural pieces only: the banner CSS class and the
+    `Models in use` second-line label, both of which are
+    plan-independent."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("live")
     at.run()
@@ -670,7 +676,6 @@ def test_live_renders_window_banner_with_models_and_remaining(
         f"expected the banner HTML in markdown; got: {md!r}"
     )
     assert "Models in use" in md
-    assert "Active block" in md
 
 
 def test_live_does_not_show_minutes_left_in_projected_total_card(
@@ -877,6 +882,331 @@ def test_live_cache_hit_ratio_matches_token_counts(
     )
     assert f"{expected_pct:.1f}%" in md, (
         f"expected cache hit ratio {expected_pct:.1f}% to appear in markdown"
+    )
+
+
+# --- Slice 1 (plan-usage-updates): plan-aware quota-reset banner --------
+#
+# The Live view's banner, page subtitle, and empty-state copy are
+# plan-aware. On flat-rate plans (Pro / Max 5× / Max 20×) the 5-hour
+# block IS the user's quota reset window — we name it explicitly and
+# show the reset countdown. On Enterprise / API plans there's no quota
+# and no reset — we drop the countdown entirely.
+#
+# When `projection.remaining_minutes` is unknown on flat-rate, the
+# banner says "reset time unknown" — the explicit no-guessing sentinel.
+# Never invent a number from a hardcoded 5-hour assumption.
+
+
+def _find_live_banner(at) -> str:
+    """Find the SPECIFIC markdown element that is the Live banner.
+    The `tokenscope-live-banner` substring also appears in the page's
+    injected CSS block as a rule selector, so a naive concat-substring
+    search would match the stylesheet. The banner is uniquely
+    identified by carrying `Models in use:` (its second-line label),
+    which appears nowhere else on the page."""
+    banner = next(
+        (m for m in at.markdown if "Models in use" in m.value),
+        None,
+    )
+    assert banner is not None, "banner element missing — banner failed to render"
+    return banner.value
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_live_banner_shows_quota_reset_countdown_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """On flat-rate plans, the active block IS the user's quota
+    reset window. The banner names it explicitly ("Quota window")
+    and shows the reset countdown ("resets in N min") — never the
+    dishonest "Active block" framing that implied billing semantics
+    on every plan.
+
+    Parametrized over all three flat-rate plans to prove the
+    branching is on `plan.is_flat_rate`, not hardcoded to one
+    specific plan name."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    banner = _find_live_banner(at)
+    assert "Quota window" in banner, (
+        f"`Quota window` label missing on {flat_rate_plan} banner: {banner!r}"
+    )
+    assert "resets in" in banner, (
+        f"reset-countdown suffix missing on {flat_rate_plan} banner: {banner!r}"
+    )
+    # Negative: the dishonest framing must NOT leak through.
+    assert "Active block" not in banner, (
+        f"`Active block` framing leaked on {flat_rate_plan}: {banner!r}"
+    )
+    # Negative: Enterprise framing must NOT show on flat-rate.
+    assert "Current activity" not in banner, (
+        f"Enterprise framing leaked on flat-rate {flat_rate_plan}: {banner!r}"
+    )
+
+
+def test_live_banner_says_reset_time_unknown_when_projection_missing_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When ccusage emits an active block WITHOUT projection data,
+    the flat-rate banner says "reset time unknown" — the explicit
+    no-guessing sentinel — rather than silently dropping the
+    suffix (which would read as "no reset") or fabricating a
+    number from the hardcoded 5-hour assumption."""
+    # Custom payload with NO projection field on the active block.
+    # The pydantic BlockEntry model accepts `projection: Projection | None`.
+    no_projection_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 10,
+                "tokenCounts": {
+                    "inputTokens": 100, "outputTokens": 200,
+                    "cacheCreationInputTokens": 300,
+                    "cacheReadInputTokens": 400,
+                },
+                "totalTokens": 1000,
+                "costUSD": 1.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": {
+                    "tokensPerMinute": 1.0,
+                    "tokensPerMinuteForIndicator": 1.0,
+                    "costPerHour": 2.0,
+                },
+                # `projection: Projection | None` at models.py:128 — the
+                # field is REQUIRED to be present, but its value may be
+                # None (e.g., a brand-new block with no burn rate yet,
+                # or ccusage emitting a degraded block payload).
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=no_projection_payload)
+    mock_ccusage("blocks", "--active", response=no_projection_payload)
+
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    banner = _find_live_banner(at)
+    assert "Quota window" in banner, (
+        f"`Quota window` label missing: {banner!r}"
+    )
+    assert "reset time unknown" in banner, (
+        f"explicit `reset time unknown` sentinel missing: {banner!r}"
+    )
+    # Negative: no fabricated countdown.
+    assert "resets in" not in banner, (
+        f"fabricated `resets in` countdown leaked despite missing "
+        f"projection: {banner!r}"
+    )
+
+
+def test_live_banner_says_current_activity_no_reset_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """On Enterprise (pay-per-token), there is NO quota and NO reset.
+    The banner reads "Current activity" with the time range only —
+    no countdown, no "min remaining", no "resets in", no "Quota
+    window" framing. Enterprise is the default plan so no switch
+    needed."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+
+    banner = _find_live_banner(at)
+    assert "Current activity" in banner, (
+        f"`Current activity` label missing on Enterprise: {banner!r}"
+    )
+    # Negatives: no quota / reset / billing-block framing.
+    assert "Quota window" not in banner, (
+        f"flat-rate `Quota window` leaked on Enterprise: {banner!r}"
+    )
+    assert "resets in" not in banner, (
+        f"flat-rate `resets in` leaked on Enterprise: {banner!r}"
+    )
+    assert "min remaining" not in banner, (
+        f"old `min remaining` framing still on Enterprise: {banner!r}"
+    )
+    assert "Active block" not in banner, (
+        f"old `Active block` framing still on Enterprise: {banner!r}"
+    )
+    assert "reset time unknown" not in banner, (
+        f"unknown-reset sentinel leaked on Enterprise (no reset exists "
+        f"to be unknown about): {banner!r}"
+    )
+
+
+def test_live_banner_omits_reset_sentinel_on_enterprise_when_projection_missing(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Enterprise has no reset, period — so a missing projection
+    doesn't produce a "reset time unknown" sentinel on Enterprise.
+    The banner just renders the time range with no suffix."""
+    no_projection_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 10,
+                "tokenCounts": {
+                    "inputTokens": 100, "outputTokens": 200,
+                    "cacheCreationInputTokens": 300,
+                    "cacheReadInputTokens": 400,
+                },
+                "totalTokens": 1000,
+                "costUSD": 1.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": {
+                    "tokensPerMinute": 1.0,
+                    "tokensPerMinuteForIndicator": 1.0,
+                    "costPerHour": 2.0,
+                },
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=no_projection_payload)
+    mock_ccusage("blocks", "--active", response=no_projection_payload)
+
+    at = _at("live")  # default Enterprise plan
+    at.run()
+    _assert_clean(at)
+
+    banner = _find_live_banner(at)
+    assert "Current activity" in banner
+    # No suffix of any kind — no reset language, no unknown sentinel.
+    assert "reset time unknown" not in banner, (
+        f"unknown-reset sentinel leaked on Enterprise: {banner!r}"
+    )
+    assert "resets in" not in banner
+    assert "min remaining" not in banner
+
+
+def test_live_page_caption_mentions_quota_window_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Page subtitle under the `# Live` H1 is plan-aware. Flat-rate
+    plans see an explanation that costs are API-rate estimates and
+    the actual bill is the monthly fee."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "quota window" in captions.lower(), (
+        f"flat-rate page caption missing `quota window`: {captions!r}"
+    )
+    assert "monthly fee" in captions, (
+        f"flat-rate page caption missing `monthly fee` framing: {captions!r}"
+    )
+    # Old framing must be gone.
+    assert "5-hour billing window" not in captions, (
+        f"old `5-hour billing window` framing leaked: {captions!r}"
+    )
+
+
+def test_live_page_caption_mentions_actual_billing_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Page subtitle on Enterprise says costs reflect ACTUAL API
+    billing — not "estimates" or "quota window" language."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "actual API billing" in captions, (
+        f"Enterprise page caption missing `actual API billing`: {captions!r}"
+    )
+    assert "quota" not in captions.lower(), (
+        f"flat-rate `quota` framing leaked on Enterprise caption: {captions!r}"
+    )
+
+
+def test_live_empty_state_mentions_quota_window_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When there is no active block, the empty-state info banner
+    on flat-rate plans names the quota concept explicitly — not
+    "billing block" (which was inaccurate on every plan)."""
+    # Default empty ccusage response → no active block.
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    info_text = "\n".join(i.value for i in at.info)
+    assert "quota window" in info_text.lower(), (
+        f"flat-rate empty-state missing `quota window`: {info_text!r}"
+    )
+    assert "billing block" not in info_text, (
+        f"old `billing block` framing leaked on flat-rate empty state: "
+        f"{info_text!r}"
+    )
+
+
+def test_live_empty_state_mentions_session_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Enterprise empty state describes a Claude Code session, not
+    a billing/quota concept — because neither applies on API
+    billing."""
+    # Default empty ccusage response + default Enterprise plan.
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+
+    info_text = "\n".join(i.value for i in at.info)
+    assert "session" in info_text.lower(), (
+        f"Enterprise empty-state missing `session`: {info_text!r}"
+    )
+    assert "quota" not in info_text.lower(), (
+        f"flat-rate `quota` framing leaked on Enterprise empty state: "
+        f"{info_text!r}"
+    )
+    assert "billing block" not in info_text, (
+        f"old `billing block` framing still present: {info_text!r}"
     )
 
 

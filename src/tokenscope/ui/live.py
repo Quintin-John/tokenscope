@@ -1,13 +1,21 @@
 """Active-block live view.
 
-A real-time snapshot of the current 5-hour billing window. Replaces
-the prior gauge-only layout (which duplicated the `$/hr` KPI in a
-larger, scaled-to-an-arbitrary-axis form and carried a cryptic
-unlabelled delta) with:
+A real-time snapshot of the user's current ccusage activity window.
+The window's billing meaning is plan-aware: on flat-rate plans (Pro
+/ Max) it IS the user's quota reset window; on Enterprise it's just
+activity bucketing with no billing significance. Plan-aware copy
+lives in module-private helpers (`_banner_label`,
+`_banner_reset_suffix`, `_page_caption`, `_empty_state_text`) — see
+their docstrings for the framing rules.
 
-  * `# Live` page header + a one-line subtitle.
-  * Window banner — start → end time, minutes remaining, models
-    active. Light-bg panel, distinct from KPI cards.
+Replaces the prior gauge-only layout (which duplicated the `$/hr`
+KPI in a larger, scaled-to-an-arbitrary-axis form and carried a
+cryptic unlabelled delta) with:
+
+  * `# Live` page header + a plan-aware one-line subtitle.
+  * Window banner — plan-aware label + start → end time + plan-aware
+    reset suffix + models active. Light-bg panel, distinct from KPI
+    cards.
   * KPI strip — Cost so far / $/hr / Tokens/min / Projected total,
     all wrapped in `st.container(border=True)` cards matching the
     Overview look.
@@ -30,7 +38,7 @@ Implementation notes:
 - Spend-trajectory samples are appended to `st.session_state` on
   each fragment refresh so the chart's solid line gets richer as
   the user keeps the page open. Samples are keyed by block id so
-  a new billing block starts the history fresh.
+  a new active block starts the history fresh.
 """
 
 from __future__ import annotations
@@ -53,6 +61,7 @@ from tokenscope.ccusage import CcusageError
 from tokenscope.log import get_logger
 from tokenscope.models import BlockEntry
 from tokenscope.navigation import Navigation
+from tokenscope.plans import Plan
 from tokenscope.pricing import KINDS
 from tokenscope.query import Query
 from tokenscope.ui.charts import (
@@ -79,18 +88,98 @@ _TOKEN_KIND_LABELS: dict[str, str] = {
 REFRESH_SECONDS = config.LIVE_REFRESH_SECONDS
 
 
+# --- plan-aware copy (single source of truth) ---------------------------
+#
+# Every plan-aware string the Live view renders lives here, keyed off
+# `plan.is_flat_rate`. The render functions never embed plan-keyed
+# literals inline — they call these helpers. A copy edit (e.g. wording
+# polish, translation) happens in ONE place; the branching logic
+# (flat-rate vs pay-per-token) is defined once and consumed everywhere.
+#
+# Why module-private here and not on the `Plan` class: this is
+# Live-view-specific UI text, not domain semantics. Putting it on
+# `Plan` would tie the domain model to one view's vocabulary; keeping
+# it module-private to live.py respects SRP — `Plan` knows about
+# subscription pricing, `live.py` knows about its own UI.
+
+
+def _banner_label(plan: Plan) -> str:
+    """The first word of the window-banner line — "Quota window" on
+    flat-rate (the 5h block IS the user's quota reset window),
+    "Current activity" on Enterprise (no quota; the block is just
+    ccusage's activity bucketing)."""
+    return "Quota window" if plan.is_flat_rate else "Current activity"
+
+
+def _banner_reset_suffix(plan: Plan, remaining_minutes: int | None) -> str:
+    """The suffix appended after the time range. Reset countdown on
+    flat-rate, explicit "unknown" sentinel when the countdown is
+    missing on flat-rate, empty on Enterprise.
+
+    No-guessing contract: when `remaining_minutes is None` on
+    flat-rate, we say "reset time unknown" rather than silently
+    dropping the suffix (which would visually imply no reset) or
+    fabricating a number from the hardcoded 5-hour assumption."""
+    if not plan.is_flat_rate:
+        return ""
+    if remaining_minutes is None:
+        return " · reset time unknown"
+    return f" · resets in {remaining_minutes} min"
+
+
+def _page_caption(plan: Plan) -> str:
+    """One-line subtitle under the `# Live` H1. Names the user's
+    actual billing reality: flat-rate users see "your monthly fee
+    is what you pay"; Enterprise sees "this is your actual API
+    spend"."""
+    if plan.is_flat_rate:
+        return (
+            "Real-time snapshot of your quota window. Costs are "
+            "estimates at API rates; your actual bill is the plan's "
+            "monthly fee."
+        )
+    return (
+        "Real-time snapshot of your current Claude Code activity. "
+        "Costs reflect actual API billing."
+    )
+
+
+def _empty_state_text(plan: Plan) -> str:
+    """Info-banner text rendered when there is no active block.
+    Plan-aware because the underlying concept differs — flat-rate
+    users have a "quota window" to start; Enterprise users have a
+    "session"."""
+    if plan.is_flat_rate:
+        return (
+            "No active quota window right now. Start a Claude Code "
+            "session to see live spend."
+        )
+    return (
+        "No active Claude Code session right now. Start one to "
+        "see live spend."
+    )
+
+
 def render(state: SidebarState, nav: Navigation) -> None:
-    """Live view shell: H1 + subtitle, then the fragment-refreshed
-    panel for everything else."""
+    """Live view shell: H1 + plan-aware subtitle, then the fragment-
+    refreshed panel for everything else.
+
+    The subtitle names the user's actual billing reality: on flat-rate
+    plans the dollar figures on this view are API-equivalent estimates
+    (the user pays the fixed monthly fee), while on Enterprise the
+    figures are the user's actual API-billed spend. Same fix the
+    Overview Window-cost KPI already applies — extending the
+    plan-honest framing to the Live view.
+    """
     st.markdown("# Live")
-    st.caption("Real-time snapshot of the current 5-hour billing window.")
-    _live_panel(offline=state.query.offline, tz=state.query.tz)
+    st.caption(_page_caption(state.plan))
+    _live_panel(plan=state.plan, offline=state.query.offline, tz=state.query.tz)
 
 
 @st.fragment(run_every=REFRESH_SECONDS)
-def _live_panel(offline: bool, tz: str | None = None) -> None:
+def _live_panel(plan: Plan, offline: bool, tz: str | None = None) -> None:
     """Auto-refreshing live panel. Args must be hashable so Streamlit
-    can key the fragment; bool + str are fine."""
+    can key the fragment; `Plan` is a frozen dataclass and hashable."""
     refreshed_at = datetime.now()
     now_utc = datetime.now(timezone.utc)
     try:
@@ -103,14 +192,11 @@ def _live_panel(offline: bool, tz: str | None = None) -> None:
     _render_refresh_line(refreshed_at)
 
     if active is None:
-        st.info(
-            "No active billing block right now. Start a Claude Code "
-            "session to see live spend."
-        )
+        st.info(_empty_state_text(plan))
         return
 
     typical = typical_burn_rate(report)
-    _render_window_banner(active, tz=tz)
+    _render_window_banner(active, plan=plan, tz=tz)
     _render_kpis(active, typical=typical)
     _render_token_kind_kpis(active)
     _render_cache_hit_callout(active)
@@ -156,11 +242,16 @@ def _render_refresh_line(refreshed_at: datetime) -> None:
 # --- window banner -------------------------------------------------------
 
 
-def _render_window_banner(active: BlockEntry, *, tz: str | None) -> None:
-    """Two-line banner under the H1 with the active block's context.
+def _render_window_banner(
+    active: BlockEntry, *, plan: Plan, tz: str | None
+) -> None:
+    """Two-line banner under the H1.
 
-    Line 1: time range + minutes remaining.
-    Line 2: models active in the block.
+    Line 1: plan-aware label + time range + plan-aware reset suffix
+    (see `_banner_label` and `_banner_reset_suffix` for the copy and
+    the no-guessing semantics).
+
+    Line 2: models active in the block. Plan-independent.
 
     Time range renders in the user's display timezone (sidebar's
     detected zone) with underscores stripped from the IANA
@@ -184,11 +275,8 @@ def _render_window_banner(active: BlockEntry, *, tz: str | None) -> None:
     minutes_remaining = (
         active.projection.remaining_minutes if active.projection else None
     )
-    remaining_part = (
-        f" · {minutes_remaining} min remaining"
-        if minutes_remaining is not None
-        else ""
-    )
+    label = _banner_label(plan)
+    suffix = _banner_reset_suffix(plan, minutes_remaining)
 
     models = (
         ", ".join(active.models)
@@ -200,8 +288,8 @@ def _render_window_banner(active: BlockEntry, *, tz: str | None) -> None:
         f"""
         <div class="tokenscope-live-banner">
           <div class="tokenscope-live-banner-row">
-            <strong>Active block</strong>
-            · {start_disp} – {end_disp} {tz_label}{remaining_part}
+            <strong>{label}</strong>
+            · {start_disp} – {end_disp} {tz_label}{suffix}
           </div>
           <div class="tokenscope-live-banner-row tokenscope-live-banner-sub">
             Models in use: {models}
