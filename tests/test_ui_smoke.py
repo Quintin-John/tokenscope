@@ -2609,6 +2609,156 @@ def test_cache_daily_savings_no_rates_fallback_present_on_flat_rate(
     )
 
 
+# --- Cache Slice 3 (plan-usage-updates): plan-aware per-model section ---
+#
+# The per-model cache performance section's body caption and the
+# table's `Savings` column header are the last dollar-framed
+# surfaces on the Cache view. Section caption gets plan-aware
+# framing; column header becomes `API-equivalent savings` on
+# flat-rate.
+#
+# The other table columns (Model / Cache hit ratio / Reads /
+# Writes) are plan-independent — they stay unchanged.
+
+
+def _find_per_model_dataframe(at):
+    """Locate the per-model table by its plan-independent first
+    four columns (Model / Cache hit ratio / Reads / Writes). The
+    fifth column's header is plan-aware (Slice 3), so we can't use
+    a full column-list match like the existing
+    `test_cache_per_model_table_rows_match_analytics_output` does.
+
+    Returns the pandas DataFrame or None."""
+    for df_element in at.dataframe:
+        df = df_element.value
+        cols = list(df.columns)
+        if len(cols) >= 4 and cols[:4] == [
+            "Model", "Cache hit ratio", "Reads", "Writes",
+        ]:
+            return df
+    return None
+
+
+def test_cache_per_model_caption_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Per-model section caption on default Enterprise plan keeps
+    the current `models without resolved pricing show savings as
+    "—"` framing without the plan-fee note."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "Cache footprint by model" in captions, (
+        f"per-model section caption missing on Enterprise"
+    )
+    assert "show savings as `—`" in captions, (
+        f"Enterprise per-model caption missing existing `—` framing"
+    )
+    assert "monthly fee is fixed" not in captions, (
+        f"flat-rate plan-fee framing leaked on Enterprise per-model "
+        f"caption"
+    )
+    assert "API-equivalent" not in captions, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise "
+        f"per-model caption"
+    )
+
+
+def test_cache_per_model_caption_mentions_plan_decoupling_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Per-model section caption on flat-rate names BOTH the
+    API-equivalent framing AND the plan-fee decoupling."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent" in captions, (
+        f"flat-rate per-model caption missing `API-equivalent`"
+    )
+    assert "monthly fee is fixed" in captions, (
+        f"flat-rate per-model caption missing plan-fee decoupling"
+    )
+    # Enterprise framing must NOT leak.
+    assert "show savings as `—`" not in captions, (
+        f"Enterprise `show savings as `—`` framing leaked on "
+        f"flat-rate per-model caption"
+    )
+
+
+def test_cache_per_model_savings_column_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Per-model table on default Enterprise plan keeps the
+    `Savings` column header — savings are real money on
+    pay-per-token."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    df = _find_per_model_dataframe(at)
+    assert df is not None, (
+        f"per-model dataframe not found; "
+        f"dataframes seen: {[list(d.value.columns) for d in at.dataframe]!r}"
+    )
+    cols = list(df.columns)
+    assert "Savings" in cols, (
+        f"Enterprise per-model `Savings` column missing; got {cols!r}"
+    )
+    assert "API-equivalent savings" not in cols, (
+        f"flat-rate column header leaked on Enterprise: {cols!r}"
+    )
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_cache_per_model_savings_column_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """Per-model table on flat-rate plans renames the savings
+    column to `API-equivalent savings` — the dollar figures aren't
+    money out of pocket; they're the API-equivalent value caching
+    adds per-model.
+
+    Parametrized over all three flat-rate plans for plan-name
+    hardcoding protection."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    df = _find_per_model_dataframe(at)
+    assert df is not None, (
+        f"per-model dataframe not found on {flat_rate_plan}; "
+        f"dataframes seen: {[list(d.value.columns) for d in at.dataframe]!r}"
+    )
+    cols = list(df.columns)
+    assert "API-equivalent savings" in cols, (
+        f"flat-rate per-model `API-equivalent savings` column missing "
+        f"on {flat_rate_plan}; got {cols!r}"
+    )
+    # Plain `Savings` is the Enterprise label — must NOT be present.
+    assert "Savings" not in cols, (
+        f"Enterprise `Savings` column leaked on {flat_rate_plan}: "
+        f"{cols!r}"
+    )
+
+
 # --- Pre-slice P2: compute-once invariant for Cache view per-model rows ---
 #
 # Pinning the CURRENT call count of `per_model_cache_performance` on the

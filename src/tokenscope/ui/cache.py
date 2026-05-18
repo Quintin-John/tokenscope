@@ -196,6 +196,35 @@ def _daily_savings_caption(plan: Plan) -> str:
     )
 
 
+def _per_model_caption(plan: Plan) -> str:
+    """Body caption beneath the `Per-model cache performance`
+    section header. Flat-rate names the API-equivalent framing
+    AND the flat-fee decoupling alongside the existing
+    `models without resolved pricing show —` note."""
+    if plan.is_flat_rate:
+        return (
+            "Cache footprint by model in the selected window. "
+            "Per-model savings figures are API-equivalent; your "
+            "plan's monthly fee is fixed regardless. Models without "
+            "resolved pricing show `—`."
+        )
+    return (
+        "Cache footprint by model in the selected window. Models "
+        "without resolved pricing show savings as `—`."
+    )
+
+
+def _per_model_savings_column_header(plan: Plan) -> str:
+    """Column header for the per-model table's savings column.
+    Enterprise reads `Savings` (real money); flat-rate reads
+    `API-equivalent savings` (the figure is the API-equivalent
+    value caching adds — the user pays the fixed monthly fee
+    regardless)."""
+    if plan.is_flat_rate:
+        return "API-equivalent savings"
+    return "Savings"
+
+
 def render(state: SidebarState, nav: Navigation) -> None:
     st.markdown("# Cache")
     st.caption(_page_caption(state.plan))
@@ -219,7 +248,7 @@ def render(state: SidebarState, nav: Navigation) -> None:
     _render_kpi_row(daily_report, savings=savings, plan=state.plan)
     _render_reads_vs_writes(daily_report)
     _render_daily_savings(daily_report, plan=state.plan)
-    _render_per_model_performance(daily_report)
+    _render_per_model_performance(daily_report, plan=state.plan)
 
 
 # --- data-range banner --------------------------------------------------
@@ -457,7 +486,9 @@ def _render_daily_savings(daily_report: DailyReport, *, plan: Plan) -> None:
         )
 
 
-def _render_per_model_performance(daily_report: DailyReport) -> None:
+def _render_per_model_performance(
+    daily_report: DailyReport, *, plan: Plan
+) -> None:
     """Per-model cache performance. Conditional on >1 model in the
     window — a single-model window has nothing to compare, so the
     section is hidden entirely (no empty table, no single-row chart).
@@ -465,6 +496,11 @@ def _render_per_model_performance(daily_report: DailyReport) -> None:
     Renders a horizontal stacked bar (cache_create + cache_read per
     model) PLUS a compact table with the hit ratio, savings, and
     raw token counts the bar doesn't surface.
+
+    Section caption and the savings-column header are plan-aware
+    (see `_per_model_caption` / `_per_model_savings_column_header`).
+    The other columns (Cache hit ratio, Reads, Writes) are
+    plan-independent facts.
     """
     rows = per_model_cache_performance(daily_report)
     if rows is None or len(rows) < 2:
@@ -476,12 +512,11 @@ def _render_per_model_performance(daily_report: DailyReport) -> None:
     if len(rows_with_activity) < 2:
         return
 
+    savings_col = _per_model_savings_column_header(plan)
+
     with st.container(border=True):
         st.markdown("### Per-model cache performance")
-        st.caption(
-            "Cache footprint by model in the selected window. Models "
-            "without resolved pricing show savings as `—`."
-        )
+        st.caption(_per_model_caption(plan))
         fig = per_model_cache_bar(daily_report)
         if fig is not None:
             st.plotly_chart(
@@ -493,7 +528,7 @@ def _render_per_model_performance(daily_report: DailyReport) -> None:
                 "Cache hit ratio": f"{r['cache_hit_ratio']:.1%}",
                 "Reads": format_compact_int(r["cache_read_tokens"]),
                 "Writes": format_compact_int(r["cache_create_tokens"]),
-                "Savings": (
+                savings_col: (
                     f"${r['savings_usd']:,.2f}" if r["has_rates"] else "—"
                 ),
             }
