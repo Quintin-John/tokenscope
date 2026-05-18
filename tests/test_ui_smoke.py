@@ -1870,10 +1870,171 @@ def test_cache_renders_data_range_banner_when_cache_starts_after_since(
     at.run()
     _assert_clean(at)
     md = "\n".join(m.value for m in at.markdown)
-    assert "tokenscope-cache-range-banner" in md, (
-        f"expected data-range banner; got: {md!r}"
+    # Discriminate against the CSS rule `.tokenscope-cache-range-banner`
+    # in the injected stylesheet by anchoring on the literal opening tag
+    # of the rendered div. The substring `tokenscope-cache-range-banner`
+    # alone matches the stylesheet on every page render and is a false-
+    # positive signal that the banner element itself rendered.
+    assert '<div class="tokenscope-cache-range-banner">' in md, (
+        f"expected data-range banner div in markdown; got: {md!r}"
     )
-    assert "Cache data available from 2026-05-15" in md
+    # New honest framing: window-local scope + no overclaim.
+    assert "First day with cache activity in this window: 2026-05-15" in md, (
+        f"missing window-local banner heading; md: {md!r}"
+    )
+    # `"doesn't distinguish"` (without the `ccusage` prefix) anchors on a
+    # contiguous substring of a single source line. The full phrase
+    # `ccusage doesn't distinguish` wraps a line break in the source
+    # f-string and would NOT match the markdown-element-value string
+    # AppTest exposes — that value preserves source-side newlines.
+    assert "doesn't distinguish" in md, (
+        f"banner must disclose the no-usage vs no-cache ambiguity; "
+        f"md: {md!r}"
+    )
+    # Regression-locker: the prior overclaim wording must never come back.
+    assert "Cache data available from" not in md, (
+        f"old overclaim phrasing leaked: {md!r}"
+    )
+
+
+def test_cache_data_range_banner_suppressed_when_window_start_day_has_cache_activity(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """User-observed scenario A (verified via `ccusage daily --json
+    --since=20260419 --until=20260518`): window 2026-04-19 →
+    2026-05-18, first ccusage entry is 2026-04-19 with cache_* > 0.
+    Gate `first_with_cache_date <= since_date` trips
+    (Apr 19 <= Apr 19) → banner suppressed. Pins the suppression
+    contract for the equal-date case so a regression that loosened
+    the gate (e.g. `<` instead of `<=`) would fail here."""
+    daily_payload = {
+        "daily": [
+            {
+                "date": "2026-04-19",
+                "inputTokens": 36, "outputTokens": 100,
+                "cacheCreationTokens": 604381,
+                "cacheReadTokens": 6056968,
+                "totalTokens": 6661485, "totalCost": 5.0,
+                "modelsUsed": ["claude-opus-4-7"],
+                "modelBreakdowns": [
+                    {
+                        "modelName": "claude-opus-4-7",
+                        "inputTokens": 36, "outputTokens": 100,
+                        "cacheCreationTokens": 604381,
+                        "cacheReadTokens": 6056968,
+                        "cost": 5.0,
+                    }
+                ],
+            }
+        ],
+        "totals": {
+            "inputTokens": 36, "outputTokens": 100,
+            "cacheCreationTokens": 604381,
+            "cacheReadTokens": 6056968,
+            "totalTokens": 6661485, "totalCost": 5.0,
+        },
+    }
+    mock_ccusage("daily", response=daily_payload)
+    mock_ccusage(
+        "daily", "--instances",
+        response={
+            "projects": {"-project-a": daily_payload["daily"]},
+            "totals": daily_payload["totals"],
+        },
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("cache", since="2026-04-19", until="2026-05-18")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    # Discriminate against the CSS rule (always present in the
+    # injected stylesheet) by anchoring on the literal opening tag.
+    assert '<div class="tokenscope-cache-range-banner">' not in md, (
+        f"banner div rendered despite window-start day having cache "
+        f"activity; gate must suppress when "
+        f"first_with_cache_date <= since_date. md: {md!r}"
+    )
+
+
+def test_cache_data_range_banner_fires_when_window_start_precedes_first_cache_active_entry(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """User-observed scenario B (verified via `ccusage daily --json
+    --since=20260501 --until=20260518`): window 2026-05-01 →
+    2026-05-18, ccusage returns no entries for May 1–11 (those days
+    had no Claude Code usage at all), first entry is 2026-05-12 with
+    cache_* > 0. Gate (May 12 > May 1) doesn't trip → banner fires.
+
+    Pins both the banner-fire contract AND the three-vector
+    regression prevention: (a) positive new copy, (b) positive
+    ambiguity disclosure, (c) negative against the prior overclaim."""
+    daily_payload = {
+        "daily": [
+            {
+                "date": "2026-05-12",
+                "inputTokens": 377, "outputTokens": 500,
+                "cacheCreationTokens": 494216,
+                "cacheReadTokens": 55925978,
+                "totalTokens": 56421071, "totalCost": 8.0,
+                "modelsUsed": ["claude-opus-4-7"],
+                "modelBreakdowns": [
+                    {
+                        "modelName": "claude-opus-4-7",
+                        "inputTokens": 377, "outputTokens": 500,
+                        "cacheCreationTokens": 494216,
+                        "cacheReadTokens": 55925978,
+                        "cost": 8.0,
+                    }
+                ],
+            }
+        ],
+        "totals": {
+            "inputTokens": 377, "outputTokens": 500,
+            "cacheCreationTokens": 494216,
+            "cacheReadTokens": 55925978,
+            "totalTokens": 56421071, "totalCost": 8.0,
+        },
+    }
+    mock_ccusage("daily", response=daily_payload)
+    mock_ccusage(
+        "daily", "--instances",
+        response={
+            "projects": {"-project-a": daily_payload["daily"]},
+            "totals": daily_payload["totals"],
+        },
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("cache", since="2026-05-01", until="2026-05-18")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    # Banner div rendered. Discriminate against the CSS rule (always
+    # in the injected stylesheet) by anchoring on the literal tag.
+    assert '<div class="tokenscope-cache-range-banner">' in md, (
+        f"banner div must be rendered when window start precedes "
+        f"first cache-active entry; md: {md!r}"
+    )
+    # Vector 1 (positive): new honest copy names the window-local fact.
+    assert (
+        "First day with cache activity in this window: 2026-05-12" in md
+    ), f"missing new banner heading; md: {md!r}"
+    # Vector 2 (positive): ambiguity disclosure present.
+    # Anchor on contiguous-substring `"doesn't distinguish"` — the full
+    # phrase `ccusage doesn't distinguish` wraps a line break in the
+    # source f-string and would not match the markdown-element-value
+    # string AppTest exposes.
+    assert "doesn't distinguish" in md, (
+        f"banner must disclose no-usage vs no-cache ambiguity; "
+        f"md: {md!r}"
+    )
+    # Vector 3 (negative): the pre-fix overclaim wording is gone.
+    assert "Cache data available from" not in md, (
+        f"prior overclaim phrasing leaked back: {md!r}"
+    )
 
 
 def test_cache_renders_reads_vs_writes_fallback_when_no_cache_activity(
