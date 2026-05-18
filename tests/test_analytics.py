@@ -1713,6 +1713,60 @@ def test_block_cache_hit_ratio_one_when_all_reads_from_cache() -> None:
     assert block_cache_hit_ratio(block) == pytest.approx(1.0)
 
 
+# ---------- block_token_counts_by_kind (Slice B: promoted helper) -------
+
+
+def test_block_token_counts_by_kind_returns_canonical_kinds_in_order() -> None:
+    """Slice B public-API contract: the returned dict's keys equal
+    `pricing.KINDS` EXACTLY, in the canonical order
+    `input → output → cache_create → cache_read`.
+
+    Insertion order is the contract three downstream consumers rely
+    on: the Live KPI card order, the composition bar's segment
+    order, and the mini-table's row order all come from iterating
+    this dict. A regression that reordered the dict literal would
+    flip the visual sequence on every Live-view surface."""
+    from tokenscope.analytics import block_token_counts_by_kind
+    from tokenscope.pricing import KINDS
+
+    block = _block_with_counts(
+        input_tokens=1, output_tokens=2,
+        cache_create=3, cache_read=4,
+    )
+    result = block_token_counts_by_kind(block)
+    assert list(result) == list(KINDS), (
+        f"block_token_counts_by_kind keys must equal KINDS in canonical "
+        f"order; got {list(result)!r} vs {list(KINDS)!r}"
+    )
+
+
+def test_block_token_counts_by_kind_maps_each_kind_to_correct_field() -> None:
+    """Slice B field-mapping contract: each kind key reads from the
+    correct `BlockTokenCounts` field — the swap-resistance the helper
+    was promoted to enforce in one place rather than re-prove at
+    every consumer.
+
+    Distinct counts (11/22/33/44) ensure any field-name swap (e.g.
+    `cache_create` accidentally reading `cache_read_input_tokens`)
+    produces a wrong value at the helper boundary, not just at the
+    rendered surface. The three pre-slice-B consumer regression
+    tests in `test_live.py` (commit 61967ef) catch consumer-level
+    regressions; this test catches helper-level regressions before
+    they fan out."""
+    from tokenscope.analytics import block_token_counts_by_kind
+
+    block = _block_with_counts(
+        input_tokens=11, output_tokens=22,
+        cache_create=33, cache_read=44,
+    )
+    assert block_token_counts_by_kind(block) == {
+        "input": 11,
+        "output": 22,
+        "cache_create": 33,
+        "cache_read": 44,
+    }
+
+
 # ---------- block_cost_by_kind ----------
 
 

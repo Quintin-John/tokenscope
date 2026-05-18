@@ -44,6 +44,7 @@ from tokenscope.analytics import (
     UNKNOWN_MODEL_FAMILY,
     block_cache_hit_ratio,
     block_cost_by_kind,
+    block_token_counts_by_kind,
     format_compact_int,
     format_timezone_for_display,
     typical_burn_rate,
@@ -350,12 +351,7 @@ def _render_token_kind_kpis(active: BlockEntry) -> None:
         if cost_rows is not None
         else None
     )
-    counts = {
-        "input": active.token_counts.input_tokens,
-        "output": active.token_counts.output_tokens,
-        "cache_create": active.token_counts.cache_creation_input_tokens,
-        "cache_read": active.token_counts.cache_read_input_tokens,
-    }
+    counts = block_token_counts_by_kind(active)
 
     cols = st.columns(len(KINDS))
     for col, kind in zip(cols, KINDS):
@@ -462,12 +458,7 @@ def _render_token_kind_table(active: BlockEntry) -> None:
         if cost_rows is not None
         else None
     )
-    counts = {
-        "input": active.token_counts.input_tokens,
-        "output": active.token_counts.output_tokens,
-        "cache_create": active.token_counts.cache_creation_input_tokens,
-        "cache_read": active.token_counts.cache_read_input_tokens,
-    }
+    counts = block_token_counts_by_kind(active)
     total = sum(counts.values()) or 1  # avoid div-by-zero — caller short-circuited on 0
     rows = []
     for kind in KINDS:

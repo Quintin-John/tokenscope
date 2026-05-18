@@ -503,13 +503,13 @@ def _walk_plotly_figure_strings(at: AppTest) -> list[str]:
 #   * `_render_token_kind_kpis`         (live.py)
 #   * `_render_token_kind_table`        (live.py)
 #
-# `analytics._block_token_counts_by_kind` exists as the documented
-# single-source mapping, but each consumer currently re-inlines the
-# dict literal. An upcoming refactor will collapse them onto the
-# helper. Without these tests, an accidental field-name swap (e.g.
-# `cache_create` reading `cache_read_input_tokens`) would still pass
-# the existing label/colour assertions while displaying wildly wrong
-# numbers in production.
+# `analytics.block_token_counts_by_kind` is the canonical mapping;
+# Slice B promoted it from `_block_token_counts_by_kind` and rewrote
+# each consumer onto it. These tests pinned the per-consumer mapping
+# BEFORE the slice landed — without them, an accidental field-name
+# swap (e.g. `cache_create` reading `cache_read_input_tokens`) would
+# still pass the existing label/colour assertions while displaying
+# wildly wrong numbers in production.
 #
 # Distinct counts (11/22/33/44) make any swap unambiguous in the
 # failure message.

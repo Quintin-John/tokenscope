@@ -744,15 +744,23 @@ def cost_by_kind(daily_report: DailyReport) -> list[dict] | None:
     return rows
 
 
-def _block_token_counts_by_kind(block: BlockEntry) -> dict[str, int]:
-    """Block's cumulative token counts as a {kind: count} dict using
-    the same kind keys (`input` / `output` / `cache_create` /
-    `cache_read`) the rest of the analytics layer uses.
+def block_token_counts_by_kind(block: BlockEntry) -> dict[str, int]:
+    """Block's cumulative token counts as a `{kind: count}` dict using
+    the canonical `pricing.KINDS` keys (`input` / `output` /
+    `cache_create` / `cache_read`).
 
     Single mapping point between `BlockTokenCounts`'s JSON field names
-    (`cacheCreationInputTokens` / `cacheReadInputTokens`) and the
-    kind keys downstream code expects. Adding a new caller doesn't
-    re-establish the mapping ad-hoc.
+    (`cacheCreationInputTokens` / `cacheReadInputTokens`) — which
+    differ from `DailyEntry`'s field names — and the kind keys every
+    downstream consumer uses. Every chart builder and view renderer
+    that needs per-kind block counts routes through here; adding a
+    new caller does NOT re-establish the mapping ad-hoc.
+
+    Insertion order matches `KINDS` order so callers iterating
+    `block_token_counts_by_kind(block)` see the canonical
+    input → output → cache_create → cache_read sequence (relied on
+    by the Live view's KPI card order, the composition bar's
+    segment order, and the mini-table's row order).
     """
     c = block.token_counts
     return {
@@ -798,7 +806,7 @@ def block_cost_by_kind(block: BlockEntry) -> list[dict] | None:
     if rates is None:
         return None
 
-    counts = _block_token_counts_by_kind(block)
+    counts = block_token_counts_by_kind(block)
     notional: dict[str, float] = {
         k: counts[k] * rates[k] / 1_000_000 for k in KINDS
     }

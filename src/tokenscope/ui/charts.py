@@ -1397,14 +1397,9 @@ def live_token_kind_composition_bar(
     Returns ``None`` when the block has zero tokens (the caller
     renders an empty-state caption).
     """
-    from tokenscope.analytics import format_compact_int
+    from tokenscope.analytics import block_token_counts_by_kind, format_compact_int
 
-    counts = {
-        "input": block.token_counts.input_tokens,
-        "output": block.token_counts.output_tokens,
-        "cache_create": block.token_counts.cache_creation_input_tokens,
-        "cache_read": block.token_counts.cache_read_input_tokens,
-    }
+    counts = block_token_counts_by_kind(block)
     total = sum(counts.values())
     if total == 0:
         return None
