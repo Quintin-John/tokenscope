@@ -41,7 +41,12 @@ def render(state: SidebarState, nav: Navigation) -> None:
         st.error(f"ccusage failed:\n\n```\n{exc}\n```")
         return
 
-    entry = find_session(report, nav.session)
+    # `nav.session_project` disambiguates when multiple sessions
+    # share `nav.session` (the `subagents`-per-project case). When
+    # absent (legacy shareable URL) and the lookup is ambiguous,
+    # `find_session` returns None — failing closed rather than
+    # silently picking the first match.
+    entry = find_session(report, nav.session, nav.session_project)
     if entry is None:
         st.caption("Session not found in the selected date range.")
         return

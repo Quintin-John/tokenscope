@@ -95,8 +95,13 @@ def test_to_day_drops_deeper_fields() -> None:
 
 def test_to_session_preserves_day_drops_block() -> None:
     nav = Navigation(view="block", day="2026-05-16", session="old", block="b")
-    new = nav.to_session("new")
-    assert new == Navigation(view="session", day="2026-05-16", session="new")
+    new = nav.to_session("new", "/Users/q/proj-new")
+    assert new == Navigation(
+        view="session",
+        day="2026-05-16",
+        session="new",
+        session_project="/Users/q/proj-new",
+    )
 
 
 def test_to_block_preserves_session_and_day() -> None:
@@ -169,6 +174,139 @@ def test_top_level_views_constant() -> None:
     from tokenscope.navigation import TOP_LEVEL_VIEWS
 
     assert TOP_LEVEL_VIEWS == ("overview", "live", "cache", "models")
+
+
+# ---------- StreamlitDuplicateElementKey Slice 2: session_project disambiguator ----------
+#
+# `session_id` is NOT unique across projects (ccusage slugs each
+# Claude Code project's `subagents/` directory as the same id), so
+# `Navigation.session_project` carries the disambiguating
+# `project_path` alongside `session`. These tests pin the field's
+# round-trip through `from_params` / `to_params`, the new `to_session`
+# signature, and the carry-forward through `to_block` / `trail`.
+
+
+def test_navigation_from_params_reads_session_project() -> None:
+    """`session_project` URL param populates the corresponding
+    Navigation field."""
+    nav = Navigation.from_params({
+        "view": "session",
+        "day": "2026-05-16",
+        "session": "subagents",
+        "session_project": "/Users/q/projA",
+    })
+    assert nav.view == "session"
+    assert nav.session == "subagents"
+    assert nav.session_project == "/Users/q/projA"
+
+
+def test_navigation_to_params_emits_session_project() -> None:
+    """`to_params()` round-trips `session_project` when set."""
+    nav = Navigation(
+        view="session",
+        day="2026-05-16",
+        session="subagents",
+        session_project="/Users/q/projA",
+    )
+    assert nav.to_params() == {
+        "view": "session",
+        "day": "2026-05-16",
+        "session": "subagents",
+        "session_project": "/Users/q/projA",
+    }
+
+
+def test_navigation_to_params_omits_session_project_when_absent() -> None:
+    """Empty / None `session_project` doesn't leak into the URL.
+    Legacy URLs without the field still serialize cleanly."""
+    nav = Navigation(view="session", day="2026-05-16", session="abc")
+    assert "session_project" not in nav.to_params()
+
+
+def test_navigation_round_trip_preserves_session_project() -> None:
+    """`Navigation → to_params → from_params` is the identity
+    function for a session view with `session_project` set."""
+    nav = Navigation(
+        view="session",
+        day="2026-05-16",
+        session="subagents",
+        session_project="/Users/q/projB",
+    )
+    assert Navigation.from_params(nav.to_params()) == nav
+
+
+def test_to_session_requires_project_path_arg() -> None:
+    """The compile-time signature catches the original bug at the
+    call site: `to_session(session_id)` without project_path is no
+    longer callable. A regression that re-adds a default would
+    silently allow the ambiguous form back into production."""
+    nav = Navigation(view="day", day="2026-05-16")
+    with pytest.raises(TypeError):
+        nav.to_session("subagents")  # type: ignore[call-arg]
+
+
+def test_to_session_sets_session_project_field() -> None:
+    """`to_session(session_id, project_path)` populates BOTH the
+    session AND the session_project fields on the returned
+    Navigation."""
+    nav = Navigation(view="day", day="2026-05-16")
+    new = nav.to_session("subagents", "/Users/q/projA")
+    assert new.session == "subagents"
+    assert new.session_project == "/Users/q/projA"
+
+
+def test_to_block_carries_session_project_forward() -> None:
+    """Drilling from session → block must preserve
+    `session_project` — otherwise the breadcrumb back from block
+    would lose the disambiguator and the session crumb would
+    misroute on `subagents`-style duplicate ids."""
+    nav = Navigation(
+        view="session",
+        day="2026-05-16",
+        session="subagents",
+        session_project="/Users/q/projB",
+    )
+    new = nav.to_block("2026-05-16T13:00:00.000Z")
+    assert new.session == "subagents"
+    assert new.session_project == "/Users/q/projB"
+    assert new.block == "2026-05-16T13:00:00.000Z"
+
+
+def test_trail_session_crumb_carries_session_project() -> None:
+    """The session crumb returned by `trail()` must carry
+    `session_project` in its target Navigation — clicking the crumb
+    re-routes to the disambiguated session, not the first-by-id
+    match."""
+    nav = Navigation(
+        view="session",
+        day="2026-05-16",
+        session="subagents",
+        session_project="/Users/q/projB",
+    )
+    crumbs = nav.trail()
+    session_crumb_target = crumbs[-1][1]
+    assert session_crumb_target.session == "subagents"
+    assert session_crumb_target.session_project == "/Users/q/projB"
+
+
+def test_trail_block_view_session_crumb_carries_session_project() -> None:
+    """Same contract when the active view is `block` — the session
+    crumb between Day and Block in the trail must preserve
+    `session_project` so clicking it routes back to the correct
+    session."""
+    nav = Navigation(
+        view="block",
+        day="2026-05-16",
+        session="subagents",
+        session_project="/Users/q/projB",
+        block="2026-05-16T13:00:00.000Z",
+    )
+    crumbs = nav.trail()
+    # crumbs: [Overview, day, session, block] — session is index 2.
+    session_crumb_target = crumbs[2][1]
+    assert session_crumb_target.view == "session"
+    assert session_crumb_target.session == "subagents"
+    assert session_crumb_target.session_project == "/Users/q/projB"
 
 
 def test_live_view_parses() -> None:

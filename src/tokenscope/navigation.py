@@ -80,9 +80,27 @@ TOP_LEVEL_LABELS: dict[ViewName, str] = {
 
 @dataclass(frozen=True, slots=True)
 class Navigation:
+    """URL-state for the dashboard.
+
+    `session` alone is NOT a unique identifier across the user's
+    SessionReport: ccusage slugs each Claude Code project's
+    `subagents/` directory as `sessionId="subagents"`, so multiple
+    sessions in the same report can share that id. `session_project`
+    carries the disambiguating `project_path` alongside `session` so
+    the session view can resolve the correct row via
+    `analytics.find_session(report, session, session_project)`.
+
+    The URL param name `session_project` is deliberately distinct
+    from the sidebar's `project` filter param — those are different
+    concerns and can hold different values (the user may be browsing
+    with the sidebar narrowed to project A while clicking through
+    to a session that lives under project B).
+    """
+
     view: ViewName = "overview"
     day: str | None = None
     session: str | None = None
+    session_project: str | None = None
     block: str | None = None
 
     @classmethod
@@ -98,6 +116,7 @@ class Navigation:
             view=view,
             day=params.get("day") or None,
             session=params.get("session") or None,
+            session_project=params.get("session_project") or None,
             block=params.get("block") or None,
         )
 
@@ -108,6 +127,8 @@ class Navigation:
             out["day"] = self.day
         if self.session:
             out["session"] = self.session
+        if self.session_project:
+            out["session_project"] = self.session_project
         if self.block:
             out["block"] = self.block
         return out
@@ -120,12 +141,30 @@ class Navigation:
     def to_day(self, day: str) -> "Navigation":
         return Navigation(view="day", day=day)
 
-    def to_session(self, session_id: str) -> "Navigation":
-        return Navigation(view="session", day=self.day, session=session_id)
+    def to_session(self, session_id: str, project_path: str) -> "Navigation":
+        """Navigate to the session view for a specific
+        `(session_id, project_path)` row.
+
+        `project_path` is required (no default): `session_id` alone
+        is not unique across projects, so every caller MUST identify
+        which project's session they mean. The compile-time
+        signature catches the ambiguity at the call site rather than
+        at render time.
+        """
+        return Navigation(
+            view="session",
+            day=self.day,
+            session=session_id,
+            session_project=project_path,
+        )
 
     def to_block(self, block_id: str) -> "Navigation":
         return Navigation(
-            view="block", day=self.day, session=self.session, block=block_id
+            view="block",
+            day=self.day,
+            session=self.session,
+            session_project=self.session_project,
+            block=block_id,
         )
 
     # ---- breadcrumb trail ----
@@ -138,10 +177,26 @@ class Navigation:
         if self.day:
             crumbs.append((self.day, Navigation(view="day", day=self.day)))
         if self.view == "session" and self.session:
-            crumbs.append((_short(self.session), Navigation(view="session", day=self.day, session=self.session)))
+            crumbs.append((
+                _short(self.session),
+                Navigation(
+                    view="session",
+                    day=self.day,
+                    session=self.session,
+                    session_project=self.session_project,
+                ),
+            ))
         if self.view == "block" and self.block:
             if self.session:
-                crumbs.append((_short(self.session), Navigation(view="session", day=self.day, session=self.session)))
+                crumbs.append((
+                    _short(self.session),
+                    Navigation(
+                        view="session",
+                        day=self.day,
+                        session=self.session,
+                        session_project=self.session_project,
+                    ),
+                ))
             crumbs.append((_short(self.block), self))
         return crumbs
 

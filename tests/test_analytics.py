@@ -677,6 +677,93 @@ def test_find_session_hit_and_miss() -> None:
     assert find_session(rep, "missing") is None
 
 
+# ---------- find_session disambiguation by (session_id, project_path) ----------
+#
+# `session_id` is not unique across projects (ccusage slugs each
+# Claude Code project's `subagents/` directory as the same id).
+# `find_session` resolves by the `(session_id, project_path)` tuple.
+# These tests pin the four resolution branches end-to-end.
+
+
+def _session_in_project(
+    session_id: str, project_path: str, *, cost: float = 1.0
+) -> SessionEntry:
+    """SessionEntry with `project_path` explicitly set — the helper
+    above (`_session`) hardcodes a single project so it can't
+    construct the duplicate-id-different-project case the fix
+    targets."""
+    return SessionEntry(
+        sessionId=session_id,
+        inputTokens=10,
+        outputTokens=20,
+        cacheCreationTokens=30,
+        cacheReadTokens=40,
+        totalTokens=100,
+        totalCost=cost,
+        modelsUsed=["claude-opus-4-7"],
+        modelBreakdowns=[_breakdown("claude-opus-4-7", cost=cost)],
+        lastActivity="2026-05-16",
+        projectPath=project_path,
+    )
+
+
+def test_find_session_returns_unambiguous_match_when_project_path_omitted() -> None:
+    """Branch 3: `project_path` is None AND exactly one row matches
+    the `session_id`. Returns that row — the lookup is unambiguous,
+    so legacy shareable URLs without the disambiguator still
+    resolve correctly."""
+    rep = _session_report([
+        _session_in_project("a", "/Users/q/projA", cost=4.0),
+    ])
+    assert find_session(rep, "a").total_cost == 4.0
+    assert find_session(rep, "a", project_path=None).total_cost == 4.0
+
+
+def test_find_session_disambiguates_by_project_when_session_ids_collide() -> None:
+    """Branch 1: `project_path` is given AND a row matches both
+    fields. Returns that exact row — never the first-by-id match
+    that produced the routing bug."""
+    rep = _session_report([
+        _session_in_project("subagents", "/Users/q/projA", cost=5.0),
+        _session_in_project("subagents", "/Users/q/projB", cost=3.0),
+    ])
+    a = find_session(rep, "subagents", project_path="/Users/q/projA")
+    b = find_session(rep, "subagents", project_path="/Users/q/projB")
+    assert a is not None and a.total_cost == 5.0
+    assert b is not None and b.total_cost == 3.0
+    # Sanity: the two are distinct objects (not the same row
+    # returned twice due to a bug that ignored project_path).
+    assert a.project_path != b.project_path
+
+
+def test_find_session_returns_none_when_project_path_doesnt_match() -> None:
+    """Branch 2: `project_path` is given AND no row matches both
+    fields (session aged out or URL tampered). Returns None —
+    failing closed instead of silently picking a wrong row by
+    session_id alone."""
+    rep = _session_report([
+        _session_in_project("subagents", "/Users/q/projA"),
+    ])
+    assert find_session(rep, "subagents", project_path="/Users/q/projZ") is None
+
+
+def test_find_session_returns_none_when_ambiguous_id_and_no_project() -> None:
+    """Branch 4: `project_path` is None AND multiple rows share
+    the `session_id`. Returns None — caller MUST disambiguate.
+
+    This is the test that pins the fix against the original bug.
+    Pre-fix `find_session(rep, "subagents")` returned the FIRST
+    matching row (silently wrong). Post-fix it returns None so the
+    session view shows the empty-state instead of misrouting the
+    user to a different project's data."""
+    rep = _session_report([
+        _session_in_project("subagents", "/Users/q/projA"),
+        _session_in_project("subagents", "/Users/q/projB"),
+    ])
+    assert find_session(rep, "subagents") is None
+    assert find_session(rep, "subagents", project_path=None) is None
+
+
 # ---------- blocks_on_day / find_block ----------
 
 

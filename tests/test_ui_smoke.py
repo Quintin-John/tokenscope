@@ -3076,6 +3076,337 @@ def test_day_renders_session_and_block_rows_via_shared_helper(
     )
 
 
+# --- Day-view regression: duplicate `sessionId` across projects ---------
+#
+# Claude Code creates a `subagents/` directory per project. ccusage slugs
+# each directory as `sessionId="subagents"` — multiple sessions in the
+# user's report can share the same `session_id`. Before the fix, the
+# `Open session` button's Streamlit widget key was
+# `f"open-session-{session_id}"` which collided on the duplicate id and
+# raised `StreamlitDuplicateElementKey` on the day view. Fix at
+# `day.py:_session_button_key` composes the key from
+# `(project_path, session_id)` — unique within a SessionReport because
+# `project_path` is the slugified absolute project path.
+
+
+def _session_payload_with_duplicate_session_ids() -> dict:
+    """ccusage-shaped session report where TWO sessions share
+    `sessionId="subagents"` (different `projectPath`) and both have
+    `lastActivity="2026-04-05"` so `sessions_on_day` returns both —
+    triggering the pre-fix `StreamlitDuplicateElementKey` crash on
+    the day view."""
+    def _session(project_path: str, cost: float, tokens: int) -> dict:
+        # Total has to be the sum of the four kinds so the model
+        # passes ccusage's schema-validation step at the data layer.
+        # Input dominates here so the test reads as "real-ish".
+        input_tokens = tokens
+        return {
+            "sessionId": "subagents",
+            "lastActivity": "2026-04-05",
+            "projectPath": project_path,
+            "inputTokens": input_tokens,
+            "outputTokens": 0,
+            "cacheCreationTokens": 0,
+            "cacheReadTokens": 0,
+            "totalTokens": input_tokens,
+            "totalCost": cost,
+            "modelsUsed": ["claude-opus-4-7"],
+            "modelBreakdowns": [
+                {
+                    "modelName": "claude-opus-4-7",
+                    "inputTokens": input_tokens,
+                    "outputTokens": 0,
+                    "cacheCreationTokens": 0,
+                    "cacheReadTokens": 0,
+                    "cost": cost,
+                }
+            ],
+        }
+
+    sessions = [
+        _session(
+            "-Users-qj-projA-subagents", cost=5.0, tokens=1000,
+        ),
+        _session(
+            "-Users-qj-projB-subagents", cost=3.0, tokens=600,
+        ),
+    ]
+    totals = {
+        "inputTokens": 1600,
+        "outputTokens": 0,
+        "cacheCreationTokens": 0,
+        "cacheReadTokens": 0,
+        "totalTokens": 1600,
+        "totalCost": 8.0,
+    }
+    return {"sessions": sessions, "totals": totals}
+
+
+def test_day_view_renders_when_multiple_sessions_share_session_id(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Day view must not raise `StreamlitDuplicateElementKey` when
+    two sessions in the same render pass share `session_id`
+    (the `subagents`-per-project case).
+
+    Pre-fix this rendered with the duplicate-key error in
+    `at.exception`. Post-fix the render must be clean AND both
+    session rows must be present."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+
+    # The pre-fix crash surfaced as a Python exception in AppTest's
+    # `at.exception` list. Post-fix, both `at.exception` and
+    # `at.error` are empty (no st.error rendered either).
+    _assert_clean(at)
+
+    # Both session rows render — count the `Open session` buttons.
+    session_buttons = [
+        b for b in at.button
+        if b.key and b.key.startswith("open-session-")
+    ]
+    assert len(session_buttons) == 2, (
+        f"expected 2 `Open session` buttons (one per duplicated-id "
+        f"session); got {len(session_buttons)}: keys="
+        f"{[b.key for b in session_buttons]!r}"
+    )
+
+
+def test_day_view_session_button_keys_are_unique_when_session_ids_collide(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Independent contract: when two sessions share `session_id`,
+    their button widget keys MUST still differ. Asserts the key
+    derivation pulls in something beyond `session_id` —
+    specifically, `(project_path, session_id)` is the unique tuple
+    `_session_button_key` composes from.
+
+    Two assertions: (a) we have two `Open session` buttons,
+    (b) their `key` attributes are distinct. The pre-fix code base
+    would fail (a) anyway because Streamlit raised before the
+    second button was registered."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+
+    session_button_keys = [
+        b.key for b in at.button
+        if b.key and b.key.startswith("open-session-")
+    ]
+    assert len(session_button_keys) == 2, (
+        f"expected 2 session-open buttons; got "
+        f"{len(session_button_keys)}: {session_button_keys!r}"
+    )
+    assert len(set(session_button_keys)) == 2, (
+        f"session-open button keys must be distinct across rows "
+        f"with duplicate `session_id`; got duplicates in: "
+        f"{session_button_keys!r}"
+    )
+    # Both keys must include the per-project disambiguator. A
+    # regression that dropped `project_path` from the composition
+    # and used just an enumeration index would silently re-introduce
+    # the ambiguity-by-arrival-order; assert the project path is
+    # part of the key.
+    for key in session_button_keys:
+        assert "projA" in key or "projB" in key, (
+            f"button key {key!r} doesn't include project_path — the "
+            f"per-project disambiguator is missing"
+        )
+
+
+# --- Slice 2 routing disambiguation: session_project carries through ---
+#
+# Slice 1 fixed the day-view button-key crash but left the routing
+# defect alive: clicking the "subagents" row for project B routed
+# to `?view=session&session=subagents` and the session view's
+# `find_session` returned the FIRST `subagents` match (project A) —
+# silently wrong data. Slice 2 disambiguates by carrying
+# `session_project` through Navigation → URL → find_session, so
+# clicks land on the row the user actually pointed at.
+
+
+def test_day_view_session_button_routes_with_session_project_when_session_ids_collide(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Clicking the `Open session` button on a duplicated-`session_id`
+    row writes BOTH `session=<id>` AND `session_project=<path>` to
+    the URL. Without the second param, `find_session` on the
+    session view would silently resolve to the wrong project's row.
+
+    Identifies the target button by the project-path discriminator
+    that Slice 1 baked into the key (`projB`) so the test is
+    robust to button-ordering changes."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+
+    proj_b_button = next(
+        (
+            b for b in at.button
+            if b.key
+            and b.key.startswith("open-session-")
+            and "projB" in b.key
+        ),
+        None,
+    )
+    assert proj_b_button is not None, (
+        f"projB session-open button missing; got button keys: "
+        f"{[b.key for b in at.button]!r}"
+    )
+    proj_b_button.click().run()
+
+    # AppTest exposes query_params as a multidict — values come back
+    # as lists; pick the first entry.
+    def _q(key: str) -> str | None:
+        v = at.query_params.get(key)
+        if v is None:
+            return None
+        return v[0] if isinstance(v, list) else v
+
+    assert _q("view") == "session", (
+        f"expected view=session after click; got {_q('view')!r}"
+    )
+    assert _q("session") == "subagents"
+    # The critical assertion: the URL carries the disambiguating
+    # project_path. Pre-Slice-2 this param did not exist on the
+    # route → the session view's `find_session` would have returned
+    # the projA row instead of the projB row the user clicked.
+    assert _q("session_project") == "-Users-qj-projB-subagents", (
+        f"expected session_project=-Users-qj-projB-subagents after "
+        f"clicking the projB row; got {_q('session_project')!r}"
+    )
+
+
+def test_session_view_renders_correct_session_when_session_ids_collide(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Direct navigation to
+    `?view=session&session=subagents&session_project=<projB>`
+    renders projB's session data — NOT projA's, which is what the
+    pre-Slice-2 `find_session(report, "subagents")` would have
+    returned by virtue of being first in the list.
+
+    Asserts on the rendered metric values (cost, tokens) — projA's
+    cost is $5 / 1000 tokens; projB's is $3 / 600 tokens — so the
+    distinction is unambiguous in the failure message."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at(
+        "session",
+        session="subagents",
+        session_project="-Users-qj-projB-subagents",
+    )
+    at.run()
+    _assert_clean(at)
+
+    cost_metric = next(
+        (m for m in at.metric if m.label == "Cost"),
+        None,
+    )
+    tokens_metric = next(
+        (m for m in at.metric if m.label == "Total tokens"),
+        None,
+    )
+    assert cost_metric is not None and tokens_metric is not None, (
+        f"session-view metrics missing; got labels: "
+        f"{[m.label for m in at.metric]!r}"
+    )
+    # projB fixture values: cost=3.0, totalTokens=600.
+    assert cost_metric.value == "$3.00", (
+        f"session view rendered the WRONG session — got cost "
+        f"{cost_metric.value!r}, expected $3.00 (projB). The "
+        f"`session_project` URL param did not disambiguate."
+    )
+    assert tokens_metric.value == "600", (
+        f"session view rendered the wrong session — got tokens "
+        f"{tokens_metric.value!r}, expected 600 (projB)"
+    )
+
+
+def test_session_view_falls_back_to_not_found_when_session_id_is_ambiguous(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Legacy URL hits a duplicated `session_id` with no
+    `session_project` param. `find_session` returns None (branch 4
+    of its resolution rules — fail closed when ambiguous), and the
+    session view renders the empty-state caption rather than
+    silently picking the wrong row.
+
+    Pre-Slice-2 this URL routed to the first matching session in
+    the report (silently wrong)."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    # No session_project param — the legacy URL shape.
+    at = _at("session", session="subagents")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "Session not found" in captions, (
+        f"expected `Session not found` empty-state on ambiguous "
+        f"legacy URL; got captions: {captions!r}"
+    )
+    # Critical: the session view must NOT have rendered either
+    # session's data (no Cost / Total tokens metrics from the
+    # disambiguated path). Pre-fix it would have shown projA's
+    # $5.00 / 1,000 (the first match).
+    cost_metric = next(
+        (m for m in at.metric if m.label == "Cost"),
+        None,
+    )
+    assert cost_metric is None, (
+        f"session view rendered a Cost metric on an ambiguous "
+        f"legacy URL — got {cost_metric.value!r}. find_session "
+        f"silently picked a row instead of failing closed."
+    )
+
+
 # --- Pre-slice P5: partial-failure semantics for ccusage fetches --------
 #
 # Slice P5 parallelises the sequential ccusage fetches on the Overview
