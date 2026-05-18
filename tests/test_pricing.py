@@ -1,19 +1,32 @@
 """Unit tests for tokenscope.pricing.
 
-Focus: the cache-loading invariant that `_ensure_loaded()` is atomic —
-either all three module caches (`_PRICING_DATA_CACHE`,
-`_FAMILY_RATES_CACHE`, `_MODEL_RATES_CACHE`) get populated together, or
-none of them do. The pre-fix code mutated `_PRICING_DATA_CACHE` first
-and then built the two rate dicts; if either build raised, the data
-cache was left set and subsequent calls would short-circuit
-`_ensure_loaded` and trip the post-load asserts in `rates_for_model` /
-`rates_for_family`.
+Three test layers:
 
-Network and disk are stubbed via monkeypatch on `_fetch_pricing_json`
-so the tests are deterministic and don't touch `~/.cache/tokenscope`.
+1. `_ensure_loaded` atomicity (first block). The cache-loading
+   invariant that `_PRICING_DATA_CACHE`, `_FAMILY_RATES_CACHE`,
+   `_MODEL_RATES_CACHE` populate together or not at all. These tests
+   monkeypatch `_fetch_pricing_json` itself, so they don't touch
+   network or disk.
+
+2. Builder filter logic + Slice E consolidation (second block).
+   Direct tests of `_build_family_rates`, `_build_model_rates`, and
+   the shared `_iter_claude_pricing` iterator. Pure-function tests
+   over synthetic pricing-data dicts.
+
+3. `_fetch_pricing_json` network + disk boundary (third block,
+   Slice G). Tests the real fetch function with `urllib.request.urlopen`
+   mocked and the cache file redirected to a per-test `tmp_path`. These
+   cover the 5 branches the prior `monkeypatch.setattr(pricing,
+   "_fetch_pricing_json", ...)` pattern never exercised.
 """
 
 from __future__ import annotations
+
+import errno
+import json
+import os
+import time
+import urllib.error
 
 import pytest
 
@@ -504,3 +517,338 @@ def test_litellm_key_by_kind_covers_every_canonical_kind() -> None:
         f"missing={set(KINDS) - set(_LITELLM_KEY_BY_KIND)!r}, "
         f"extra={set(_LITELLM_KEY_BY_KIND) - set(KINDS)!r}"
     )
+
+
+# --- Slice G: _fetch_pricing_json network + disk boundary --------------
+#
+# Pre-Slice-G every test in this file monkeypatched `_fetch_pricing_json`
+# itself, so the real fetch function (network call + disk-cache read +
+# disk-cache write + multi-stage error fallbacks, ~45 lines) had zero
+# direct test coverage. The function carries TWO silent error swallows
+# (bare `except OSError`/`except (OSError, JSONDecodeError): pass`),
+# is the app's only entry point for pricing data, and is reached by
+# every Streamlit user on first load + every 7 days thereafter.
+#
+# These tests redirect `_CACHE_DIR` / `_CACHE_FILE` to per-test
+# `tmp_path` and patch `urllib.request.urlopen` to simulate the
+# network. Five branches must be exercised:
+#
+#   1. Fresh cache → return parsed cache (no network).
+#   2. Fresh cache corrupt → fall to network.
+#   3. Stale / absent cache → fall to network.
+#   4. Network succeeds → parse, write cache, return data.
+#   5. Network fails → fall to stale cache (or None).
+
+
+class _FakeResponse:
+    """Minimal stand-in for `urlopen`'s context-manager response.
+    Supports the two operations `_fetch_pricing_json` performs:
+    `__enter__` / `__exit__` (context manager) and `.read()`."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _fake_urlopen_returning(body: bytes):
+    """Build an `urlopen` stand-in that returns `_FakeResponse(body)`
+    regardless of args."""
+    def _fake(*_args: object, **_kwargs: object) -> _FakeResponse:
+        return _FakeResponse(body)
+    return _fake
+
+
+def _fake_urlopen_raising(exc: BaseException):
+    """Build an `urlopen` stand-in that raises `exc` regardless of args."""
+    def _fake(*_args: object, **_kwargs: object) -> _FakeResponse:
+        raise exc
+    return _fake
+
+
+def _fake_urlopen_explodes_on_call():
+    """`urlopen` stand-in that asserts it was never called. Used by
+    the "fresh cache" test to prove the network path is skipped."""
+    def _fake(*_args: object, **_kwargs: object) -> _FakeResponse:
+        raise AssertionError(
+            "_fetch_pricing_json reached the network despite a fresh "
+            "cache being present"
+        )
+    return _fake
+
+
+@pytest.fixture
+def redirected_cache(tmp_path, monkeypatch):
+    """Redirect `pricing._CACHE_DIR` / `_CACHE_FILE` into per-test
+    `tmp_path` so disk writes don't touch `~/.cache/tokenscope` and
+    every test starts with no cache file present.
+
+    Yields the redirected `_CACHE_FILE` Path so tests can pre-populate
+    it (with fresh or stale mtime) and assert on its post-state.
+    """
+    cache_dir = tmp_path / "pricing_cache"
+    cache_file = cache_dir / "litellm_pricing.json"
+    monkeypatch.setattr(pricing, "_CACHE_DIR", cache_dir)
+    monkeypatch.setattr(pricing, "_CACHE_FILE", cache_file)
+    yield cache_file
+
+
+def _make_cache(cache_file, payload: dict, *, age_seconds: float = 0.0) -> None:
+    """Write `payload` to `cache_file` and backdate its mtime by
+    `age_seconds`. Age 0 → fresh; age > `_CACHE_TTL_SECONDS` → stale."""
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(json.dumps(payload))
+    if age_seconds > 0:
+        backdated = time.time() - age_seconds
+        os.utime(cache_file, (backdated, backdated))
+
+
+def test_fetch_returns_fresh_cache_without_calling_network(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 1 — fresh cache hit short-circuits before the network
+    call. The `_fake_urlopen_explodes_on_call` stub fails loudly if
+    the implementation reaches `urlopen` despite a fresh cache."""
+    fresh_payload = {"claude-opus-4-7": {"input_cost_per_token": 5e-6}}
+    _make_cache(redirected_cache, fresh_payload, age_seconds=0)
+    monkeypatch.setattr(
+        "urllib.request.urlopen", _fake_urlopen_explodes_on_call()
+    )
+
+    assert pricing._fetch_pricing_json() == fresh_payload
+
+
+def test_fetch_calls_network_when_no_cache_file_exists(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 3 — no cache file → straight to network. Verifies the
+    fetcher writes the response to the cache so subsequent calls are
+    fresh-hits."""
+    network_payload = {"claude-haiku-4-5": {"input_cost_per_token": 1e-6}}
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_returning(json.dumps(network_payload).encode()),
+    )
+
+    assert not redirected_cache.exists()
+    assert pricing._fetch_pricing_json() == network_payload
+    # Branch 4 side-effect: cache was written.
+    assert redirected_cache.exists()
+    assert json.loads(redirected_cache.read_text()) == network_payload
+
+
+def test_fetch_calls_network_when_cache_is_stale(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 3 (stale variant) — cache present but `age >= _CACHE_TTL_SECONDS`
+    bypasses the fresh-hit return. Pre-populate cache with one payload,
+    backdate its mtime to 8 days ago, then return a different payload
+    over the network to prove the network is what's read."""
+    stale_payload = {"claude-opus-4-6": {"input_cost_per_token": 4e-6}}
+    network_payload = {"claude-opus-4-7": {"input_cost_per_token": 5e-6}}
+    _make_cache(
+        redirected_cache,
+        stale_payload,
+        age_seconds=pricing._CACHE_TTL_SECONDS + 86400,  # 1 day past TTL
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_returning(json.dumps(network_payload).encode()),
+    )
+
+    assert pricing._fetch_pricing_json() == network_payload
+
+
+def test_fetch_recovers_from_corrupt_fresh_cache_via_network(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 2 — fresh cache exists but its contents fail to parse
+    as JSON. The bare `except (OSError, JSONDecodeError): pass`
+    block (pricing.py:72-73) silently swallows and falls through to
+    the network. Without this test, a corrupt cache would silently
+    break pricing for every user until the cache rolled."""
+    redirected_cache.parent.mkdir(parents=True, exist_ok=True)
+    redirected_cache.write_text("this is not valid JSON {{{")
+    # Cache is FRESH (mtime = now), so the freshness check passes;
+    # the corruption is what forces the fall-through.
+
+    network_payload = {"claude-opus-4-7": {"input_cost_per_token": 5e-6}}
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_returning(json.dumps(network_payload).encode()),
+    )
+
+    assert pricing._fetch_pricing_json() == network_payload
+
+
+def test_fetch_returns_data_when_cache_write_fails(
+    monkeypatch, tmp_path
+) -> None:
+    """Branch 4 + the silent `except OSError: pass` swallow at
+    pricing.py:90-91. Network succeeds, but the cache directory
+    can't be created (its parent is a regular file, so `mkdir`
+    raises `FileExistsError` — an `OSError` subclass). The fetcher
+    must still return the network data; the cache write is
+    best-effort."""
+    # Create a file where the cache PARENT would go, so mkdir fails.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("im a file not a dir")
+    fake_dir = blocker / "pricing_cache"  # parent is the file above
+    fake_file = fake_dir / "litellm_pricing.json"
+    monkeypatch.setattr(pricing, "_CACHE_DIR", fake_dir)
+    monkeypatch.setattr(pricing, "_CACHE_FILE", fake_file)
+
+    network_payload = {"claude-opus-4-7": {"input_cost_per_token": 5e-6}}
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_returning(json.dumps(network_payload).encode()),
+    )
+
+    assert pricing._fetch_pricing_json() == network_payload
+    assert not fake_file.exists()  # cache write definitely failed
+
+
+def test_fetch_falls_back_to_stale_cache_when_network_fails(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 5 — network raises `URLError`, stale cache present →
+    return parsed stale cache. The pricing.py:101-104 path that
+    pricing.py:99 (`using_stale_cache=True`) logs but the original
+    test suite never exercised. Without this, a network outage on
+    a host with a working stale cache would still return None
+    (silent failure mode).
+    """
+    stale_payload = {"claude-opus-4-6": {"input_cost_per_token": 4e-6}}
+    _make_cache(
+        redirected_cache,
+        stale_payload,
+        age_seconds=pricing._CACHE_TTL_SECONDS + 86400,
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_raising(urllib.error.URLError("connection refused")),
+    )
+
+    assert pricing._fetch_pricing_json() == stale_payload
+
+
+def test_fetch_returns_none_when_network_fails_and_stale_cache_corrupt(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 5 dead-end (pricing.py:104-106) — both network and
+    stale cache fail. Without this test, a corrupt stale cache
+    during a network outage would surface as an unhandled exception
+    rather than the documented `None` (`network_failed_and_cache_corrupt`
+    log line)."""
+    redirected_cache.parent.mkdir(parents=True, exist_ok=True)
+    redirected_cache.write_text("garbage stale cache contents")
+    # Backdate so the freshness check doesn't even try to parse.
+    backdated = time.time() - (pricing._CACHE_TTL_SECONDS + 86400)
+    os.utime(redirected_cache, (backdated, backdated))
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_raising(urllib.error.URLError("connection refused")),
+    )
+
+    assert pricing._fetch_pricing_json() is None
+
+
+def test_fetch_returns_none_when_network_fails_and_no_cache_at_all(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 5 dead-end (pricing.py:107-108) — no cache, no
+    network → return None. UI hides the cost-composition panel."""
+    assert not redirected_cache.exists()
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_raising(urllib.error.URLError("connection refused")),
+    )
+
+    assert pricing._fetch_pricing_json() is None
+
+
+def test_fetch_treats_timeout_as_network_failure(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 5 — `TimeoutError` is one of the documented exceptions
+    in the `except (URLError, JSONDecodeError, OSError, TimeoutError)`
+    clause at pricing.py:93. Verify it routes through the same
+    stale-cache fallback as URLError."""
+    stale_payload = {"claude-opus-4-7": {"input_cost_per_token": 5e-6}}
+    _make_cache(
+        redirected_cache,
+        stale_payload,
+        age_seconds=pricing._CACHE_TTL_SECONDS + 86400,
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_raising(TimeoutError("simulated timeout")),
+    )
+
+    assert pricing._fetch_pricing_json() == stale_payload
+
+
+def test_fetch_treats_malformed_network_response_as_failure(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 5 — network response that isn't valid JSON triggers
+    `json.JSONDecodeError`, which is in the documented exception
+    tuple. Routes through stale-cache fallback (returns None here
+    since no cache exists)."""
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_returning(b"<html>upstream proxy error</html>"),
+    )
+
+    assert pricing._fetch_pricing_json() is None
+
+
+def test_fetch_treats_oserror_during_network_read_as_failure(
+    monkeypatch, redirected_cache
+) -> None:
+    """Branch 5 — `OSError` (e.g. socket error mid-read) is in the
+    documented exception tuple. Without this branch, a connection
+    that opened but failed mid-stream would surface as an unhandled
+    exception in the Streamlit page render."""
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _fake_urlopen_raising(OSError(errno.ECONNRESET, "connection reset")),
+    )
+
+    assert pricing._fetch_pricing_json() is None
+
+
+# --- rates_for_family happy path (Slice G: coverage line 268-269) -------
+
+
+def test_rates_for_family_returns_family_rates_when_loaded(monkeypatch) -> None:
+    """The existing `test_rates_for_family_returns_none_when_unavailable`
+    covers the unavailable path; this test pins the LOADED path —
+    after a successful fetch, `rates_for_family("opus")` returns the
+    family's per-MTok rates (not None, not a model-specific dict)."""
+    monkeypatch.setattr(pricing, "_fetch_pricing_json", _minimal_pricing_data)
+
+    rates = pricing.rates_for_family("opus")
+    assert rates is not None
+    # The fixture has one opus entry → median == that entry's rates.
+    assert rates["input"] == pytest.approx(5.0)
+    assert rates["output"] == pytest.approx(25.0)
+    assert rates["cache_create"] == pytest.approx(6.25)
+    assert rates["cache_read"] == pytest.approx(0.5)
+
+
+def test_rates_for_family_returns_none_for_unknown_family(monkeypatch) -> None:
+    """A family name `model_family` could never produce (or one
+    Anthropic hasn't shipped yet) returns None — caller hides the
+    rate-derived UI element rather than rendering 0.0."""
+    monkeypatch.setattr(pricing, "_fetch_pricing_json", _minimal_pricing_data)
+
+    assert pricing.rates_for_family("imaginary-family") is None
