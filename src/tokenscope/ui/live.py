@@ -1,13 +1,21 @@
 """Active-block live view.
 
-A real-time snapshot of the current 5-hour billing window. Replaces
-the prior gauge-only layout (which duplicated the `$/hr` KPI in a
-larger, scaled-to-an-arbitrary-axis form and carried a cryptic
-unlabelled delta) with:
+A real-time snapshot of the user's current ccusage activity window.
+The window's billing meaning is plan-aware: on flat-rate plans (Pro
+/ Max) it IS the user's quota reset window; on Enterprise it's just
+activity bucketing with no billing significance. Plan-aware copy
+lives in module-private helpers (`_banner_label`,
+`_banner_reset_suffix`, `_page_caption`, `_empty_state_text`) — see
+their docstrings for the framing rules.
 
-  * `# Live` page header + a one-line subtitle.
-  * Window banner — start → end time, minutes remaining, models
-    active. Light-bg panel, distinct from KPI cards.
+Replaces the prior gauge-only layout (which duplicated the `$/hr`
+KPI in a larger, scaled-to-an-arbitrary-axis form and carried a
+cryptic unlabelled delta) with:
+
+  * `# Live` page header + a plan-aware one-line subtitle.
+  * Window banner — plan-aware label + start → end time + plan-aware
+    reset suffix + models active. Light-bg panel, distinct from KPI
+    cards.
   * KPI strip — Cost so far / $/hr / Tokens/min / Projected total,
     all wrapped in `st.container(border=True)` cards matching the
     Overview look.
@@ -30,7 +38,7 @@ Implementation notes:
 - Spend-trajectory samples are appended to `st.session_state` on
   each fragment refresh so the chart's solid line gets richer as
   the user keeps the page open. Samples are keyed by block id so
-  a new billing block starts the history fresh.
+  a new active block starts the history fresh.
 """
 
 from __future__ import annotations
@@ -53,6 +61,7 @@ from tokenscope.ccusage import CcusageError
 from tokenscope.log import get_logger
 from tokenscope.models import BlockEntry
 from tokenscope.navigation import Navigation
+from tokenscope.plans import Plan
 from tokenscope.pricing import KINDS
 from tokenscope.query import Query
 from tokenscope.ui.charts import (
@@ -79,18 +88,194 @@ _TOKEN_KIND_LABELS: dict[str, str] = {
 REFRESH_SECONDS = config.LIVE_REFRESH_SECONDS
 
 
+# --- plan-aware copy (single source of truth) ---------------------------
+#
+# Every plan-aware string the Live view renders lives here, keyed off
+# `plan.is_flat_rate`. The render functions never embed plan-keyed
+# literals inline — they call these helpers. A copy edit (e.g. wording
+# polish, translation) happens in ONE place; the branching logic
+# (flat-rate vs pay-per-token) is defined once and consumed everywhere.
+#
+# Why module-private here and not on the `Plan` class: this is
+# Live-view-specific UI text, not domain semantics. Putting it on
+# `Plan` would tie the domain model to one view's vocabulary; keeping
+# it module-private to live.py respects SRP — `Plan` knows about
+# subscription pricing, `live.py` knows about its own UI.
+
+
+def _banner_label(plan: Plan) -> str:
+    """The first word of the window-banner line — "Quota window" on
+    flat-rate (the 5h block IS the user's quota reset window),
+    "Current activity" on Enterprise (no quota; the block is just
+    ccusage's activity bucketing)."""
+    return "Quota window" if plan.is_flat_rate else "Current activity"
+
+
+def _banner_reset_suffix(plan: Plan, remaining_minutes: int | None) -> str:
+    """The suffix appended after the time range. Reset countdown on
+    flat-rate, explicit "unknown" sentinel when the countdown is
+    missing on flat-rate, empty on Enterprise.
+
+    No-guessing contract: when `remaining_minutes is None` on
+    flat-rate, we say "reset time unknown" rather than silently
+    dropping the suffix (which would visually imply no reset) or
+    fabricating a number from the hardcoded 5-hour assumption."""
+    if not plan.is_flat_rate:
+        return ""
+    if remaining_minutes is None:
+        return " · reset time unknown"
+    return f" · resets in {remaining_minutes} min"
+
+
+def _page_caption(plan: Plan) -> str:
+    """One-line subtitle under the `# Live` H1. Names the user's
+    actual billing reality: flat-rate users see "your monthly fee
+    is what you pay"; Enterprise sees "this is your actual API
+    spend"."""
+    if plan.is_flat_rate:
+        return (
+            "Real-time snapshot of your quota window. Costs are "
+            "estimates at API rates; your actual bill is the plan's "
+            "monthly fee."
+        )
+    return (
+        "Real-time snapshot of your current Claude Code activity. "
+        "Costs reflect actual API billing."
+    )
+
+
+def _empty_state_text(plan: Plan) -> str:
+    """Info-banner text rendered when there is no active block.
+    Plan-aware because the underlying concept differs — flat-rate
+    users have a "quota window" to start; Enterprise users have a
+    "session"."""
+    if plan.is_flat_rate:
+        return (
+            "No active quota window right now. Start a Claude Code "
+            "session to see live spend."
+        )
+    return (
+        "No active Claude Code session right now. Start one to "
+        "see live spend."
+    )
+
+
+def _window_noun(plan: Plan) -> str:
+    """The plan-aware noun for the currently-active block:
+
+      * "quota window" on flat-rate (the 5-hour block IS the user's
+        quota reset window).
+      * "session" on Enterprise (no quota; the block is just
+        ccusage's activity bucketing).
+
+    Every Live-view caption / card title / chart-fallback that
+    refers to the block-in-context interpolates this single source
+    of truth — a vocabulary change here propagates through every
+    surface in one edit."""
+    return "quota window" if plan.is_flat_rate else "session"
+
+
+def _cost_so_far_caption(plan: Plan) -> str:
+    """KPI caption for the Cost-so-far card. Names the user's
+    billing reality alongside the window context: on flat-rate the
+    dollar figure is an API-rate estimate (the actual bill is the
+    monthly fee); on Enterprise it's the user's actual spend."""
+    suffix = (
+        "estimated at API rates" if plan.is_flat_rate else "actual cost"
+    )
+    return f"this {_window_noun(plan)} · {suffix}"
+
+
+def _spend_chart_title(plan: Plan) -> str:
+    """Section header for the spend-trajectory card."""
+    return f"### Spend in this {_window_noun(plan)}"
+
+
+def _spend_chart_caption(plan: Plan) -> str:
+    """Body caption beneath the spend-trajectory chart. On flat-rate
+    plans, names the decoupling between the API-equivalent chart
+    values and the user's actual flat monthly fee — the chart's
+    dollar projection is NOT what the user will pay."""
+    if plan.is_flat_rate:
+        return (
+            f"Cumulative API-equivalent spend in your current "
+            f"{_window_noun(plan)}. Your plan's monthly fee is fixed "
+            "regardless of this projection."
+        )
+    return (
+        f"Cumulative actual spend since the current "
+        f"{_window_noun(plan)} started."
+    )
+
+
+def _spend_chart_no_projection_caption(plan: Plan) -> str:
+    """Fallback caption when ccusage hasn't computed a projection for
+    the active block yet (typically: brand-new block with no
+    burn-rate data)."""
+    return f"No projection available for this {_window_noun(plan)} yet."
+
+
+def _token_mix_title(plan: Plan) -> str:
+    """Section header for the token-mix composition card."""
+    return f"### Token mix in this {_window_noun(plan)}"
+
+
+def _token_mix_caption(plan: Plan) -> str:
+    """Body caption beneath the token-mix composition bar."""
+    return (
+        f"Cumulative token mix for your current {_window_noun(plan)}. "
+        f"Updated every {REFRESH_SECONDS}s."
+    )
+
+
+def _token_mix_empty_caption(plan: Plan) -> str:
+    """Fallback caption when the active block has zero token activity
+    across all four kinds."""
+    return f"This {_window_noun(plan)} has no token activity yet."
+
+
+def _projected_total_caption(plan: Plan) -> str:
+    """Caption beneath the Projected-total KPI when projection data
+    is present.
+
+      * Flat-rate: names the API-equivalent semantics + flat-fee
+        decoupling — the dollar projection is NOT what the user
+        pays.
+      * Enterprise: "at the current rate" — the dollar IS the
+        user's incremental spend rate, so no qualifier needed.
+
+    The no-projection fallback caption ("no projection") is
+    plan-independent — it's a data-missing state, not a plan-aware
+    semantic — and stays inline in `_render_projected_total_kpi`.
+    """
+    if plan.is_flat_rate:
+        return (
+            f"API-equivalent projection for this {_window_noun(plan)}; "
+            "your plan's monthly fee is fixed."
+        )
+    return "at the current rate"
+
+
 def render(state: SidebarState, nav: Navigation) -> None:
-    """Live view shell: H1 + subtitle, then the fragment-refreshed
-    panel for everything else."""
+    """Live view shell: H1 + plan-aware subtitle, then the fragment-
+    refreshed panel for everything else.
+
+    The subtitle names the user's actual billing reality: on flat-rate
+    plans the dollar figures on this view are API-equivalent estimates
+    (the user pays the fixed monthly fee), while on Enterprise the
+    figures are the user's actual API-billed spend. Same fix the
+    Overview Window-cost KPI already applies — extending the
+    plan-honest framing to the Live view.
+    """
     st.markdown("# Live")
-    st.caption("Real-time snapshot of the current 5-hour billing window.")
-    _live_panel(offline=state.query.offline, tz=state.query.tz)
+    st.caption(_page_caption(state.plan))
+    _live_panel(plan=state.plan, offline=state.query.offline, tz=state.query.tz)
 
 
 @st.fragment(run_every=REFRESH_SECONDS)
-def _live_panel(offline: bool, tz: str | None = None) -> None:
+def _live_panel(plan: Plan, offline: bool, tz: str | None = None) -> None:
     """Auto-refreshing live panel. Args must be hashable so Streamlit
-    can key the fragment; bool + str are fine."""
+    can key the fragment; `Plan` is a frozen dataclass and hashable."""
     refreshed_at = datetime.now()
     now_utc = datetime.now(timezone.utc)
     try:
@@ -103,15 +288,12 @@ def _live_panel(offline: bool, tz: str | None = None) -> None:
     _render_refresh_line(refreshed_at)
 
     if active is None:
-        st.info(
-            "No active billing block right now. Start a Claude Code "
-            "session to see live spend."
-        )
+        st.info(_empty_state_text(plan))
         return
 
     typical = typical_burn_rate(report)
-    _render_window_banner(active, tz=tz)
-    _render_kpis(active, typical=typical)
+    _render_window_banner(active, plan=plan, tz=tz)
+    _render_kpis(active, plan=plan, typical=typical)
     _render_token_kind_kpis(active)
     _render_cache_hit_callout(active)
     now_iso = _now_iso(now_utc)
@@ -125,8 +307,8 @@ def _live_panel(offline: bool, tz: str | None = None) -> None:
         active.total_tokens,
         active.cost_usd,
     )
-    _render_spend_trajectory(active, now_iso=now_iso, tz=tz)
-    _render_token_kind_composition(active)
+    _render_spend_trajectory(active, plan=plan, now_iso=now_iso, tz=tz)
+    _render_token_kind_composition(active, plan=plan)
 
 
 # --- refresh indicator ---------------------------------------------------
@@ -156,11 +338,16 @@ def _render_refresh_line(refreshed_at: datetime) -> None:
 # --- window banner -------------------------------------------------------
 
 
-def _render_window_banner(active: BlockEntry, *, tz: str | None) -> None:
-    """Two-line banner under the H1 with the active block's context.
+def _render_window_banner(
+    active: BlockEntry, *, plan: Plan, tz: str | None
+) -> None:
+    """Two-line banner under the H1.
 
-    Line 1: time range + minutes remaining.
-    Line 2: models active in the block.
+    Line 1: plan-aware label + time range + plan-aware reset suffix
+    (see `_banner_label` and `_banner_reset_suffix` for the copy and
+    the no-guessing semantics).
+
+    Line 2: models active in the block. Plan-independent.
 
     Time range renders in the user's display timezone (sidebar's
     detected zone) with underscores stripped from the IANA
@@ -184,11 +371,8 @@ def _render_window_banner(active: BlockEntry, *, tz: str | None) -> None:
     minutes_remaining = (
         active.projection.remaining_minutes if active.projection else None
     )
-    remaining_part = (
-        f" · {minutes_remaining} min remaining"
-        if minutes_remaining is not None
-        else ""
-    )
+    label = _banner_label(plan)
+    suffix = _banner_reset_suffix(plan, minutes_remaining)
 
     models = (
         ", ".join(active.models)
@@ -200,8 +384,8 @@ def _render_window_banner(active: BlockEntry, *, tz: str | None) -> None:
         f"""
         <div class="tokenscope-live-banner">
           <div class="tokenscope-live-banner-row">
-            <strong>Active block</strong>
-            · {start_disp} – {end_disp} {tz_label}{remaining_part}
+            <strong>{label}</strong>
+            · {start_disp} – {end_disp} {tz_label}{suffix}
           </div>
           <div class="tokenscope-live-banner-row tokenscope-live-banner-sub">
             Models in use: {models}
@@ -215,7 +399,9 @@ def _render_window_banner(active: BlockEntry, *, tz: str | None) -> None:
 # --- KPIs ---------------------------------------------------------------
 
 
-def _render_kpis(active: BlockEntry, *, typical: float | None) -> None:
+def _render_kpis(
+    active: BlockEntry, *, plan: Plan, typical: float | None
+) -> None:
     """Four-card KPI row matching the Overview look. Every card has a
     value + a one-line plain-English caption — no formula captions,
     no help icons (the labels are self-explanatory; cache_hit-style
@@ -224,12 +410,17 @@ def _render_kpis(active: BlockEntry, *, typical: float | None) -> None:
     `45 min left` moved OUT of the Projected-total card and into the
     window banner above — minutes remaining is a property of the
     window, not the projected cost.
+
+    The Cost-so-far caption is plan-aware (see `_cost_so_far_caption`).
+    The other three cards' captions are plan-independent (`vs typical`
+    delta semantics, `indicator-weighted`, `at the current rate` all
+    describe the metric mechanics, not the user's billing reality).
     """
     c1, c2, c3, c4 = st.columns(4)
 
     with c1, st.container(border=True):
         st.metric("Cost so far", f"${active.cost_usd:,.2f}")
-        st.caption("this 5-hour block")
+        st.caption(_cost_so_far_caption(plan))
 
     with c2, st.container(border=True):
         if active.burn_rate is not None:
@@ -263,15 +454,49 @@ def _render_kpis(active: BlockEntry, *, typical: float | None) -> None:
             st.caption("no burn rate yet")
 
     with c4, st.container(border=True):
-        if active.projection is not None:
-            st.metric(
-                "Projected total",
-                f"${active.projection.total_cost:,.2f}",
-            )
-            st.caption("at the current rate")
-        else:
-            st.metric("Projected total", "—")
-            st.caption("no projection")
+        _render_projected_total_kpi(active, plan=plan)
+
+
+# --- projected-total KPI (extracted, plan-aware) ------------------------
+
+
+def _render_projected_total_kpi(active: BlockEntry, *, plan: Plan) -> None:
+    """Plan-aware Projected-total KPI card.
+
+    On flat-rate plans (Pro / Max 5× / Max 20×), the dollar
+    projection misrepresents user exposure — the user pays the
+    monthly flat fee, not the API-equivalent projection. Flip the
+    metric headline to the plan fee and surface the API-equivalent
+    figure as the delta. Architecturally identical to the Overview's
+    `_render_window_cost_kpi` flat-rate branch
+    (overview.py:285-296).
+
+    On Enterprise / pay-per-token, the dollar projection IS the
+    user's actual incremental spend; leave the headline unchanged.
+
+    When `active.projection is None`, both plans render the same
+    no-data state ("Projected total: —" + "no projection") — the
+    missing data isn't plan-aware.
+    """
+    if active.projection is None:
+        st.metric("Projected total", "—")
+        st.caption("no projection")
+        return
+
+    api_projection = active.projection.total_cost
+    if plan.is_flat_rate:
+        st.metric(
+            f"Plan cost ({plan.name})",
+            f"${plan.flat_rate_usd_per_month:,.0f}/mo",
+            delta=f"would cost ${api_projection:,.2f} at API rates",
+            # Cost-comparison deltas use neutral gray — see Overview's
+            # `_render_window_cost_kpi` docstring for the rationale
+            # (neither green nor red is honest for a cost delta).
+            delta_color="off",
+        )
+    else:
+        st.metric("Projected total", f"${api_projection:,.2f}")
+    st.caption(_projected_total_caption(plan))
 
 
 # --- spend trajectory chart ---------------------------------------------
@@ -286,30 +511,33 @@ def _now_iso(now_utc: datetime) -> str:
 def _render_spend_trajectory(
     active: BlockEntry,
     *,
+    plan: Plan,
     now_iso: str,
     tz: str | None,
 ) -> None:
     """Cumulative-spend line with dashed projection to window end.
 
+    Section header and body caption are plan-aware (see
+    `_spend_chart_title` and `_spend_chart_caption`). The no-projection
+    fallback caption is also plan-aware (see
+    `_spend_chart_no_projection_caption`).
+
     Two anchor points: (block.start_time, $0) and (now, block.cost_usd),
     plus a dashed projection segment from "now" to the window end.
     The slope of the actual segment IS the average burn rate so far
-    in this block — users see acceleration vs. projection at a
-    glance.
+    in the active window — users see acceleration vs. projection at
+    a glance.
 
     The ``tz`` parameter routes the user's IANA zone through to the
     chart builder so every X-axis tick renders in local clock time
     rather than UTC.
     """
     with st.container(border=True):
-        st.markdown("### Spend in this block")
-        st.caption(
-            "Cumulative spend across the 5-hour block. Solid is "
-            "actual, dotted is projection at the current rate."
-        )
+        st.markdown(_spend_chart_title(plan))
+        st.caption(_spend_chart_caption(plan))
         fig = live_spend_trajectory(active, [], now_iso=now_iso, tz=tz)
         if fig is None:
-            st.caption("No projection available for this block yet.")
+            st.caption(_spend_chart_no_projection_caption(plan))
             return
         st.plotly_chart(
             fig, width="stretch", key="live-spend-trajectory"
@@ -410,13 +638,17 @@ def _render_cache_hit_callout(active: BlockEntry) -> None:
     )
 
 
-def _render_token_kind_composition(active: BlockEntry) -> None:
+def _render_token_kind_composition(active: BlockEntry, *, plan: Plan) -> None:
     """Horizontal stacked bar of the block's aggregate token-kind
     composition + a mini-table with absolute counts, estimated
     cost contribution, and share %.
 
+    Section header / body caption / empty-state fallback are all
+    plan-aware (see `_token_mix_title`, `_token_mix_caption`,
+    `_token_mix_empty_caption`).
+
     Honest answer to the question "what kinds of tokens has this
-    block burned?" given the data ccusage exposes (block-level
+    window burned?" given the data ccusage exposes (block-level
     aggregates only — no intra-block timestamps, no recoverable
     pre-page-load history). The prior `Token throughput` chart was
     structurally impossible from this data; this composition
@@ -427,14 +659,11 @@ def _render_token_kind_composition(active: BlockEntry) -> None:
     moving between Overview and Live reads the same vocabulary.
     """
     with st.container(border=True):
-        st.markdown("### Token mix in this block")
-        st.caption(
-            "Cumulative token mix for the active block so far. "
-            f"Updated every {REFRESH_SECONDS}s."
-        )
+        st.markdown(_token_mix_title(plan))
+        st.caption(_token_mix_caption(plan))
         fig = live_token_kind_composition_bar(active)
         if fig is None:
-            st.caption("Block has no token activity yet.")
+            st.caption(_token_mix_empty_caption(plan))
             return
         st.plotly_chart(
             fig, width="stretch", key="live-token-mix"

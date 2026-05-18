@@ -655,12 +655,18 @@ def test_live_renders_spend_trajectory_chart(
     assert "live-spend-trajectory" in chart_keys
 
 
-def test_live_renders_window_banner_with_models_and_remaining(
+def test_live_renders_window_banner_with_models(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """The window context (start–end clock time, minutes remaining,
-    models in use) lives in a banner under the H1 — not inside a
-    KPI delta pill."""
+    """The window context (start–end clock time, models in use)
+    lives in a banner under the H1 — not inside a KPI delta pill.
+
+    Plan-aware label text (`Quota window` on flat-rate, `Current
+    activity` on Enterprise) and the reset-countdown suffix are
+    pinned by the per-plan tests later in this section. This test
+    locks the structural pieces only: the banner CSS class and the
+    `Models in use` second-line label, both of which are
+    plan-independent."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("live")
     at.run()
@@ -670,7 +676,6 @@ def test_live_renders_window_banner_with_models_and_remaining(
         f"expected the banner HTML in markdown; got: {md!r}"
     )
     assert "Models in use" in md
-    assert "Active block" in md
 
 
 def test_live_does_not_show_minutes_left_in_projected_total_card(
@@ -801,55 +806,6 @@ def test_live_renders_cost_unavailable_caption_when_rates_missing(
     )
 
 
-def test_live_renders_empty_token_mix_caption_when_block_has_no_tokens(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """When the active block has zero tokens (a brand-new block
-    captured immediately after start), the composition bar has
-    nothing to render. `live_token_kind_composition_bar` returns
-    `None` and the UI shows a `Block has no token activity yet.`
-    caption instead of an empty chart frame."""
-    blocks_payload = {
-        "blocks": [
-            {
-                "id": "2026-05-16T13:00:00.000Z",
-                "startTime": "2026-05-16T13:00:00.000Z",
-                "endTime": "2026-05-16T18:00:00.000Z",
-                "actualEndTime": None,
-                "isActive": True,
-                "isGap": False,
-                "entries": 0,
-                "tokenCounts": {
-                    "inputTokens": 0,
-                    "outputTokens": 0,
-                    "cacheCreationInputTokens": 0,
-                    "cacheReadInputTokens": 0,
-                },
-                "totalTokens": 0,
-                "costUSD": 0.0,
-                "models": ["claude-opus-4-7"],
-                "burnRate": None,
-                "projection": None,
-            }
-        ]
-    }
-    mock_ccusage("daily", response=FIXTURES / "daily.json")
-    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
-    mock_ccusage("session", response=FIXTURES / "session.json")
-    mock_ccusage("blocks", response=blocks_payload)
-    mock_ccusage("blocks", "--active", response=blocks_payload)
-    at = _at("live")
-    at.run()
-    _assert_clean(at)
-    captions = "\n".join(
-        getattr(c, "value", "") for c in at.caption
-    ) if hasattr(at, "caption") else ""
-    md = "\n".join(m.value for m in at.markdown) + "\n" + captions
-    assert "Block has no token activity yet" in md, (
-        f"expected empty-block caption; got: {md!r}"
-    )
-
-
 def test_live_cache_hit_ratio_matches_token_counts(
     mock_ccusage, mock_ccusage_version
 ) -> None:
@@ -877,6 +833,935 @@ def test_live_cache_hit_ratio_matches_token_counts(
     )
     assert f"{expected_pct:.1f}%" in md, (
         f"expected cache hit ratio {expected_pct:.1f}% to appear in markdown"
+    )
+
+
+# --- Slice 1 (plan-usage-updates): plan-aware quota-reset banner --------
+#
+# The Live view's banner, page subtitle, and empty-state copy are
+# plan-aware. On flat-rate plans (Pro / Max 5× / Max 20×) the 5-hour
+# block IS the user's quota reset window — we name it explicitly and
+# show the reset countdown. On Enterprise / API plans there's no quota
+# and no reset — we drop the countdown entirely.
+#
+# When `projection.remaining_minutes` is unknown on flat-rate, the
+# banner says "reset time unknown" — the explicit no-guessing sentinel.
+# Never invent a number from a hardcoded 5-hour assumption.
+
+
+def _find_live_banner(at) -> str:
+    """Find the SPECIFIC markdown element that is the Live banner.
+    The `tokenscope-live-banner` substring also appears in the page's
+    injected CSS block as a rule selector, so a naive concat-substring
+    search would match the stylesheet. The banner is uniquely
+    identified by carrying `Models in use:` (its second-line label),
+    which appears nowhere else on the page."""
+    banner = next(
+        (m for m in at.markdown if "Models in use" in m.value),
+        None,
+    )
+    assert banner is not None, "banner element missing — banner failed to render"
+    return banner.value
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_live_banner_shows_quota_reset_countdown_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """On flat-rate plans, the active block IS the user's quota
+    reset window. The banner names it explicitly ("Quota window")
+    and shows the reset countdown ("resets in N min") — never the
+    dishonest "Active block" framing that implied billing semantics
+    on every plan.
+
+    Parametrized over all three flat-rate plans to prove the
+    branching is on `plan.is_flat_rate`, not hardcoded to one
+    specific plan name."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    banner = _find_live_banner(at)
+    assert "Quota window" in banner, (
+        f"`Quota window` label missing on {flat_rate_plan} banner: {banner!r}"
+    )
+    assert "resets in" in banner, (
+        f"reset-countdown suffix missing on {flat_rate_plan} banner: {banner!r}"
+    )
+    # Negative: the dishonest framing must NOT leak through.
+    assert "Active block" not in banner, (
+        f"`Active block` framing leaked on {flat_rate_plan}: {banner!r}"
+    )
+    # Negative: Enterprise framing must NOT show on flat-rate.
+    assert "Current activity" not in banner, (
+        f"Enterprise framing leaked on flat-rate {flat_rate_plan}: {banner!r}"
+    )
+
+
+def test_live_banner_says_reset_time_unknown_when_projection_missing_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When ccusage emits an active block WITHOUT projection data,
+    the flat-rate banner says "reset time unknown" — the explicit
+    no-guessing sentinel — rather than silently dropping the
+    suffix (which would read as "no reset") or fabricating a
+    number from the hardcoded 5-hour assumption."""
+    # Custom payload with NO projection field on the active block.
+    # The pydantic BlockEntry model accepts `projection: Projection | None`.
+    no_projection_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 10,
+                "tokenCounts": {
+                    "inputTokens": 100, "outputTokens": 200,
+                    "cacheCreationInputTokens": 300,
+                    "cacheReadInputTokens": 400,
+                },
+                "totalTokens": 1000,
+                "costUSD": 1.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": {
+                    "tokensPerMinute": 1.0,
+                    "tokensPerMinuteForIndicator": 1.0,
+                    "costPerHour": 2.0,
+                },
+                # `projection: Projection | None` at models.py:128 — the
+                # field is REQUIRED to be present, but its value may be
+                # None (e.g., a brand-new block with no burn rate yet,
+                # or ccusage emitting a degraded block payload).
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=no_projection_payload)
+    mock_ccusage("blocks", "--active", response=no_projection_payload)
+
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    banner = _find_live_banner(at)
+    assert "Quota window" in banner, (
+        f"`Quota window` label missing: {banner!r}"
+    )
+    assert "reset time unknown" in banner, (
+        f"explicit `reset time unknown` sentinel missing: {banner!r}"
+    )
+    # Negative: no fabricated countdown.
+    assert "resets in" not in banner, (
+        f"fabricated `resets in` countdown leaked despite missing "
+        f"projection: {banner!r}"
+    )
+
+
+def test_live_banner_says_current_activity_no_reset_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """On Enterprise (pay-per-token), there is NO quota and NO reset.
+    The banner reads "Current activity" with the time range only —
+    no countdown, no "min remaining", no "resets in", no "Quota
+    window" framing. Enterprise is the default plan so no switch
+    needed."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+
+    banner = _find_live_banner(at)
+    assert "Current activity" in banner, (
+        f"`Current activity` label missing on Enterprise: {banner!r}"
+    )
+    # Negatives: no quota / reset / billing-block framing.
+    assert "Quota window" not in banner, (
+        f"flat-rate `Quota window` leaked on Enterprise: {banner!r}"
+    )
+    assert "resets in" not in banner, (
+        f"flat-rate `resets in` leaked on Enterprise: {banner!r}"
+    )
+    assert "min remaining" not in banner, (
+        f"old `min remaining` framing still on Enterprise: {banner!r}"
+    )
+    assert "Active block" not in banner, (
+        f"old `Active block` framing still on Enterprise: {banner!r}"
+    )
+    assert "reset time unknown" not in banner, (
+        f"unknown-reset sentinel leaked on Enterprise (no reset exists "
+        f"to be unknown about): {banner!r}"
+    )
+
+
+def test_live_banner_omits_reset_sentinel_on_enterprise_when_projection_missing(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Enterprise has no reset, period — so a missing projection
+    doesn't produce a "reset time unknown" sentinel on Enterprise.
+    The banner just renders the time range with no suffix."""
+    no_projection_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 10,
+                "tokenCounts": {
+                    "inputTokens": 100, "outputTokens": 200,
+                    "cacheCreationInputTokens": 300,
+                    "cacheReadInputTokens": 400,
+                },
+                "totalTokens": 1000,
+                "costUSD": 1.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": {
+                    "tokensPerMinute": 1.0,
+                    "tokensPerMinuteForIndicator": 1.0,
+                    "costPerHour": 2.0,
+                },
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=no_projection_payload)
+    mock_ccusage("blocks", "--active", response=no_projection_payload)
+
+    at = _at("live")  # default Enterprise plan
+    at.run()
+    _assert_clean(at)
+
+    banner = _find_live_banner(at)
+    assert "Current activity" in banner
+    # No suffix of any kind — no reset language, no unknown sentinel.
+    assert "reset time unknown" not in banner, (
+        f"unknown-reset sentinel leaked on Enterprise: {banner!r}"
+    )
+    assert "resets in" not in banner
+    assert "min remaining" not in banner
+
+
+def test_live_page_caption_mentions_quota_window_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Page subtitle under the `# Live` H1 is plan-aware. Flat-rate
+    plans see an explanation that costs are API-rate estimates and
+    the actual bill is the monthly fee."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "quota window" in captions.lower(), (
+        f"flat-rate page caption missing `quota window`: {captions!r}"
+    )
+    assert "monthly fee" in captions, (
+        f"flat-rate page caption missing `monthly fee` framing: {captions!r}"
+    )
+    # Old framing must be gone.
+    assert "5-hour billing window" not in captions, (
+        f"old `5-hour billing window` framing leaked: {captions!r}"
+    )
+
+
+def test_live_page_caption_mentions_actual_billing_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Page subtitle on Enterprise says costs reflect ACTUAL API
+    billing — not "estimates" or "quota window" language."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "actual API billing" in captions, (
+        f"Enterprise page caption missing `actual API billing`: {captions!r}"
+    )
+    assert "quota" not in captions.lower(), (
+        f"flat-rate `quota` framing leaked on Enterprise caption: {captions!r}"
+    )
+
+
+def test_live_empty_state_mentions_quota_window_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When there is no active block, the empty-state info banner
+    on flat-rate plans names the quota concept explicitly — not
+    "billing block" (which was inaccurate on every plan)."""
+    # Default empty ccusage response → no active block.
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    info_text = "\n".join(i.value for i in at.info)
+    assert "quota window" in info_text.lower(), (
+        f"flat-rate empty-state missing `quota window`: {info_text!r}"
+    )
+    assert "billing block" not in info_text, (
+        f"old `billing block` framing leaked on flat-rate empty state: "
+        f"{info_text!r}"
+    )
+
+
+def test_live_empty_state_mentions_session_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Enterprise empty state describes a Claude Code session, not
+    a billing/quota concept — because neither applies on API
+    billing."""
+    # Default empty ccusage response + default Enterprise plan.
+    at = _at("live")
+    at.run()
+    _assert_clean(at)
+
+    info_text = "\n".join(i.value for i in at.info)
+    assert "session" in info_text.lower(), (
+        f"Enterprise empty-state missing `session`: {info_text!r}"
+    )
+    assert "quota" not in info_text.lower(), (
+        f"flat-rate `quota` framing leaked on Enterprise empty state: "
+        f"{info_text!r}"
+    )
+    assert "billing block" not in info_text, (
+        f"old `billing block` framing still present: {info_text!r}"
+    )
+
+
+# --- Slice 2 (plan-usage-updates): plan-aware KPI / chart captions ------
+#
+# Same DRY/SOLID pattern as Slice 1's banner work: every plan-aware
+# caption / chart title / fallback string lives in exactly one helper
+# in `live.py`. Tests assert on the user-facing semantic substrings
+# (the contract) — they don't import the helpers (that would defeat
+# the point of testing the contract).
+#
+# Each parametrized test covers BOTH the flat-rate AND Enterprise
+# branches in one shot, with negative assertions catching cross-plan
+# leaks and old framing regressions.
+#
+# Plan-set: Enterprise (the default + boundary value of `is_flat_rate
+# == False`) and Pro (the boundary value of `is_flat_rate == True`).
+# Slice 1's parametrized banner test already proved the flat-rate
+# branch is shared across Pro / Max 5× / Max 20×; no need to re-prove
+# in Slice 2.
+
+
+_LIVE_PLAN_NOUN_CASES = [
+    pytest.param("Enterprise", "session", "quota window", id="enterprise"),
+    pytest.param("Pro", "quota window", "session", id="flat-rate-pro"),
+]
+
+
+def _render_live_at_plan(mock_ccusage, plan_name: str):
+    """Render the Live view at a given plan with the default fixture
+    set. Switches the sidebar selectbox on non-default plans and
+    re-runs to pick up the change.
+
+    Consolidates the boilerplate so individual per-surface tests
+    just hand the resulting `AppTest` to their assertions."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    if plan_name != "Enterprise":
+        plan_select = next(
+            s for s in at.sidebar.selectbox if s.label == "Subscription"
+        )
+        plan_select.set_value(plan_name)
+        at.run()
+    _assert_clean(at)
+    return at
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_cost_so_far_caption_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """The Cost-so-far KPI caption names the user's active window
+    using the plan-aware noun ("quota window" / "session"), with a
+    plan-aware billing-reality suffix ("estimated at API rates" on
+    flat-rate; "actual cost" on Enterprise).
+
+    Old "this 5-hour block" framing must be gone on every plan."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    captions = " ".join(c.value for c in at.caption)
+    assert f"this {expected_noun}" in captions, (
+        f"Cost-so-far caption on {plan_name} missing `this "
+        f"{expected_noun}`; captions: {captions!r}"
+    )
+    assert f"this {forbidden_noun}" not in captions, (
+        f"`this {forbidden_noun}` leaked into {plan_name} captions: "
+        f"{captions!r}"
+    )
+    assert "5-hour block" not in captions, (
+        f"old `5-hour block` framing leaked on {plan_name}: {captions!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_substr,forbidden_substr",
+    [
+        pytest.param(
+            "Enterprise", "actual cost", "estimated at API rates",
+            id="enterprise",
+        ),
+        pytest.param(
+            "Pro", "estimated at API rates", "actual cost",
+            id="flat-rate-pro",
+        ),
+    ],
+)
+def test_live_cost_so_far_caption_uses_plan_aware_billing_suffix(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_substr, forbidden_substr,
+) -> None:
+    """The Cost-so-far caption's suffix names the user's billing
+    reality — "actual cost" on Enterprise (the dollar IS what they
+    pay), "estimated at API rates" on flat-rate (the dollar is API-
+    equivalent; the actual bill is the monthly fee)."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    captions = " ".join(c.value for c in at.caption)
+    assert expected_substr in captions, (
+        f"Cost-so-far caption on {plan_name} missing `{expected_substr}`; "
+        f"captions: {captions!r}"
+    )
+    assert forbidden_substr not in captions, (
+        f"`{forbidden_substr}` leaked into {plan_name} captions: "
+        f"{captions!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_spend_chart_title_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """The spend-trajectory card's section header ("### Spend in
+    this X") names the user's active window using the plan-aware
+    noun. Old "in this block" framing must be gone."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    md = "\n".join(m.value for m in at.markdown)
+    assert f"Spend in this {expected_noun}" in md, (
+        f"spend-chart title on {plan_name} missing `Spend in this "
+        f"{expected_noun}`"
+    )
+    assert f"Spend in this {forbidden_noun}" not in md, (
+        f"`Spend in this {forbidden_noun}` leaked on {plan_name}"
+    )
+    assert "Spend in this block" not in md, (
+        f"old `Spend in this block` framing leaked on {plan_name}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_substr,forbidden_substr",
+    [
+        pytest.param(
+            "Enterprise", "actual spend", "API-equivalent",
+            id="enterprise",
+        ),
+        pytest.param(
+            "Pro", "API-equivalent", "actual spend",
+            id="flat-rate-pro",
+        ),
+    ],
+)
+def test_live_spend_chart_caption_explains_plan_aware_billing(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_substr, forbidden_substr,
+) -> None:
+    """The spend-trajectory chart's body caption explains the
+    billing reality — Enterprise sees "actual spend"; flat-rate sees
+    "API-equivalent spend" with an explicit note about the flat
+    monthly fee decoupling from the projection."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    captions = " ".join(c.value for c in at.caption)
+    assert expected_substr in captions, (
+        f"spend-chart caption on {plan_name} missing "
+        f"`{expected_substr}`; captions: {captions!r}"
+    )
+    assert forbidden_substr not in captions, (
+        f"`{forbidden_substr}` leaked into {plan_name} spend-chart "
+        f"caption: {captions!r}"
+    )
+    # Flat-rate-specific: the decoupling explanation must appear.
+    if plan_name == "Pro":
+        assert "monthly fee" in captions, (
+            f"flat-rate spend-chart caption missing `monthly fee` "
+            f"decoupling explanation: {captions!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_spend_chart_no_projection_fallback_uses_plan_aware_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """When the active block has no projection (brand-new block, or
+    ccusage emits a degraded payload), the spend chart renders a
+    fallback caption. The fallback names the active window using
+    the plan-aware noun — never "this block"."""
+    no_projection_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 10,
+                "tokenCounts": {
+                    "inputTokens": 100, "outputTokens": 200,
+                    "cacheCreationInputTokens": 300,
+                    "cacheReadInputTokens": 400,
+                },
+                "totalTokens": 1000,
+                "costUSD": 1.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": {
+                    "tokensPerMinute": 1.0,
+                    "tokensPerMinuteForIndicator": 1.0,
+                    "costPerHour": 2.0,
+                },
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=no_projection_payload)
+    mock_ccusage("blocks", "--active", response=no_projection_payload)
+
+    at = _at("live")
+    at.run()
+    if plan_name != "Enterprise":
+        plan_select = next(
+            s for s in at.sidebar.selectbox if s.label == "Subscription"
+        )
+        plan_select.set_value(plan_name)
+        at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert f"this {expected_noun} yet" in captions, (
+        f"no-projection fallback on {plan_name} missing `this "
+        f"{expected_noun} yet`; captions: {captions!r}"
+    )
+    assert f"this {forbidden_noun} yet" not in captions
+    assert "this block yet" not in captions, (
+        f"old `this block yet` framing leaked on {plan_name}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_token_mix_title_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """The token-mix composition card's section header ("### Token
+    mix in this X") names the active window using the plan-aware
+    noun."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    md = "\n".join(m.value for m in at.markdown)
+    assert f"Token mix in this {expected_noun}" in md, (
+        f"token-mix title on {plan_name} missing `Token mix in this "
+        f"{expected_noun}`"
+    )
+    assert f"Token mix in this {forbidden_noun}" not in md
+    assert "Token mix in this block" not in md, (
+        f"old `Token mix in this block` framing leaked on {plan_name}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_token_mix_caption_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """The token-mix composition card's body caption names the
+    active window using the plan-aware noun."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    captions = " ".join(c.value for c in at.caption)
+    assert f"your current {expected_noun}" in captions, (
+        f"token-mix caption on {plan_name} missing `your current "
+        f"{expected_noun}`; captions: {captions!r}"
+    )
+    assert f"your current {forbidden_noun}" not in captions
+    # Old framing must be gone.
+    assert "active block so far" not in captions, (
+        f"old `active block so far` framing leaked on {plan_name}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_token_mix_empty_caption_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """When the active block has zero tokens (brand-new block
+    captured immediately after start), the token-mix card falls
+    back to a "no activity yet" caption that names the active
+    window using the plan-aware noun.
+
+    Replaces the prior `test_live_renders_empty_token_mix_caption_when_block_has_no_tokens`
+    test which locked the old `Block has no token activity yet`
+    framing; this parametrized version pins both the code path
+    (empty-block fallback fires) AND the plan-aware copy."""
+    empty_tokens_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 0,
+                "tokenCounts": {
+                    "inputTokens": 0, "outputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                    "cacheReadInputTokens": 0,
+                },
+                "totalTokens": 0,
+                "costUSD": 0.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": None,
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=empty_tokens_payload)
+    mock_ccusage("blocks", "--active", response=empty_tokens_payload)
+
+    at = _at("live")
+    at.run()
+    if plan_name != "Enterprise":
+        plan_select = next(
+            s for s in at.sidebar.selectbox if s.label == "Subscription"
+        )
+        plan_select.set_value(plan_name)
+        at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert f"This {expected_noun} has no token activity yet" in captions, (
+        f"empty-token-mix fallback on {plan_name} missing expected "
+        f"copy; captions: {captions!r}"
+    )
+    assert f"This {forbidden_noun} has no token activity yet" not in captions
+    assert "Block has no token activity yet" not in captions, (
+        f"old `Block has no token activity yet` framing leaked on "
+        f"{plan_name}: {captions!r}"
+    )
+
+
+# --- Slice 3 (plan-usage-updates): plan-aware Projected-total KPI -------
+#
+# On flat-rate plans (Pro / Max 5× / Max 20×) the previous
+# Projected-total card showed a raw dollar projection (e.g. $42.00)
+# regardless of plan — misrepresenting user exposure for the ~$20/mo
+# Pro user who will NOT pay $42 no matter what the projection says.
+#
+# Slice 3 flips the card on flat-rate plans: headline becomes the
+# plan fee ("$20/mo plan cost"), API-equivalent figure surfaces as
+# the delta ("would cost $42.00 at API rates"). Architecturally
+# identical to the Overview's existing _render_window_cost_kpi
+# pattern (overview.py:285-296). Caption names the API-equivalent
+# semantics + flat-fee decoupling.
+#
+# Enterprise (pay-per-token) is unchanged — the dollar projection
+# IS the user's actual incremental spend.
+#
+# The fee numbers come from `plans.get_plan(name).flat_rate_usd_per_month`
+# in tests — no hardcoded fee literals; a plan-fee change in plans.py
+# propagates to tests automatically.
+
+
+def test_live_projected_total_kpi_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """On Enterprise / pay-per-token, the Projected-total card keeps
+    its `Projected total` label and dollar value — the user IS
+    paying per token, so the API-equivalent figure IS their actual
+    projected spend. No `Plan cost (...)` headline; no `at API
+    rates` delta."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")  # default Enterprise plan
+    at.run()
+    _assert_clean(at)
+
+    projected = next(
+        (m for m in at.metric if m.label == "Projected total"),
+        None,
+    )
+    assert projected is not None, (
+        f"expected `Projected total` label on Enterprise; got labels: "
+        f"{[m.label for m in at.metric]!r}"
+    )
+    assert projected.value.startswith("$"), (
+        f"Enterprise Projected-total value should start with `$`; "
+        f"got {projected.value!r}"
+    )
+
+    # No `Plan cost (...)` metric must exist on Enterprise.
+    plan_cost_metric = next(
+        (m for m in at.metric if m.label and m.label.startswith("Plan cost")),
+        None,
+    )
+    assert plan_cost_metric is None, (
+        f"unexpected `Plan cost` headline on Enterprise: "
+        f"{plan_cost_metric.label!r}"
+    )
+
+    # No `at API rates` delta on Enterprise.
+    delta = getattr(projected, "delta", None) or ""
+    assert "at API rates" not in delta, (
+        f"`at API rates` delta leaked on Enterprise: {delta!r}"
+    )
+
+
+@pytest.mark.parametrize("plan_name", ["Pro", "Max 5×", "Max 20×"])
+def test_live_projected_total_kpi_flips_to_plan_fee_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, plan_name
+) -> None:
+    """On flat-rate plans, the Projected-total card flips:
+      * headline label → `Plan cost ({plan_name})`,
+      * headline value → `${fee}/mo` (the plan's monthly flat fee),
+      * delta          → `would cost $X.XX at API rates` (the API-
+                          equivalent projection).
+
+    Parametrized over all three flat-rate plans to prove the
+    branching is on `plan.is_flat_rate`, not hardcoded to one name.
+
+    Fee numbers come from `plans.get_plan(plan_name).flat_rate_usd_per_month`
+    — a fee change in plans.py propagates here automatically; no
+    literal fee number in this test."""
+    from tokenscope.plans import get_plan
+
+    expected_fee = get_plan(plan_name).flat_rate_usd_per_month
+    assert expected_fee is not None, (
+        f"test precondition: {plan_name} should have a flat fee"
+    )
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(plan_name)
+    at.run()
+    _assert_clean(at)
+
+    plan_metric = next(
+        (
+            m for m in at.metric
+            if m.label and m.label.startswith(f"Plan cost ({plan_name})")
+        ),
+        None,
+    )
+    assert plan_metric is not None, (
+        f"expected metric labeled `Plan cost ({plan_name})`; got labels: "
+        f"{[m.label for m in at.metric]!r}"
+    )
+    # Exact value contract — `${fee:,.0f}/mo` matches the production
+    # format string in `_render_projected_total_kpi`. A format change
+    # here is a user-facing contract change and should fail loudly.
+    assert plan_metric.value == f"${expected_fee:,.0f}/mo", (
+        f"unexpected Plan-cost value on {plan_name}: {plan_metric.value!r}"
+    )
+
+    # Delta contains the API-equivalent figure with the "at API rates"
+    # framing — exact dollar number isn't asserted (it depends on the
+    # fixture's burn rate; what matters is the framing).
+    assert plan_metric.delta is not None, (
+        f"missing API-rates delta on {plan_name}"
+    )
+    assert "would cost" in plan_metric.delta, (
+        f"expected `would cost` in delta on {plan_name}; got: "
+        f"{plan_metric.delta!r}"
+    )
+    assert "at API rates" in plan_metric.delta, (
+        f"expected `at API rates` in delta on {plan_name}; got: "
+        f"{plan_metric.delta!r}"
+    )
+
+    # Old "Projected total" headline must NOT exist on flat-rate —
+    # it's been replaced by the Plan-cost headline.
+    projected_metric = next(
+        (m for m in at.metric if m.label == "Projected total"),
+        None,
+    )
+    assert projected_metric is None, (
+        f"old `Projected total` headline leaked on {plan_name}"
+    )
+
+
+def test_live_projected_total_caption_explains_flat_rate_decoupling(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """On flat-rate, the Projected-total caption names BOTH the
+    API-equivalent semantics ("API-equivalent projection for this
+    {window}") AND the flat-fee decoupling ("monthly fee is
+    fixed"). User must understand the dollar projection isn't their
+    bill."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent projection" in captions, (
+        f"flat-rate Projected-total caption missing `API-equivalent "
+        f"projection`; captions: {captions!r}"
+    )
+    assert "monthly fee is fixed" in captions, (
+        f"flat-rate Projected-total caption missing the flat-fee "
+        f"decoupling note; captions: {captions!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name",
+    [
+        pytest.param("Enterprise", id="enterprise"),
+        pytest.param("Pro", id="flat-rate-pro"),
+    ],
+)
+def test_live_projected_total_no_projection_state_preserved_on_both_plans(
+    mock_ccusage, mock_ccusage_version, plan_name
+) -> None:
+    """When the active block has no projection data, both plans
+    render the same no-data state — `Projected total` label, `—`
+    value, `no projection` caption. The missing-data state isn't
+    plan-aware (we have no projection number to reframe on either
+    plan). Critically: the Plan-cost headline must NOT leak through
+    in the no-projection branch on flat-rate."""
+    no_projection_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 10,
+                "tokenCounts": {
+                    "inputTokens": 100, "outputTokens": 200,
+                    "cacheCreationInputTokens": 300,
+                    "cacheReadInputTokens": 400,
+                },
+                "totalTokens": 1000,
+                "costUSD": 1.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": {
+                    "tokensPerMinute": 1.0,
+                    "tokensPerMinuteForIndicator": 1.0,
+                    "costPerHour": 2.0,
+                },
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=no_projection_payload)
+    mock_ccusage("blocks", "--active", response=no_projection_payload)
+
+    at = _at("live")
+    at.run()
+    if plan_name != "Enterprise":
+        plan_select = next(
+            s for s in at.sidebar.selectbox if s.label == "Subscription"
+        )
+        plan_select.set_value(plan_name)
+        at.run()
+    _assert_clean(at)
+
+    projected = next(
+        (m for m in at.metric if m.label == "Projected total"),
+        None,
+    )
+    assert projected is not None, (
+        f"missing `Projected total` label on {plan_name} no-projection "
+        f"state; got labels: {[m.label for m in at.metric]!r}"
+    )
+    assert projected.value == "—", (
+        f"unexpected no-projection value on {plan_name}: {projected.value!r}"
+    )
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "no projection" in captions, (
+        f"`no projection` caption missing on {plan_name}: {captions!r}"
+    )
+
+    # No Plan-cost headline leak on flat-rate when projection is
+    # missing — the no-data state is plan-independent.
+    plan_cost_metric = next(
+        (m for m in at.metric if m.label and m.label.startswith("Plan cost")),
+        None,
+    )
+    assert plan_cost_metric is None, (
+        f"`Plan cost` headline leaked on {plan_name} no-projection "
+        f"state — the no-data branch should be plan-independent"
     )
 
 
@@ -1188,6 +2073,690 @@ def test_cache_renders(mock_ccusage, mock_ccusage_version) -> None:
     assert "Cache hit ratio" in md
     labels = {m.label for m in at.metric}
     assert "Effective $ / 1M tokens" in labels
+
+
+# --- Cache Slice 1 (plan-usage-updates): plan-aware savings hero + subtitle ---
+#
+# Caching delivers different value on different plans. On Enterprise
+# (pay-per-token) the savings ARE real dollars; on flat-rate (Pro /
+# Max 5× / Max 20×) the dollar figure is API-equivalent VALUE — the
+# user pays the monthly fee regardless. The Cache view's page
+# subtitle, savings-hero label, and savings-hero context branch on
+# `plan.is_flat_rate` to name the right reality per plan.
+#
+# Tests parametrized over all three flat-rate plans where copy is
+# uniform across them (hero label, page subtitle) — proves no
+# `plan.name`-based hardcoding. Tests use parametrize(Enterprise +
+# Pro) for surfaces where the assertions are symmetric.
+
+
+def test_cache_page_subtitle_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Default Enterprise plan keeps the current `How much caching
+    is saving you` framing — pay-per-token users genuinely ARE
+    saving money."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "saving you, and where it's working" in captions, (
+        f"Enterprise page subtitle missing expected copy: {captions!r}"
+    )
+    # Flat-rate framing must NOT leak on Enterprise.
+    assert "API-equivalent" not in captions, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise "
+        f"subtitle: {captions!r}"
+    )
+    assert "plan covers" not in captions
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_cache_page_subtitle_explains_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """Flat-rate page subtitle names the API-equivalent framing AND
+    the plan-covers-actual-billing decoupling. Parametrized over all
+    three flat-rate plans to prove branching is on
+    `plan.is_flat_rate`, not hardcoded to a specific plan name."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent" in captions, (
+        f"flat-rate page subtitle on {flat_rate_plan} missing "
+        f"`API-equivalent`: {captions!r}"
+    )
+    assert "plan covers" in captions, (
+        f"flat-rate page subtitle on {flat_rate_plan} missing "
+        f"`plan covers` decoupling: {captions!r}"
+    )
+    # Enterprise framing must NOT leak.
+    assert "saving you, and where it's working" not in captions, (
+        f"Enterprise framing leaked on {flat_rate_plan} subtitle"
+    )
+
+
+def test_cache_savings_hero_label_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Default Enterprise plan keeps the `Estimated savings from
+    caching` hero label — the savings are real money saved."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Estimated savings from caching" in md, (
+        f"Enterprise hero missing `Estimated savings from caching` label"
+    )
+    assert "API-equivalent savings" not in md, (
+        f"flat-rate `API-equivalent savings` framing leaked on "
+        f"Enterprise hero"
+    )
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_cache_savings_hero_label_says_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """Flat-rate hero label is `API-equivalent savings from
+    caching` — the dollar isn't money out of pocket; it's the
+    API-equivalent value caching adds to throughput. Parametrized
+    over all three flat-rate plans for plan-name hardcoding
+    protection."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "API-equivalent savings from caching" in md, (
+        f"flat-rate hero on {flat_rate_plan} missing "
+        f"`API-equivalent savings from caching` label"
+    )
+    # Enterprise label is `Estimated savings from caching`. That
+    # exact phrase is NOT a substring of `API-equivalent savings
+    # from caching`, so this assertion catches an accidental
+    # double-render or leak.
+    assert "Estimated savings from caching" not in md, (
+        f"Enterprise label leaked on {flat_rate_plan} hero"
+    )
+
+
+def test_cache_savings_hero_context_explains_actual_billing_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When LiteLLM rates ARE available, Enterprise hero context
+    explains real billing semantics — "you actually paid $X" — and
+    must not pick up the flat-rate plan-fee framing."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "you actually paid" in md, (
+        f"Enterprise hero context missing `you actually paid`"
+    )
+    assert "monthly fee is fixed" not in md, (
+        f"flat-rate `monthly fee is fixed` leaked on Enterprise hero"
+    )
+    assert "API-equivalent" not in md, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise hero"
+    )
+
+
+def test_cache_savings_hero_context_explains_plan_decoupling_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """When LiteLLM rates ARE available, flat-rate hero context
+    explains BOTH the API-equivalent framing AND the plan-fee
+    decoupling — the user must understand the dollar figure isn't
+    money out of pocket."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "API-equivalent" in md, (
+        f"flat-rate hero context missing `API-equivalent` framing"
+    )
+    assert "monthly fee is fixed" in md, (
+        f"flat-rate hero context missing `monthly fee is fixed` "
+        f"decoupling note"
+    )
+    # Enterprise framing must NOT leak.
+    assert "you actually paid" not in md, (
+        f"Enterprise `you actually paid` framing leaked on flat-rate"
+    )
+
+
+def test_cache_savings_hero_no_rates_context_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When LiteLLM rates aren't reachable on Enterprise, the hero
+    context keeps the current wording — the LiteLLM-unreachable
+    notice plus the reconnect/refresh suggestion. No plan-fee
+    framing leaks in."""
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model", lambda _name: None
+    )
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Pricing rates from LiteLLM aren't reachable" in md, (
+        f"Enterprise no-rates context missing LiteLLM unreachable note"
+    )
+    assert "the savings calculation can't run" in md, (
+        f"Enterprise no-rates context missing `savings calculation` "
+        f"explanation"
+    )
+    assert "monthly fee is fixed" not in md, (
+        f"flat-rate framing leaked on Enterprise no-rates context"
+    )
+    assert "monthly fee is unchanged" not in md, (
+        f"flat-rate framing leaked on Enterprise no-rates context"
+    )
+    assert "API-equivalent" not in md, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise "
+        f"no-rates context"
+    )
+
+
+def test_cache_savings_hero_no_rates_context_mentions_plan_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When LiteLLM rates aren't reachable on flat-rate, the hero
+    context explains BOTH that the API-equivalent calculation can't
+    run AND that the user's plan fee is unchanged — the pricing
+    outage doesn't cost them money."""
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model", lambda _name: None
+    )
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Pricing rates from LiteLLM aren't reachable" in md, (
+        f"flat-rate no-rates context missing LiteLLM unreachable note"
+    )
+    assert "API-equivalent" in md, (
+        f"flat-rate no-rates context missing `API-equivalent` framing"
+    )
+    assert "monthly fee is unchanged" in md, (
+        f"flat-rate no-rates context missing plan-fee unchanged note"
+    )
+
+
+# --- Cache Slice 2 (plan-usage-updates): plan-aware Effective $/MTok + Daily savings ---
+#
+# The Effective $/MTok KPI and the Daily savings chart each carry
+# dollar-framed copy that misrepresents flat-rate users' exposure
+# (they pay a fixed monthly fee, not the API-equivalent rate). This
+# slice extends the plan-aware framing through both surfaces.
+#
+# Plan-independent surfaces explicitly NOT changed by this slice:
+#   * Cache hit ratio KPI + sparkline (raw fact)
+#   * Cache reads / writes count KPIs (raw facts)
+#   * Reads-vs-writes chart (raw counts)
+#   * Daily-savings `Savings unavailable` no-rates fallback (about
+#     LiteLLM reachability, not billing — same on both plans).
+
+
+def test_cache_effective_rate_label_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Default Enterprise plan keeps `Effective $ / 1M tokens` —
+    pay-per-token users genuinely have a per-MTok effective rate."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    labels = {m.label for m in at.metric}
+    assert "Effective $ / 1M tokens" in labels, (
+        f"Enterprise Effective-rate label missing; labels: {labels!r}"
+    )
+    assert "API-equivalent $ / 1M tokens" not in labels, (
+        f"flat-rate label leaked on Enterprise: {labels!r}"
+    )
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_cache_effective_rate_label_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """Flat-rate Effective-rate label is `API-equivalent $ / 1M
+    tokens` — the rate isn't what the user actually pays per
+    MTok (they pay the fixed monthly fee). Parametrized over all
+    three flat-rate plans for plan-name hardcoding protection."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    labels = {m.label for m in at.metric}
+    assert "API-equivalent $ / 1M tokens" in labels, (
+        f"flat-rate Effective-rate label missing on {flat_rate_plan}; "
+        f"labels: {labels!r}"
+    )
+    assert "Effective $ / 1M tokens" not in labels, (
+        f"Enterprise label leaked on {flat_rate_plan}: {labels!r}"
+    )
+
+
+def test_cache_effective_rate_caption_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Effective-rate caption on Enterprise keeps the current
+    `total cost ÷ total tokens` framing."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "total cost ÷ total tokens" in captions, (
+        f"Enterprise Effective-rate caption missing expected copy: "
+        f"{captions!r}"
+    )
+    assert "API-equivalent cost ÷ total tokens" not in captions
+
+
+def test_cache_effective_rate_caption_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Effective-rate caption on flat-rate names the API-equivalent
+    framing — `API-equivalent cost ÷ total tokens`."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent cost ÷ total tokens" in captions, (
+        f"flat-rate Effective-rate caption missing expected copy: "
+        f"{captions!r}"
+    )
+
+
+def test_cache_effective_rate_help_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Effective-rate help-icon tooltip on Enterprise keeps the
+    current published-rate comparison framing without the
+    plan-fee note."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    effective = next(
+        (m for m in at.metric if m.label == "Effective $ / 1M tokens"),
+        None,
+    )
+    assert effective is not None
+    help_text = effective.help or ""
+    assert "Blended cost per 1M tokens" in help_text, (
+        f"Enterprise help missing `Blended cost per 1M tokens`: "
+        f"{help_text!r}"
+    )
+    assert "monthly fee is fixed" not in help_text, (
+        f"flat-rate framing leaked on Enterprise help: {help_text!r}"
+    )
+    assert "API-equivalent" not in help_text, (
+        f"flat-rate framing leaked on Enterprise help: {help_text!r}"
+    )
+
+
+def test_cache_effective_rate_help_mentions_plan_fee_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Effective-rate help on flat-rate names the API-equivalent
+    framing AND the plan-fee decoupling — the user must understand
+    the rate isn't their actual cost per MTok."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    effective = next(
+        (m for m in at.metric if m.label == "API-equivalent $ / 1M tokens"),
+        None,
+    )
+    assert effective is not None
+    help_text = effective.help or ""
+    assert "API-equivalent" in help_text, (
+        f"flat-rate help missing `API-equivalent` framing: {help_text!r}"
+    )
+    assert "monthly fee is fixed" in help_text, (
+        f"flat-rate help missing plan-fee decoupling note: {help_text!r}"
+    )
+
+
+def test_cache_daily_savings_section_header_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Default Enterprise plan keeps `Daily savings` as the
+    daily-savings section header — the savings are real money."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "### Daily savings" in md, (
+        f"Enterprise daily-savings section header missing"
+    )
+    assert "Daily API-equivalent savings" not in md, (
+        f"flat-rate framing leaked on Enterprise daily-savings header"
+    )
+
+
+def test_cache_daily_savings_section_header_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Flat-rate daily-savings section header is `Daily
+    API-equivalent savings` — the daily figures aren't money out
+    of pocket."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "### Daily API-equivalent savings" in md, (
+        f"flat-rate daily-savings header missing API-equivalent framing"
+    )
+    # Plain `Daily savings` (no qualifier) must NOT appear as a
+    # heading — that's the Enterprise framing.
+    assert "### Daily savings\n" not in md and "### Daily savings " not in md, (
+        f"Enterprise daily-savings header leaked on flat-rate"
+    )
+
+
+def test_cache_daily_savings_caption_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Daily-savings caption on Enterprise keeps the current
+    `Estimated $ saved each day` framing without the plan-fee
+    note."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "Estimated $ saved each day" in captions
+    assert "monthly fee is fixed" not in captions, (
+        f"flat-rate plan-fee note leaked on Enterprise daily-savings "
+        f"caption"
+    )
+    assert "API-equivalent" not in captions, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise "
+        f"daily-savings caption (note: this assertion validates the "
+        f"daily-savings caption specifically — `API-equivalent` may "
+        f"appear in other Enterprise-default captions if Slice 2 "
+        f"copy bleeds)"
+    )
+
+
+def test_cache_daily_savings_caption_explains_plan_decoupling_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Daily-savings caption on flat-rate names BOTH the
+    API-equivalent framing AND the plan-fee decoupling."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent" in captions, (
+        f"flat-rate daily-savings caption missing `API-equivalent`"
+    )
+    assert "monthly fee is fixed" in captions, (
+        f"flat-rate daily-savings caption missing plan-fee decoupling"
+    )
+
+
+def test_cache_daily_savings_no_rates_fallback_present_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When LiteLLM rates aren't reachable, the daily-savings card
+    falls back to `Savings unavailable` on BOTH plans — the no-rates
+    state is about API reachability, not billing semantics, so the
+    fallback message is plan-independent. The existing
+    `test_cache_renders_savings_unavailable_fallback_when_no_rates`
+    pins this on Enterprise; this test pins it on flat-rate to
+    catch a regression where Slice 2's plan plumbing accidentally
+    suppressed or altered the fallback."""
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model", lambda _name: None
+    )
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    captions = " ".join(c.value for c in at.caption)
+    combined = md + "\n" + captions
+    assert "Savings unavailable" in combined, (
+        f"flat-rate daily-savings no-rates fallback missing"
+    )
+
+
+# --- Cache Slice 3 (plan-usage-updates): plan-aware per-model section ---
+#
+# The per-model cache performance section's body caption and the
+# table's `Savings` column header are the last dollar-framed
+# surfaces on the Cache view. Section caption gets plan-aware
+# framing; column header becomes `API-equivalent savings` on
+# flat-rate.
+#
+# The other table columns (Model / Cache hit ratio / Reads /
+# Writes) are plan-independent — they stay unchanged.
+
+
+def _find_per_model_dataframe(at):
+    """Locate the per-model table by its plan-independent first
+    four columns (Model / Cache hit ratio / Reads / Writes). The
+    fifth column's header is plan-aware (Slice 3), so we can't use
+    a full column-list match like the existing
+    `test_cache_per_model_table_rows_match_analytics_output` does.
+
+    Returns the pandas DataFrame or None."""
+    for df_element in at.dataframe:
+        df = df_element.value
+        cols = list(df.columns)
+        if len(cols) >= 4 and cols[:4] == [
+            "Model", "Cache hit ratio", "Reads", "Writes",
+        ]:
+            return df
+    return None
+
+
+def test_cache_per_model_caption_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Per-model section caption on default Enterprise plan keeps
+    the current `models without resolved pricing show savings as
+    "—"` framing without the plan-fee note."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "Cache footprint by model" in captions, (
+        f"per-model section caption missing on Enterprise"
+    )
+    assert "show savings as `—`" in captions, (
+        f"Enterprise per-model caption missing existing `—` framing"
+    )
+    assert "monthly fee is fixed" not in captions, (
+        f"flat-rate plan-fee framing leaked on Enterprise per-model "
+        f"caption"
+    )
+    assert "API-equivalent" not in captions, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise "
+        f"per-model caption"
+    )
+
+
+def test_cache_per_model_caption_mentions_plan_decoupling_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Per-model section caption on flat-rate names BOTH the
+    API-equivalent framing AND the plan-fee decoupling."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent" in captions, (
+        f"flat-rate per-model caption missing `API-equivalent`"
+    )
+    assert "monthly fee is fixed" in captions, (
+        f"flat-rate per-model caption missing plan-fee decoupling"
+    )
+    # Enterprise framing must NOT leak.
+    assert "show savings as `—`" not in captions, (
+        f"Enterprise `show savings as `—`` framing leaked on "
+        f"flat-rate per-model caption"
+    )
+
+
+def test_cache_per_model_savings_column_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Per-model table on default Enterprise plan keeps the
+    `Savings` column header — savings are real money on
+    pay-per-token."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    df = _find_per_model_dataframe(at)
+    assert df is not None, (
+        f"per-model dataframe not found; "
+        f"dataframes seen: {[list(d.value.columns) for d in at.dataframe]!r}"
+    )
+    cols = list(df.columns)
+    assert "Savings" in cols, (
+        f"Enterprise per-model `Savings` column missing; got {cols!r}"
+    )
+    assert "API-equivalent savings" not in cols, (
+        f"flat-rate column header leaked on Enterprise: {cols!r}"
+    )
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_cache_per_model_savings_column_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """Per-model table on flat-rate plans renames the savings
+    column to `API-equivalent savings` — the dollar figures aren't
+    money out of pocket; they're the API-equivalent value caching
+    adds per-model.
+
+    Parametrized over all three flat-rate plans for plan-name
+    hardcoding protection."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    df = _find_per_model_dataframe(at)
+    assert df is not None, (
+        f"per-model dataframe not found on {flat_rate_plan}; "
+        f"dataframes seen: {[list(d.value.columns) for d in at.dataframe]!r}"
+    )
+    cols = list(df.columns)
+    assert "API-equivalent savings" in cols, (
+        f"flat-rate per-model `API-equivalent savings` column missing "
+        f"on {flat_rate_plan}; got {cols!r}"
+    )
+    # Plain `Savings` is the Enterprise label — must NOT be present.
+    assert "Savings" not in cols, (
+        f"Enterprise `Savings` column leaked on {flat_rate_plan}: "
+        f"{cols!r}"
+    )
 
 
 # --- Pre-slice P2: compute-once invariant for Cache view per-model rows ---
