@@ -422,23 +422,35 @@ def test_parse_utc_returns_tz_aware_datetime_for_valid_iso() -> None:
 @pytest.mark.parametrize(
     "bad_iso",
     [
+        # --- parse failures (ValueError caught + None returned) ---
         "",                    # empty short-circuit (truthy guard)
         "not-a-date",          # no parse possible
         "13:00:00",            # time-only (no date)
         "2026/05/16T13:00Z",   # wrong separators
         "this-is-definitely-not-a-date-2026",  # arbitrary garbage
+        # --- naive-parse failures (parses, but no tzinfo: rejected) ---
+        #
+        # `datetime.fromisoformat` accepts bare dates and offset-less
+        # datetimes and returns them as naive. The helper rejects them
+        # at the boundary because downstream `astimezone()` does NOT
+        # raise on naive input — it silently interprets the value as
+        # SYSTEM-LOCAL time and converts, producing different output
+        # on different hosts for the same input. That is the
+        # "host-dependent garbage" failure the helper exists to prevent.
+        "2026-05-16",                 # bare date → naive midnight
+        "2026-05-16T13:00:00",        # date+time without offset
+        "2026-05-16T13:00:00.000",    # with subsecond, still no offset
     ],
 )
-def test_parse_utc_returns_none_for_empty_or_malformed_iso(bad_iso: str) -> None:
-    """Empty / malformed ISO → None. Every wrapper treats None as
-    "data missing, hide the field" rather than raising. A regression
-    that let ValueError leak through would surface as a crashed view
-    on the first corrupted block id.
-
-    Note: bare date strings like `"2026-05-16"` are intentionally NOT
-    in this list — `datetime.fromisoformat` accepts them as naive
-    midnight, which is a long-standing pre-Slice-C behaviour of
-    tz.py. Fixing that would be a separate, behaviour-changing slice."""
+def test_parse_utc_returns_none_for_empty_malformed_or_naive_iso(
+    bad_iso: str,
+) -> None:
+    """Empty / malformed / naive ISO → None. Every wrapper treats
+    None as "data missing, hide the field". The naive-parse cases
+    catch the silent-wrong-data failure mode where Python's
+    `astimezone()` would interpret a naive datetime as the system's
+    local zone — fix landed in commit after Slice C ("tz: reject
+    naive datetimes at the parse boundary")."""
     from tokenscope.tz import _parse_utc
 
     assert _parse_utc(bad_iso) is None

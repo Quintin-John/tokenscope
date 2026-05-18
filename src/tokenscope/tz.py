@@ -112,10 +112,18 @@ def _parse_utc(iso: str) -> datetime | None:
     """Parse a UTC ISO timestamp (with trailing `Z`) into a tz-aware
     datetime.
 
-    Returns ``None`` for empty / malformed input — every wrapper
-    treats this as "data missing, hide the field" rather than
-    raising. Anything else (corrupt tzdata file, OSError) propagates,
-    since those represent genuine bugs the user should see.
+    Returns ``None`` for empty input, malformed input, OR input that
+    parses but yields a naive datetime — `datetime.fromisoformat`
+    accepts bare dates (`"2026-05-16"`) and date+time without an
+    offset (`"2026-05-16T13:00:00"`) and returns them as naive
+    midnight / naive local-clock. A naive datetime silently violates
+    this helper's "UTC" contract: downstream `astimezone()` does NOT
+    raise on a naive value — it implicitly assumes SYSTEM-LOCAL
+    timezone, producing different output on different hosts for the
+    same input. Reject these at the boundary so the contract holds.
+
+    Anything else (corrupt tzdata file, OSError) propagates — those
+    represent genuine bugs the user should see.
 
     The `Z` → `+00:00` substitution is the one-line workaround for
     Python ≤ 3.10's `fromisoformat` rejecting the bare `Z` marker
@@ -124,9 +132,15 @@ def _parse_utc(iso: str) -> datetime | None:
     if not iso:
         return None
     try:
-        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        # Bare date or naive datetime — does not satisfy the
+        # tz-aware UTC contract. Caller's view stays "hide the
+        # field" rather than rendering host-TZ-dependent garbage.
+        return None
+    return parsed
 
 
 def _to_local(utc_dt: datetime, zone: str) -> datetime | None:
