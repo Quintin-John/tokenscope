@@ -283,14 +283,33 @@ def _render_data_range_banner(
     first_with_cache_date = date.fromisoformat(actual_range[0])
     if first_with_cache_date <= since_date:
         return
+    # The banner is window-local. `cache_data_range(daily_report)`
+    # reads from `daily_report.daily`, which ccusage already filtered
+    # to `--since`/`--until` — so `first_with_cache_date` is the
+    # earliest CACHE-ACTIVE entry IN THE WINDOW, not a global "cache
+    # became available" date. ccusage omits days with no Claude Code
+    # usage entirely (verified: a 2026-05-01 → 2026-05-18 query
+    # returned 6 entries, none for May 1–11). The function therefore
+    # cannot distinguish "no Claude Code usage on those days" from
+    # "usage but zero cache tokens" — the banner copy must NOT claim
+    # one or the other.
+    # Keep the heading + date on a SINGLE source line — line breaks
+    # inside an f-string are preserved in the rendered HTML, which
+    # would split the heading text in tests that match `:.* <date>`
+    # as a contiguous substring.
+    heading = (
+        f"First day with cache activity in this window: {actual_range[0]}."
+    )
     st.markdown(
         f"""
         <div class="tokenscope-cache-range-banner">
-          <strong>Cache data available from {actual_range[0]} onward.</strong>
-          The sidebar window starts {since_date.isoformat()}, but no
-          entry before {actual_range[0]} carries cache activity — the
-          charts below reflect the actual cache range, not the full
-          sidebar window.
+          <strong>{heading}</strong>
+          The sidebar window starts {since_date.isoformat()}; earlier
+          dates in the window have no cache-active entries. ccusage
+          doesn't distinguish between days with no Claude Code usage
+          and days with usage but zero cache tokens, so the gap could
+          be either. The charts below cover only days with cache
+          activity, not the full sidebar window.
         </div>
         """,
         unsafe_allow_html=True,
