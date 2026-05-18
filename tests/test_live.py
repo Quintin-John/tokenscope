@@ -274,11 +274,22 @@ def _wire_live_fixtures(mock_ccusage, blocks_payload: dict) -> None:
 
 
 def _make_active_block_payload(
-    start_iso: str, end_iso: str | None = None
+    start_iso: str,
+    end_iso: str | None = None,
+    *,
+    input_tokens: int = 100,
+    output_tokens: int = 200,
+    cache_create_tokens: int = 300,
+    cache_read_tokens: int = 400,
 ) -> dict:
     """Single-block `blocks --json` payload with the active block
     starting at ``start_iso``. End defaults to start + 5h so the
-    standard 5-hour window invariant holds."""
+    standard 5-hour window invariant holds.
+
+    Token counts default to the legacy 100/200/300/400 set the
+    existing tests are pinned to. Callers that need distinct values
+    per kind (e.g. the BlockTokenCounts→kind mapping regression
+    tests) pass them in via keyword."""
     start_dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
     end_dt = (
         datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
@@ -289,6 +300,9 @@ def _make_active_block_payload(
         from datetime import timedelta as _td
 
         end_dt = start_dt + _td(hours=5)
+    total_tokens = (
+        input_tokens + output_tokens + cache_create_tokens + cache_read_tokens
+    )
     return {
         "blocks": [
             {
@@ -300,11 +314,12 @@ def _make_active_block_payload(
                 "isGap": False,
                 "entries": 10,
                 "tokenCounts": {
-                    "inputTokens": 100, "outputTokens": 200,
-                    "cacheCreationInputTokens": 300,
-                    "cacheReadInputTokens": 400,
+                    "inputTokens": input_tokens,
+                    "outputTokens": output_tokens,
+                    "cacheCreationInputTokens": cache_create_tokens,
+                    "cacheReadInputTokens": cache_read_tokens,
                 },
-                "totalTokens": 1000,
+                "totalTokens": total_tokens,
                 "costUSD": 1.0,
                 "models": ["claude-opus-4-7"],
                 "burnRate": {
@@ -477,3 +492,201 @@ def _walk_plotly_figure_strings(at: AppTest) -> list[str]:
 
     visit(at.main)
     return out
+
+
+# --- BlockTokenCounts → kind mapping (pre-Slice B regression pins) -------
+#
+# The three consumers below all map `BlockTokenCounts` fields to the
+# `input` / `output` / `cache_create` / `cache_read` kind keys:
+#
+#   * `live_token_kind_composition_bar` (charts.py)
+#   * `_render_token_kind_kpis`         (live.py)
+#   * `_render_token_kind_table`        (live.py)
+#
+# `analytics._block_token_counts_by_kind` exists as the documented
+# single-source mapping, but each consumer currently re-inlines the
+# dict literal. An upcoming refactor will collapse them onto the
+# helper. Without these tests, an accidental field-name swap (e.g.
+# `cache_create` reading `cache_read_input_tokens`) would still pass
+# the existing label/colour assertions while displaying wildly wrong
+# numbers in production.
+#
+# Distinct counts (11/22/33/44) make any swap unambiguous in the
+# failure message.
+
+
+def _block_with_distinct_kind_counts() -> BlockEntry:
+    """Active block whose four kind counts are all distinct so an
+    accidental swap between any two kinds shows up as a wrong number
+    rather than a coincidentally-equal value."""
+    return BlockEntry(
+        id="2026-05-16T13:00:00.000Z",
+        startTime="2026-05-16T13:00:00.000Z",
+        endTime="2026-05-16T18:00:00.000Z",
+        actualEndTime=None,
+        isActive=True,
+        isGap=False,
+        entries=4,
+        tokenCounts=BlockTokenCounts(
+            inputTokens=11,
+            outputTokens=22,
+            cacheCreationInputTokens=33,
+            cacheReadInputTokens=44,
+        ),
+        totalTokens=110,
+        costUSD=1.0,
+        models=["claude-opus-4-7"],
+        burnRate=BurnRate(
+            tokensPerMinute=1.0,
+            tokensPerMinuteForIndicator=1.0,
+            costPerHour=1.0,
+        ),
+        projection=Projection(
+            totalTokens=200, totalCost=2.0, remainingMinutes=180,
+        ),
+    )
+
+
+def test_live_token_kind_composition_bar_segment_widths_match_block_counts() -> None:
+    """Each `go.Bar` trace in the composition bar must carry the
+    token count for the kind it's named after — NOT some other
+    kind's count.
+
+    Pins the BlockTokenCounts→kind mapping in
+    `charts.live_token_kind_composition_bar`. A regression that
+    swapped, say, the `cache_create` trace's data source from
+    `cache_creation_input_tokens` to `cache_read_input_tokens`
+    would still pass the existing `test_token_kind_composition_bar_*`
+    smoke tests (chart renders, four traces present) but display
+    44 tokens under the amber Cache create label instead of 33.
+
+    Distinct counts (11/22/33/44) make the failure message
+    self-explanatory."""
+    block = _block_with_distinct_kind_counts()
+    fig = live_token_kind_composition_bar(block)
+    assert fig is not None
+    actual = {trace.name: int(trace.x[0]) for trace in fig.data}
+    assert actual == {
+        "input": 11,
+        "output": 22,
+        "cache_create": 33,
+        "cache_read": 44,
+    }, (
+        f"composition bar segment-to-kind mapping wrong: {actual!r}"
+    )
+
+
+def test_live_token_kind_kpi_cards_pair_each_label_with_correct_count(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Each Live-view token-kind KPI card pairs its kind label with
+    the count of THAT kind from `block.token_counts`. The card
+    layout emits two markdown blocks per kind in column order:
+    a header div carrying the label, then a value div carrying
+    `format_compact_int(count) + " tokens"`. We walk the markdown
+    stream and assert each header's immediately-following value div
+    contains the right count.
+
+    Pins the mapping in `live._render_token_kind_kpis`. A regression
+    that swapped `cache_create` ↔ `cache_read` in the `counts` dict
+    would still pass the existing label-presence and PALETTE-colour
+    tests but display 44 tokens on the Cache create card."""
+    payload = _make_active_block_payload(
+        "2026-05-16T13:00:00.000Z",
+        input_tokens=11,
+        output_tokens=22,
+        cache_create_tokens=33,
+        cache_read_tokens=44,
+    )
+    _wire_live_fixtures(mock_ccusage, payload)
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "live"
+    at.run()
+
+    assert not at.exception, [str(e.value)[:200] for e in at.exception]
+
+    md_values = [m.value for m in at.markdown]
+    expected = [
+        ("Input", "11 tokens"),
+        ("Output", "22 tokens"),
+        ("Cache create", "33 tokens"),
+        ("Cache read", "44 tokens"),
+    ]
+    for label, count_text in expected:
+        header_indices = [
+            i
+            for i, m in enumerate(md_values)
+            if "tokenscope-kind-card-label" in m and f">{label}<" in m
+        ]
+        assert len(header_indices) == 1, (
+            f"expected exactly one KPI card header for {label!r}; "
+            f"got {len(header_indices)}"
+        )
+        header_idx = header_indices[0]
+        # The card's value div is the next markdown element on the page.
+        assert header_idx + 1 < len(md_values), (
+            f"no value div follows the {label!r} header"
+        )
+        value_md = md_values[header_idx + 1]
+        assert "tokenscope-kind-card-value" in value_md, (
+            f"markdown after {label!r} header isn't a value div: "
+            f"{value_md!r}"
+        )
+        assert count_text in value_md, (
+            f"{label!r} card carries wrong count; expected "
+            f"{count_text!r}, value div was: {value_md!r}"
+        )
+
+
+def test_live_token_kind_table_rows_pair_each_kind_with_correct_count(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The token-kind mini-table beneath the composition bar must
+    carry the right count and share% for each kind label.
+
+    Pins the mapping in `live._render_token_kind_table`. The table
+    is identified by its `Share %` column (unique to this surface;
+    the Overview Cost composition uses `Share` without the percent
+    sign, the Models breakdown uses `Share of cost`).
+
+    Distinct counts (11/22/33/44) → distinct shares
+    (10.0% / 20.0% / 30.0% / 40.0%), so a row-swap shows up as both
+    the wrong count and the wrong share."""
+    payload = _make_active_block_payload(
+        "2026-05-16T13:00:00.000Z",
+        input_tokens=11,
+        output_tokens=22,
+        cache_create_tokens=33,
+        cache_read_tokens=44,
+    )
+    _wire_live_fixtures(mock_ccusage, payload)
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "live"
+    at.run()
+
+    assert not at.exception, [str(e.value)[:200] for e in at.exception]
+
+    kind_table = None
+    for df_element in at.dataframe:
+        df = df_element.value
+        if "Kind" in df.columns and "Share %" in df.columns:
+            kind_table = df
+            break
+    assert kind_table is not None, (
+        "token-kind table not rendered on Live view; "
+        f"dataframes seen: {[list(d.value.columns) for d in at.dataframe]!r}"
+    )
+
+    expected_rows = {
+        "Input": ("11", "10.0%"),
+        "Output": ("22", "20.0%"),
+        "Cache create": ("33", "30.0%"),
+        "Cache read": ("44", "40.0%"),
+    }
+    actual_by_kind = {
+        row["Kind"]: (row["Tokens"], row["Share %"])
+        for _, row in kind_table.iterrows()
+    }
+    assert actual_by_kind == expected_rows, (
+        f"token-kind table row mapping wrong: {actual_by_kind!r}"
+    )
