@@ -3076,6 +3076,164 @@ def test_day_renders_session_and_block_rows_via_shared_helper(
     )
 
 
+# --- Day-view regression: duplicate `sessionId` across projects ---------
+#
+# Claude Code creates a `subagents/` directory per project. ccusage slugs
+# each directory as `sessionId="subagents"` — multiple sessions in the
+# user's report can share the same `session_id`. Before the fix, the
+# `Open session` button's Streamlit widget key was
+# `f"open-session-{session_id}"` which collided on the duplicate id and
+# raised `StreamlitDuplicateElementKey` on the day view. Fix at
+# `day.py:_session_button_key` composes the key from
+# `(project_path, session_id)` — unique within a SessionReport because
+# `project_path` is the slugified absolute project path.
+
+
+def _session_payload_with_duplicate_session_ids() -> dict:
+    """ccusage-shaped session report where TWO sessions share
+    `sessionId="subagents"` (different `projectPath`) and both have
+    `lastActivity="2026-04-05"` so `sessions_on_day` returns both —
+    triggering the pre-fix `StreamlitDuplicateElementKey` crash on
+    the day view."""
+    def _session(project_path: str, cost: float, tokens: int) -> dict:
+        # Total has to be the sum of the four kinds so the model
+        # passes ccusage's schema-validation step at the data layer.
+        # Input dominates here so the test reads as "real-ish".
+        input_tokens = tokens
+        return {
+            "sessionId": "subagents",
+            "lastActivity": "2026-04-05",
+            "projectPath": project_path,
+            "inputTokens": input_tokens,
+            "outputTokens": 0,
+            "cacheCreationTokens": 0,
+            "cacheReadTokens": 0,
+            "totalTokens": input_tokens,
+            "totalCost": cost,
+            "modelsUsed": ["claude-opus-4-7"],
+            "modelBreakdowns": [
+                {
+                    "modelName": "claude-opus-4-7",
+                    "inputTokens": input_tokens,
+                    "outputTokens": 0,
+                    "cacheCreationTokens": 0,
+                    "cacheReadTokens": 0,
+                    "cost": cost,
+                }
+            ],
+        }
+
+    sessions = [
+        _session(
+            "-Users-qj-projA-subagents", cost=5.0, tokens=1000,
+        ),
+        _session(
+            "-Users-qj-projB-subagents", cost=3.0, tokens=600,
+        ),
+    ]
+    totals = {
+        "inputTokens": 1600,
+        "outputTokens": 0,
+        "cacheCreationTokens": 0,
+        "cacheReadTokens": 0,
+        "totalTokens": 1600,
+        "totalCost": 8.0,
+    }
+    return {"sessions": sessions, "totals": totals}
+
+
+def test_day_view_renders_when_multiple_sessions_share_session_id(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Day view must not raise `StreamlitDuplicateElementKey` when
+    two sessions in the same render pass share `session_id`
+    (the `subagents`-per-project case).
+
+    Pre-fix this rendered with the duplicate-key error in
+    `at.exception`. Post-fix the render must be clean AND both
+    session rows must be present."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+
+    # The pre-fix crash surfaced as a Python exception in AppTest's
+    # `at.exception` list. Post-fix, both `at.exception` and
+    # `at.error` are empty (no st.error rendered either).
+    _assert_clean(at)
+
+    # Both session rows render — count the `Open session` buttons.
+    session_buttons = [
+        b for b in at.button
+        if b.key and b.key.startswith("open-session-")
+    ]
+    assert len(session_buttons) == 2, (
+        f"expected 2 `Open session` buttons (one per duplicated-id "
+        f"session); got {len(session_buttons)}: keys="
+        f"{[b.key for b in session_buttons]!r}"
+    )
+
+
+def test_day_view_session_button_keys_are_unique_when_session_ids_collide(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Independent contract: when two sessions share `session_id`,
+    their button widget keys MUST still differ. Asserts the key
+    derivation pulls in something beyond `session_id` —
+    specifically, `(project_path, session_id)` is the unique tuple
+    `_session_button_key` composes from.
+
+    Two assertions: (a) we have two `Open session` buttons,
+    (b) their `key` attributes are distinct. The pre-fix code base
+    would fail (a) anyway because Streamlit raised before the
+    second button was registered."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+
+    session_button_keys = [
+        b.key for b in at.button
+        if b.key and b.key.startswith("open-session-")
+    ]
+    assert len(session_button_keys) == 2, (
+        f"expected 2 session-open buttons; got "
+        f"{len(session_button_keys)}: {session_button_keys!r}"
+    )
+    assert len(set(session_button_keys)) == 2, (
+        f"session-open button keys must be distinct across rows "
+        f"with duplicate `session_id`; got duplicates in: "
+        f"{session_button_keys!r}"
+    )
+    # Both keys must include the per-project disambiguator. A
+    # regression that dropped `project_path` from the composition
+    # and used just an enumeration index would silently re-introduce
+    # the ambiguity-by-arrival-order; assert the project path is
+    # part of the key.
+    for key in session_button_keys:
+        assert "projA" in key or "projB" in key, (
+            f"button key {key!r} doesn't include project_path — the "
+            f"per-project disambiguator is missing"
+        )
+
+
 # --- Pre-slice P5: partial-failure semantics for ccusage fetches --------
 #
 # Slice P5 parallelises the sequential ccusage fetches on the Overview

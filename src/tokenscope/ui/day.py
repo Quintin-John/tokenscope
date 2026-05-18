@@ -136,13 +136,35 @@ def _entity_row(
         route_to(nav_target)
 
 
+def _session_button_key(session: SessionEntry) -> str:
+    """Streamlit widget key for the per-session `Open session` button
+    on the day view.
+
+    `session.session_id` ALONE is not unique across projects: Claude
+    Code creates a `subagents/` directory per project, and ccusage
+    slugs each directory as `sessionId="subagents"`. A user with
+    two projects that ran subagents will have two `SessionEntry`
+    instances with the same `session_id` but different
+    `project_path` — composing the key from the
+    `(project_path, session_id)` tuple is unique within the user's
+    SessionReport and deterministic across reruns (both fields are
+    immutable on a `SessionEntry`).
+
+    Pre-fix the key was `f"open-session-{session_id}"`, which
+    collided on the duplicated id and produced a
+    StreamlitDuplicateElementKey crash on the day view as soon as
+    two `subagents` sessions appeared in `sessions_on_day`.
+    """
+    return f"open-session-{session.project_path}-{session.session_id}"
+
+
 def _session_row(session: SessionEntry, nav: Navigation) -> None:
     _entity_row(
         id_label=f"`{session.session_id}`",
         cost=session.total_cost,
         tokens=session.total_tokens,
         button_label="Open session",
-        button_key=f"open-session-{session.session_id}",
+        button_key=_session_button_key(session),
         nav_target=nav.to_session(session.session_id),
     )
 
