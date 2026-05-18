@@ -2320,6 +2320,295 @@ def test_cache_savings_hero_no_rates_context_mentions_plan_on_flat_rate(
     )
 
 
+# --- Cache Slice 2 (plan-usage-updates): plan-aware Effective $/MTok + Daily savings ---
+#
+# The Effective $/MTok KPI and the Daily savings chart each carry
+# dollar-framed copy that misrepresents flat-rate users' exposure
+# (they pay a fixed monthly fee, not the API-equivalent rate). This
+# slice extends the plan-aware framing through both surfaces.
+#
+# Plan-independent surfaces explicitly NOT changed by this slice:
+#   * Cache hit ratio KPI + sparkline (raw fact)
+#   * Cache reads / writes count KPIs (raw facts)
+#   * Reads-vs-writes chart (raw counts)
+#   * Daily-savings `Savings unavailable` no-rates fallback (about
+#     LiteLLM reachability, not billing — same on both plans).
+
+
+def test_cache_effective_rate_label_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Default Enterprise plan keeps `Effective $ / 1M tokens` —
+    pay-per-token users genuinely have a per-MTok effective rate."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    labels = {m.label for m in at.metric}
+    assert "Effective $ / 1M tokens" in labels, (
+        f"Enterprise Effective-rate label missing; labels: {labels!r}"
+    )
+    assert "API-equivalent $ / 1M tokens" not in labels, (
+        f"flat-rate label leaked on Enterprise: {labels!r}"
+    )
+
+
+@pytest.mark.parametrize("flat_rate_plan", ["Pro", "Max 5×", "Max 20×"])
+def test_cache_effective_rate_label_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, flat_rate_plan
+) -> None:
+    """Flat-rate Effective-rate label is `API-equivalent $ / 1M
+    tokens` — the rate isn't what the user actually pays per
+    MTok (they pay the fixed monthly fee). Parametrized over all
+    three flat-rate plans for plan-name hardcoding protection."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(flat_rate_plan)
+    at.run()
+    _assert_clean(at)
+
+    labels = {m.label for m in at.metric}
+    assert "API-equivalent $ / 1M tokens" in labels, (
+        f"flat-rate Effective-rate label missing on {flat_rate_plan}; "
+        f"labels: {labels!r}"
+    )
+    assert "Effective $ / 1M tokens" not in labels, (
+        f"Enterprise label leaked on {flat_rate_plan}: {labels!r}"
+    )
+
+
+def test_cache_effective_rate_caption_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Effective-rate caption on Enterprise keeps the current
+    `total cost ÷ total tokens` framing."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "total cost ÷ total tokens" in captions, (
+        f"Enterprise Effective-rate caption missing expected copy: "
+        f"{captions!r}"
+    )
+    assert "API-equivalent cost ÷ total tokens" not in captions
+
+
+def test_cache_effective_rate_caption_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Effective-rate caption on flat-rate names the API-equivalent
+    framing — `API-equivalent cost ÷ total tokens`."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent cost ÷ total tokens" in captions, (
+        f"flat-rate Effective-rate caption missing expected copy: "
+        f"{captions!r}"
+    )
+
+
+def test_cache_effective_rate_help_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Effective-rate help-icon tooltip on Enterprise keeps the
+    current published-rate comparison framing without the
+    plan-fee note."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    effective = next(
+        (m for m in at.metric if m.label == "Effective $ / 1M tokens"),
+        None,
+    )
+    assert effective is not None
+    help_text = effective.help or ""
+    assert "Blended cost per 1M tokens" in help_text, (
+        f"Enterprise help missing `Blended cost per 1M tokens`: "
+        f"{help_text!r}"
+    )
+    assert "monthly fee is fixed" not in help_text, (
+        f"flat-rate framing leaked on Enterprise help: {help_text!r}"
+    )
+    assert "API-equivalent" not in help_text, (
+        f"flat-rate framing leaked on Enterprise help: {help_text!r}"
+    )
+
+
+def test_cache_effective_rate_help_mentions_plan_fee_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Effective-rate help on flat-rate names the API-equivalent
+    framing AND the plan-fee decoupling — the user must understand
+    the rate isn't their actual cost per MTok."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    effective = next(
+        (m for m in at.metric if m.label == "API-equivalent $ / 1M tokens"),
+        None,
+    )
+    assert effective is not None
+    help_text = effective.help or ""
+    assert "API-equivalent" in help_text, (
+        f"flat-rate help missing `API-equivalent` framing: {help_text!r}"
+    )
+    assert "monthly fee is fixed" in help_text, (
+        f"flat-rate help missing plan-fee decoupling note: {help_text!r}"
+    )
+
+
+def test_cache_daily_savings_section_header_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Default Enterprise plan keeps `Daily savings` as the
+    daily-savings section header — the savings are real money."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "### Daily savings" in md, (
+        f"Enterprise daily-savings section header missing"
+    )
+    assert "Daily API-equivalent savings" not in md, (
+        f"flat-rate framing leaked on Enterprise daily-savings header"
+    )
+
+
+def test_cache_daily_savings_section_header_api_equivalent_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Flat-rate daily-savings section header is `Daily
+    API-equivalent savings` — the daily figures aren't money out
+    of pocket."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    assert "### Daily API-equivalent savings" in md, (
+        f"flat-rate daily-savings header missing API-equivalent framing"
+    )
+    # Plain `Daily savings` (no qualifier) must NOT appear as a
+    # heading — that's the Enterprise framing.
+    assert "### Daily savings\n" not in md and "### Daily savings " not in md, (
+        f"Enterprise daily-savings header leaked on flat-rate"
+    )
+
+
+def test_cache_daily_savings_caption_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Daily-savings caption on Enterprise keeps the current
+    `Estimated $ saved each day` framing without the plan-fee
+    note."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "Estimated $ saved each day" in captions
+    assert "monthly fee is fixed" not in captions, (
+        f"flat-rate plan-fee note leaked on Enterprise daily-savings "
+        f"caption"
+    )
+    assert "API-equivalent" not in captions, (
+        f"flat-rate `API-equivalent` framing leaked on Enterprise "
+        f"daily-savings caption (note: this assertion validates the "
+        f"daily-savings caption specifically — `API-equivalent` may "
+        f"appear in other Enterprise-default captions if Slice 2 "
+        f"copy bleeds)"
+    )
+
+
+def test_cache_daily_savings_caption_explains_plan_decoupling_on_flat_rate(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Daily-savings caption on flat-rate names BOTH the
+    API-equivalent framing AND the plan-fee decoupling."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent" in captions, (
+        f"flat-rate daily-savings caption missing `API-equivalent`"
+    )
+    assert "monthly fee is fixed" in captions, (
+        f"flat-rate daily-savings caption missing plan-fee decoupling"
+    )
+
+
+def test_cache_daily_savings_no_rates_fallback_present_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When LiteLLM rates aren't reachable, the daily-savings card
+    falls back to `Savings unavailable` on BOTH plans — the no-rates
+    state is about API reachability, not billing semantics, so the
+    fallback message is plan-independent. The existing
+    `test_cache_renders_savings_unavailable_fallback_when_no_rates`
+    pins this on Enterprise; this test pins it on flat-rate to
+    catch a regression where Slice 2's plan plumbing accidentally
+    suppressed or altered the fallback."""
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model", lambda _name: None
+    )
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    md = "\n".join(m.value for m in at.markdown)
+    captions = " ".join(c.value for c in at.caption)
+    combined = md + "\n" + captions
+    assert "Savings unavailable" in combined, (
+        f"flat-rate daily-savings no-rates fallback missing"
+    )
+
+
 # --- Pre-slice P2: compute-once invariant for Cache view per-model rows ---
 #
 # Pinning the CURRENT call count of `per_model_cache_performance` on the

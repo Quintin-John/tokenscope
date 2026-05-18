@@ -140,6 +140,62 @@ def _hero_no_rates_context(plan: Plan) -> str:
     )
 
 
+def _effective_rate_label(plan: Plan) -> str:
+    """Metric label for the Effective $/MTok KPI. Flat-rate gets
+    the `API-equivalent` qualifier so the rate isn't mistaken for
+    what the user actually pays per MTok (they pay the fixed
+    monthly fee)."""
+    if plan.is_flat_rate:
+        return "API-equivalent $ / 1M tokens"
+    return "Effective $ / 1M tokens"
+
+
+def _effective_rate_caption(plan: Plan) -> str:
+    """One-line caption beneath the Effective $/MTok metric."""
+    if plan.is_flat_rate:
+        return "API-equivalent cost ÷ total tokens"
+    return "total cost ÷ total tokens"
+
+
+def _effective_rate_help(plan: Plan) -> str:
+    """Help-icon tooltip for the Effective $/MTok KPI. Flat-rate
+    adds the flat-fee decoupling note."""
+    base = (
+        "Blended cost per 1M tokens across the window. Compare "
+        "to a model's published input rate (~$15/MTok for opus, "
+        "$3 for sonnet, $1 for haiku) — caching pulls this down."
+    )
+    if plan.is_flat_rate:
+        return (
+            f"API-equivalent {base[0].lower()}{base[1:]} "
+            "Your plan's monthly fee is fixed regardless."
+        )
+    return base
+
+
+def _daily_savings_title(plan: Plan) -> str:
+    """Section header above the daily-savings bar chart."""
+    if plan.is_flat_rate:
+        return "### Daily API-equivalent savings"
+    return "### Daily savings"
+
+
+def _daily_savings_caption(plan: Plan) -> str:
+    """Body caption beneath the daily-savings chart section.
+    Flat-rate names the API-equivalent framing AND the flat-fee
+    decoupling."""
+    if plan.is_flat_rate:
+        return (
+            "Estimated API-equivalent $ saved each day by caching "
+            "reads instead of paying the full input rate at API "
+            "rates. Your plan's monthly fee is fixed regardless."
+        )
+    return (
+        "Estimated $ saved each day by caching reads instead of "
+        "paying the full input rate."
+    )
+
+
 def render(state: SidebarState, nav: Navigation) -> None:
     st.markdown("# Cache")
     st.caption(_page_caption(state.plan))
@@ -160,9 +216,9 @@ def render(state: SidebarState, nav: Navigation) -> None:
 
     savings = cache_savings(daily_report)
     _render_savings_hero(savings, plan=state.plan)
-    _render_kpi_row(daily_report, savings=savings)
+    _render_kpi_row(daily_report, savings=savings, plan=state.plan)
     _render_reads_vs_writes(daily_report)
-    _render_daily_savings(daily_report)
+    _render_daily_savings(daily_report, plan=state.plan)
     _render_per_model_performance(daily_report)
 
 
@@ -280,7 +336,9 @@ def _render_savings_hero(savings: dict | None, *, plan: Plan) -> None:
 # --- KPI row -----------------------------------------------------------
 
 
-def _render_kpi_row(daily_report: DailyReport, *, savings: dict | None) -> None:
+def _render_kpi_row(
+    daily_report: DailyReport, *, savings: dict | None, plan: Plan
+) -> None:
     """Supporting four-card KPI row. Hit ratio card embeds the
     sparkline; the other three are standard metric cards.
 
@@ -288,6 +346,12 @@ def _render_kpi_row(daily_report: DailyReport, *, savings: dict | None) -> None:
     ratio, cache reads, cache writes); only the `Effective $/1M`
     card keeps one because the comparison-to-published-rate framing
     isn't obvious from the label alone.
+
+    The Effective-$/MTok card is plan-aware — label / caption / help
+    all come from module-private helpers (`_effective_rate_label`,
+    `_effective_rate_caption`, `_effective_rate_help`). The other
+    three cards (hit ratio, reads, writes) are plan-independent
+    facts.
     """
     aggregate = aggregate_cache_hit_ratio(daily_report)
     effective = window_effective_per_mtok(daily_report)
@@ -316,15 +380,11 @@ def _render_kpi_row(daily_report: DailyReport, *, savings: dict | None) -> None:
 
     with c2, st.container(border=True):
         st.metric(
-            "Effective $ / 1M tokens",
+            _effective_rate_label(plan),
             f"${effective:,.3f}" if effective is not None else "—",
-            help=(
-                "Blended cost per 1M tokens across the window. Compare "
-                "to a model's published input rate (~$15/MTok for opus, "
-                "$3 for sonnet, $1 for haiku) — caching pulls this down."
-            ),
+            help=_effective_rate_help(plan),
         )
-        st.caption("total cost ÷ total tokens")
+        st.caption(_effective_rate_caption(plan))
 
     with c3, st.container(border=True):
         st.markdown(
@@ -375,16 +435,16 @@ def _render_reads_vs_writes(daily_report: DailyReport) -> None:
         )
 
 
-def _render_daily_savings(daily_report: DailyReport) -> None:
-    """Per-day savings bar chart. Hidden when LiteLLM rates aren't
-    resolvable (offline + no cache) — the hero already explains
-    the gap, no point repeating it as zero-height bars."""
+def _render_daily_savings(daily_report: DailyReport, *, plan: Plan) -> None:
+    """Per-day savings bar chart. Section header and body caption
+    are plan-aware (see `_daily_savings_title` /
+    `_daily_savings_caption`); the no-rates fallback is plan-
+    independent — it's about LiteLLM reachability, not billing
+    semantics — so both plans see the same `Savings unavailable`
+    notice."""
     with st.container(border=True):
-        st.markdown("### Daily savings")
-        st.caption(
-            "Estimated $ saved each day by caching reads instead of "
-            "paying the full input rate."
-        )
+        st.markdown(_daily_savings_title(plan))
+        st.caption(_daily_savings_caption(plan))
         fig = daily_cache_savings_bar(daily_report)
         if fig is None:
             st.caption(
