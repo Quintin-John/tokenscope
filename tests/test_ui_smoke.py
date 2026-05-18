@@ -3234,6 +3234,179 @@ def test_day_view_session_button_keys_are_unique_when_session_ids_collide(
         )
 
 
+# --- Slice 2 routing disambiguation: session_project carries through ---
+#
+# Slice 1 fixed the day-view button-key crash but left the routing
+# defect alive: clicking the "subagents" row for project B routed
+# to `?view=session&session=subagents` and the session view's
+# `find_session` returned the FIRST `subagents` match (project A) —
+# silently wrong data. Slice 2 disambiguates by carrying
+# `session_project` through Navigation → URL → find_session, so
+# clicks land on the row the user actually pointed at.
+
+
+def test_day_view_session_button_routes_with_session_project_when_session_ids_collide(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Clicking the `Open session` button on a duplicated-`session_id`
+    row writes BOTH `session=<id>` AND `session_project=<path>` to
+    the URL. Without the second param, `find_session` on the
+    session view would silently resolve to the wrong project's row.
+
+    Identifies the target button by the project-path discriminator
+    that Slice 1 baked into the key (`projB`) so the test is
+    robust to button-ordering changes."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+
+    proj_b_button = next(
+        (
+            b for b in at.button
+            if b.key
+            and b.key.startswith("open-session-")
+            and "projB" in b.key
+        ),
+        None,
+    )
+    assert proj_b_button is not None, (
+        f"projB session-open button missing; got button keys: "
+        f"{[b.key for b in at.button]!r}"
+    )
+    proj_b_button.click().run()
+
+    # AppTest exposes query_params as a multidict — values come back
+    # as lists; pick the first entry.
+    def _q(key: str) -> str | None:
+        v = at.query_params.get(key)
+        if v is None:
+            return None
+        return v[0] if isinstance(v, list) else v
+
+    assert _q("view") == "session", (
+        f"expected view=session after click; got {_q('view')!r}"
+    )
+    assert _q("session") == "subagents"
+    # The critical assertion: the URL carries the disambiguating
+    # project_path. Pre-Slice-2 this param did not exist on the
+    # route → the session view's `find_session` would have returned
+    # the projA row instead of the projB row the user clicked.
+    assert _q("session_project") == "-Users-qj-projB-subagents", (
+        f"expected session_project=-Users-qj-projB-subagents after "
+        f"clicking the projB row; got {_q('session_project')!r}"
+    )
+
+
+def test_session_view_renders_correct_session_when_session_ids_collide(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Direct navigation to
+    `?view=session&session=subagents&session_project=<projB>`
+    renders projB's session data — NOT projA's, which is what the
+    pre-Slice-2 `find_session(report, "subagents")` would have
+    returned by virtue of being first in the list.
+
+    Asserts on the rendered metric values (cost, tokens) — projA's
+    cost is $5 / 1000 tokens; projB's is $3 / 600 tokens — so the
+    distinction is unambiguous in the failure message."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at(
+        "session",
+        session="subagents",
+        session_project="-Users-qj-projB-subagents",
+    )
+    at.run()
+    _assert_clean(at)
+
+    cost_metric = next(
+        (m for m in at.metric if m.label == "Cost"),
+        None,
+    )
+    tokens_metric = next(
+        (m for m in at.metric if m.label == "Total tokens"),
+        None,
+    )
+    assert cost_metric is not None and tokens_metric is not None, (
+        f"session-view metrics missing; got labels: "
+        f"{[m.label for m in at.metric]!r}"
+    )
+    # projB fixture values: cost=3.0, totalTokens=600.
+    assert cost_metric.value == "$3.00", (
+        f"session view rendered the WRONG session — got cost "
+        f"{cost_metric.value!r}, expected $3.00 (projB). The "
+        f"`session_project` URL param did not disambiguate."
+    )
+    assert tokens_metric.value == "600", (
+        f"session view rendered the wrong session — got tokens "
+        f"{tokens_metric.value!r}, expected 600 (projB)"
+    )
+
+
+def test_session_view_falls_back_to_not_found_when_session_id_is_ambiguous(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Legacy URL hits a duplicated `session_id` with no
+    `session_project` param. `find_session` returns None (branch 4
+    of its resolution rules — fail closed when ambiguous), and the
+    session view renders the empty-state caption rather than
+    silently picking the wrong row.
+
+    Pre-Slice-2 this URL routed to the first matching session in
+    the report (silently wrong)."""
+    session_payload = _session_payload_with_duplicate_session_ids()
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily", "--instances",
+        response=FIXTURES / "daily_by_project.json",
+    )
+    mock_ccusage("session", response=session_payload)
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    # No session_project param — the legacy URL shape.
+    at = _at("session", session="subagents")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "Session not found" in captions, (
+        f"expected `Session not found` empty-state on ambiguous "
+        f"legacy URL; got captions: {captions!r}"
+    )
+    # Critical: the session view must NOT have rendered either
+    # session's data (no Cost / Total tokens metrics from the
+    # disambiguated path). Pre-fix it would have shown projA's
+    # $5.00 / 1,000 (the first match).
+    cost_metric = next(
+        (m for m in at.metric if m.label == "Cost"),
+        None,
+    )
+    assert cost_metric is None, (
+        f"session view rendered a Cost metric on an ambiguous "
+        f"legacy URL — got {cost_metric.value!r}. find_session "
+        f"silently picked a row instead of failing closed."
+    )
+
+
 # --- Pre-slice P5: partial-failure semantics for ccusage fetches --------
 #
 # Slice P5 parallelises the sequential ccusage fetches on the Overview

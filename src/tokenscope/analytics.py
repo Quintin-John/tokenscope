@@ -257,10 +257,48 @@ def blocks_on_day(
     return out
 
 
-def find_session(session_report: SessionReport, session_id: str) -> SessionEntry | None:
-    for s in session_report.sessions:
-        if s.session_id == session_id:
-            return s
+def find_session(
+    session_report: SessionReport,
+    session_id: str,
+    project_path: str | None = None,
+) -> SessionEntry | None:
+    """Resolve a session row by `(session_id, project_path)`.
+
+    `session_id` alone is NOT unique across projects: ccusage slugs
+    each Claude Code project's `subagents/` directory as
+    `sessionId="subagents"`, so two projects with subagent runs
+    produce two `SessionEntry` instances sharing that id. The fix
+    is to disambiguate by the `(session_id, project_path)` tuple,
+    which is unique by construction.
+
+    Resolution rules — fail closed when the input is ambiguous,
+    never silently return "first match by id alone":
+
+      1. `project_path` is given AND a row matches both fields →
+         return that row.
+      2. `project_path` is given AND no row matches both (the
+         session has aged out of the window, or the URL was
+         tampered) → return None.
+      3. `project_path` is None AND exactly one row matches the
+         `session_id` → return that row. The lookup is unambiguous;
+         legacy shareable URLs without `session_project` still
+         resolve correctly here.
+      4. `project_path` is None AND multiple rows match the
+         `session_id` → return None. Caller must disambiguate (e.g.
+         re-open the session from the day view, which routes with
+         `session_project` set). Returning the "first" match would
+         be the original bug.
+    """
+    matches = [s for s in session_report.sessions if s.session_id == session_id]
+    if not matches:
+        return None
+    if project_path is not None:
+        for s in matches:
+            if s.project_path == project_path:
+                return s
+        return None
+    if len(matches) == 1:
+        return matches[0]
     return None
 
 

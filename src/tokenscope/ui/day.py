@@ -165,7 +165,13 @@ def _session_row(session: SessionEntry, nav: Navigation) -> None:
         tokens=session.total_tokens,
         button_label="Open session",
         button_key=_session_button_key(session),
-        nav_target=nav.to_session(session.session_id),
+        # `project_path` is the disambiguator for sessions sharing
+        # `session_id` (the `subagents`-per-project case). Without
+        # it the resulting URL would route to the first matching
+        # session in the report — possibly the wrong project's row.
+        nav_target=nav.to_session(
+            session.session_id, session.project_path
+        ),
     )
 
 
