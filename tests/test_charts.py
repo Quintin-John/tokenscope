@@ -655,6 +655,94 @@ def test_token_kind_colors_are_distinct_hues() -> None:
     assert len(colors) == 4, f"TOKEN_KIND_COLORS must be 4 distinct; got {TOKEN_KIND_COLORS!r}"
 
 
+def test_token_kind_colors_keyed_by_canonical_kinds_in_order() -> None:
+    """Slice A consolidation invariant: `TOKEN_KIND_COLORS` is built
+    from `pricing.KINDS` (the single source of truth for the kind
+    tuple). Its keys must equal `KINDS` exactly, AND preserve the
+    canonical order — dict insertion order in Python 3.7+ is the
+    iteration order downstream chart builders rely on when they do
+    `for kind in TOKEN_KIND_COLORS`.
+
+    If a regression re-introduced a parallel literal
+    (`{"input": ..., "output": ..., ...}` built by hand), `KINDS`
+    could grow a 5th entry while the colour map silently lacked it —
+    the chart loops would skip the new kind and the user would see
+    an incomplete legend with no warning."""
+    from tokenscope.pricing import KINDS
+
+    assert list(TOKEN_KIND_COLORS) == list(KINDS), (
+        f"TOKEN_KIND_COLORS keys must equal KINDS in order; "
+        f"got {list(TOKEN_KIND_COLORS)!r} vs canonical {list(KINDS)!r}"
+    )
+
+
+def test_non_cache_kinds_is_kinds_minus_cache_read() -> None:
+    """Slice A consolidation invariant: `_NON_CACHE_KINDS` is derived
+    from `KINDS` by excluding `cache_read`, not declared as a literal.
+    Adding a new non-cache kind to `KINDS` must automatically include
+    it in `_NON_CACHE_KINDS` — the default for any new kind is
+    non-cache (an explicit cache-related addition would update the
+    exclusion list at the derivation site)."""
+    from tokenscope.pricing import KINDS
+    from tokenscope.ui.charts import _NON_CACHE_KINDS
+
+    assert _NON_CACHE_KINDS == frozenset(KINDS) - {"cache_read"}, (
+        f"_NON_CACHE_KINDS must equal KINDS minus cache_read; "
+        f"got {_NON_CACHE_KINDS!r}, KINDS={KINDS!r}"
+    )
+
+
+def test_token_mix_chart_trace_order_matches_canonical_kinds() -> None:
+    """Slice A consolidation invariant: `token_mix_percent_bar` iterates
+    `list(KINDS)` to emit one `go.Bar` per kind. The trace order in
+    the rendered figure must match `KINDS` order exactly — the
+    stack-bottom-up reading on the chart depends on this.
+
+    Existing `test_token_mix_chart_has_exactly_four_documented_kinds`
+    asserts set membership only. This test pins the ORDER, which is
+    what would silently regress if a future edit reintroduced a
+    bespoke literal in a different order."""
+    from tokenscope.pricing import KINDS
+
+    report = _report(
+        [
+            _entry("2026-05-15", cost=1.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=1.0, model="claude-opus-4-7"),
+        ]
+    )
+    fig = token_mix_percent_bar(report)
+    assert fig is not None
+    kind_traces = [t.name for t in fig.data if t.name in set(KINDS)]
+    assert kind_traces == list(KINDS), (
+        f"chart trace order drifted from KINDS; "
+        f"got {kind_traces!r} vs canonical {list(KINDS)!r}"
+    )
+
+
+def test_token_mix_non_cache_chart_trace_order_matches_filtered_kinds() -> None:
+    """Slice A consolidation invariant: the non-cache variant iterates
+    `[k for k in KINDS if k in _NON_CACHE_KINDS]` — preserving the
+    canonical KINDS order while filtering to non-cache. The trace
+    order must match that derived sequence, not a bespoke 3-tuple."""
+    from tokenscope.pricing import KINDS
+    from tokenscope.ui.charts import _NON_CACHE_KINDS, token_mix_non_cache_percent_bar
+
+    report = _report(
+        [
+            _entry("2026-05-15", cost=1.0, model="claude-opus-4-7"),
+            _entry("2026-05-16", cost=1.0, model="claude-opus-4-7"),
+        ]
+    )
+    fig = token_mix_non_cache_percent_bar(report)
+    assert fig is not None
+    expected_order = [k for k in KINDS if k in _NON_CACHE_KINDS]
+    kind_traces = [t.name for t in fig.data]
+    assert kind_traces == expected_order, (
+        f"non-cache chart trace order drifted from filtered KINDS; "
+        f"got {kind_traces!r} vs expected {expected_order!r}"
+    )
+
+
 def test_family_color_map_assigns_distinct_colors_to_distinct_families() -> None:
     mapping = family_color_map(["opus", "haiku", "sonnet"])
     assert len(set(mapping.values())) == 3

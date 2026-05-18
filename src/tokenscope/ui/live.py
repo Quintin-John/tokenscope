@@ -52,6 +52,7 @@ from tokenscope.ccusage import CcusageError
 from tokenscope.log import get_logger
 from tokenscope.models import BlockEntry
 from tokenscope.navigation import Navigation
+from tokenscope.pricing import KINDS
 from tokenscope.query import Query
 from tokenscope.ui.charts import (
     PALETTE,
@@ -62,21 +63,17 @@ from tokenscope.ui.sidebar import SidebarState
 
 _log = get_logger(__name__)
 
-# Display labels for the four token kinds. Match the PALETTE keys so
-# the swatch lookup is the same string used to colour every other
-# chart trace named for that kind.
+# Display labels for the four token kinds. Keyed by `pricing.KINDS`
+# (the canonical kind tuple) so the swatch lookup is the same string
+# used to colour every other chart trace named for that kind. Iteration
+# order across the Live KPI cards and mini-table comes from `KINDS`
+# directly — no parallel order tuple to drift.
 _TOKEN_KIND_LABELS: dict[str, str] = {
     "input": "Input",
     "output": "Output",
     "cache_create": "Cache create",
     "cache_read": "Cache read",
 }
-_TOKEN_KIND_ORDER: tuple[str, ...] = (
-    "input",
-    "output",
-    "cache_create",
-    "cache_read",
-)
 
 REFRESH_SECONDS = config.LIVE_REFRESH_SECONDS
 
@@ -360,8 +357,8 @@ def _render_token_kind_kpis(active: BlockEntry) -> None:
         "cache_read": active.token_counts.cache_read_input_tokens,
     }
 
-    cols = st.columns(len(_TOKEN_KIND_ORDER))
-    for col, kind in zip(cols, _TOKEN_KIND_ORDER):
+    cols = st.columns(len(KINDS))
+    for col, kind in zip(cols, KINDS):
         label = _TOKEN_KIND_LABELS[kind]
         color = PALETTE[kind]
         token_count = counts[kind]
@@ -473,7 +470,7 @@ def _render_token_kind_table(active: BlockEntry) -> None:
     }
     total = sum(counts.values()) or 1  # avoid div-by-zero — caller short-circuited on 0
     rows = []
-    for kind in ("input", "output", "cache_create", "cache_read"):
+    for kind in KINDS:
         tokens = counts[kind]
         share = tokens / total * 100
         est_cost = cost_by_kind.get(kind) if cost_by_kind is not None else None
