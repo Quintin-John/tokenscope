@@ -1392,6 +1392,196 @@ def test_day_renders_session_and_block_rows_via_shared_helper(
     )
 
 
+# --- Pre-slice P5: partial-failure semantics for ccusage fetches --------
+#
+# Slice P5 parallelises the sequential ccusage fetches on the Overview
+# and Day views via `ThreadPoolExecutor`. Today's user-visible contract
+# under partial failure MUST survive the refactor; these three tests pin
+# it BEFORE the slice lands.
+#
+# Production code today:
+#
+#   * Overview (overview.py:122-138)
+#       1. main:  `load_daily(state)` → `data.daily(state.query)` —
+#          on CcusageError, `_data.load_daily` renders st.error and
+#          returns None; Overview short-circuits at line 124.
+#       2. prior: `data.daily(prior_q)` inside a `try`/CcusageError →
+#          `prior_total = None`; render proceeds unchanged.
+#
+#   * Day view (day.py:36-42)
+#       One try block around three sequential fetches:
+#         `data.daily(state.query)`,
+#         `data.session(state.query)`,
+#         `data.blocks(active=False, query=state.query)`.
+#       ANY raising CcusageError → st.error + early return; subsequent
+#       fetches in the sequence are NOT attempted today.
+#
+# Intentionally NOT pinned: the Day-view "subsequent fetches weren't
+# attempted" detail. Slice P5 fires all three concurrently; on failure
+# the others may have already completed and their results discarded.
+# The user-visible contract (st.error rendered, post-try body absent)
+# is what these tests lock — and that survives the refactor.
+#
+# Discriminator strategy for the Overview prior-fetch test: the prior
+# query's `since` is strictly earlier than the state query's `since`
+# (analytics.prior_window_query:612-613). With sidebar's
+# `since="2026-04-18"` (→ Query.since="20260418" via _to_ccusage_date),
+# the prior_q.since is "20260319". Patching `tokenscope.data.daily`
+# with a wrapper that raises iff `query.since < "20260418"` is stable
+# under Slice P5's parallel reordering — the prior is identified by
+# its `since` value, not arrival order.
+
+
+def test_overview_renders_when_prior_window_fetch_fails(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When ONLY the prior-window `data.daily(prior_q)` raises, the
+    main Overview render proceeds with `prior_total = None`; no
+    st.error fires. Slice P5 will parallelise the two daily fetches —
+    this contract must survive."""
+    from tokenscope import data as _data_mod
+    from tokenscope.ccusage import CcusageError
+
+    original_daily = _data_mod.daily
+
+    def _selective_raise(query=None):
+        # The prior_q has `since` strictly earlier than the state's
+        # since (== "20260418" from the URL param below). Raise iff
+        # this looks like the prior fetch.
+        if (
+            query is not None
+            and query.since is not None
+            and query.since < "20260418"
+        ):
+            raise CcusageError("simulated prior fetch failure")
+        return original_daily(query)
+
+    monkeypatch.setattr("tokenscope.data.daily", _selective_raise)
+    _wire_default_fixtures(mock_ccusage)
+
+    at = _at("overview", since="2026-04-18", until="2026-05-17")
+    at.run()
+    _assert_clean(at)
+
+    # Page header rendered. Match the markdown ELEMENT, not a
+    # substring of concatenated markdown — the page CSS embeds the
+    # literal text "# Overview" inside a /* ... */ comment, so a
+    # plain substring search would always hit.
+    md_values = [m.value for m in at.markdown]
+    assert "# Overview" in md_values, (
+        "page header missing — Overview short-circuited even though "
+        "only the prior-window fetch should have failed"
+    )
+    labels = {m.label for m in at.metric}
+    assert any(l.startswith("Window cost") for l in labels), (
+        f"Window cost KPI missing; labels={labels!r} — _render_kpis "
+        "did not run after prior-window failure"
+    )
+
+
+def test_overview_renders_error_when_main_fetch_fails(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When the MAIN `data.daily(state.query)` raises (via
+    `load_daily`), Overview short-circuits at overview.py:124:
+    st.error rendered, no page header, no KPIs. Slice P5 keeps this
+    contract — `load_daily` remains the gating call before the
+    parallel prior-window dispatch."""
+    from tokenscope.ccusage import CcusageError
+
+    def _always_raises(query=None):
+        raise CcusageError("simulated main fetch failure")
+
+    monkeypatch.setattr("tokenscope.data.daily", _always_raises)
+    _wire_default_fixtures(mock_ccusage)
+
+    at = _at()
+    at.run()
+
+    # Error path fires: at least one st.error with the ccusage-failed
+    # prefix is rendered (formatted at _data.py:43).
+    error_values = [e.value for e in at.error]
+    assert any(v.startswith("ccusage failed") for v in error_values), (
+        f"expected ccusage-failed st.error; got: {error_values!r}"
+    )
+    # And no Python exception leaked — the CcusageError was caught.
+    assert len(at.exception) == 0, (
+        [str(e.value)[:300] for e in at.exception]
+    )
+    # Render short-circuited BEFORE the page header was emitted.
+    # Element-exact match — the page CSS embeds the literal text
+    # "# Overview" inside a /* ... */ comment, so a substring search
+    # over concatenated markdown would always hit.
+    md_values = [m.value for m in at.markdown]
+    assert "# Overview" not in md_values, (
+        "page header rendered despite load_daily returning None — "
+        "Overview did not short-circuit at overview.py:124"
+    )
+    # Independent corroborator: _render_kpis emits the "Window cost"
+    # st.metric; its absence proves the render short-circuited.
+    labels = {m.label for m in at.metric}
+    assert not any(l.startswith("Window cost") for l in labels), (
+        f"Window cost KPI rendered despite load_daily failure; "
+        f"labels={labels!r}"
+    )
+
+
+@pytest.mark.parametrize("failing_fetch", ["daily", "session", "blocks"])
+def test_day_view_renders_error_when_any_of_three_fetches_fails(
+    mock_ccusage, mock_ccusage_version, monkeypatch, failing_fetch
+) -> None:
+    """When ANY of `data.daily / data.session / data.blocks` raises
+    in the Day-view try block (day.py:36-42), the error path fires
+    and the post-try body doesn't render. Parametrized over each
+    of the three fetches.
+
+    Slice P5 parallelises the three calls. The "subsequent fetches
+    weren't attempted today" detail goes away (the others may have
+    already completed and their results discarded), but the
+    user-visible contract — st.error + early return — is what this
+    test pins, and that survives the refactor."""
+    from tokenscope.ccusage import CcusageError
+
+    def _raises(*args, **kwargs):
+        raise CcusageError(f"simulated {failing_fetch} fetch failure")
+
+    monkeypatch.setattr(f"tokenscope.data.{failing_fetch}", _raises)
+    _wire_default_fixtures(mock_ccusage)
+
+    # 2026-04-05 is a real fixture date (matches the helper test above).
+    at = _at("day", day="2026-04-05")
+    at.run()
+
+    # Error path fires.
+    error_values = [e.value for e in at.error]
+    assert any(v.startswith("ccusage failed") for v in error_values), (
+        f"expected ccusage-failed st.error when {failing_fetch} fails; "
+        f"got: {error_values!r}"
+    )
+    # No Python exception leaked — the CcusageError was caught at
+    # day.py:40.
+    assert len(at.exception) == 0, (
+        [str(e.value)[:300] for e in at.exception]
+    )
+    # Post-try body did NOT render — the "Cost share by model" header
+    # at day.py:64 lives AFTER the try block, so its absence proves
+    # the early-return at day.py:42 fired.
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Cost share by model" not in md, (
+        f"post-try body rendered despite {failing_fetch} failure — "
+        "early-return at day.py:42 did not fire"
+    )
+    # Breadcrumb DID render — emitted BEFORE the try block at
+    # day.py:28. Sanity check that this test isn't passing because
+    # the entire view crashed.
+    back_buttons = [b for b in at.button if "Overview" in (b.label or "")]
+    assert back_buttons, (
+        f"breadcrumb missing when {failing_fetch} fails — Day view "
+        "didn't even reach the try block, so this test's signal is "
+        "ambiguous"
+    )
+
+
 def test_session_renders_with_valid_id(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     session = json.loads((FIXTURES / "session.json").read_text())
