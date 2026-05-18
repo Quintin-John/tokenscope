@@ -171,3 +171,219 @@ def test_rates_for_model_returns_none_when_unavailable(monkeypatch) -> None:
     """Same contract for the per-model lookup."""
     monkeypatch.setattr(pricing, "_fetch_pricing_json", lambda: None)
     assert pricing.rates_for_model("claude-opus-4-7") is None
+
+
+# --- Builder filter logic (pre-Slice E regression pins) -----------------
+#
+# `_build_family_rates` and `_build_model_rates` each walk
+# `pricing_data.items()` and apply the SAME four filters:
+#
+#   1. `not isinstance(info, dict)`     — defensive against bad schema
+#   2. `not model_id.startswith("claude-")` — Anthropic-only
+#   3. `"/" in model_id`                — skip bedrock/vertex aliases
+#   4. `model_id.endswith(":beta")`     — skip beta variants
+#
+# Plus `_build_family_rates` takes a median across the surviving
+# versions in a family. None of the four filters or the median path
+# is directly tested today — the existing test fixture has one entry
+# per family with no aliases, so the filter chain never sees a value
+# it must reject.
+#
+# An upcoming slice will unify the two builders into a single pass
+# yielding `(model_id, family, FamilyRates)` tuples. These tests pin
+# the filter contract so any drift between the pre-unification
+# behaviour and the post-unification single-pass behaviour fails loudly.
+
+
+def test_build_rates_skip_non_claude_model_ids() -> None:
+    """LiteLLM's pricing schema carries non-Anthropic entries
+    (`gpt-4o`, `gemini-pro`, etc.). Both builders must skip
+    anything whose id doesn't start with `claude-` — otherwise a
+    `gpt-4o` entry would contribute to the `gpt-4o` "family"
+    (since `model_family` passes non-claude names through verbatim)
+    and a model-rates lookup for a Claude id could surface
+    OpenAI pricing on the fallback path."""
+    data = {
+        "claude-opus-4-7": {
+            "input_cost_per_token": 5e-6,
+            "output_cost_per_token": 25e-6,
+            "cache_creation_input_token_cost": 6.25e-6,
+            "cache_read_input_token_cost": 0.5e-6,
+        },
+        "gpt-4o": {
+            "input_cost_per_token": 2.5e-6,
+            "output_cost_per_token": 10e-6,
+        },
+        "gemini-1.5-pro": {
+            "input_cost_per_token": 1.25e-6,
+            "output_cost_per_token": 5e-6,
+        },
+    }
+    family_rates = pricing._build_family_rates(data)
+    model_rates = pricing._build_model_rates(data)
+    assert set(family_rates) == {"opus"}, (
+        f"non-claude families leaked into family rates: {family_rates!r}"
+    )
+    assert set(model_rates) == {"claude-opus-4-7"}, (
+        f"non-claude ids leaked into model rates: {set(model_rates)!r}"
+    )
+
+
+def test_build_rates_skip_bedrock_and_vertex_aliases() -> None:
+    """LiteLLM also carries Claude-via-Bedrock and Claude-via-Vertex
+    aliases (`bedrock/claude-opus-4-7`, `vertex_ai/claude-opus-4-7`)
+    with different pricing. The slash discriminator skips them so
+    only direct-Anthropic-API rates feed the median.
+
+    Without the filter, a vertex entry at $50/M input would shift
+    the opus family median dramatically — the dashboard's "Estimate
+    accuracy: ±X%" caption would diverge from ccusage's actual
+    costs by an entire pricing tier."""
+    data = {
+        "claude-opus-4-7": {
+            "input_cost_per_token": 5e-6,
+            "output_cost_per_token": 25e-6,
+            "cache_creation_input_token_cost": 6.25e-6,
+            "cache_read_input_token_cost": 0.5e-6,
+        },
+        "bedrock/claude-opus-4-7": {
+            "input_cost_per_token": 50e-6,  # would skew the median
+            "output_cost_per_token": 250e-6,
+            "cache_creation_input_token_cost": 62.5e-6,
+            "cache_read_input_token_cost": 5.0e-6,
+        },
+        "vertex_ai/claude-opus-4-7": {
+            "input_cost_per_token": 100e-6,
+            "output_cost_per_token": 500e-6,
+            "cache_creation_input_token_cost": 125e-6,
+            "cache_read_input_token_cost": 10e-6,
+        },
+    }
+    family_rates = pricing._build_family_rates(data)
+    model_rates = pricing._build_model_rates(data)
+    assert family_rates["opus"]["input"] == pytest.approx(5.0), (
+        "bedrock/vertex aliases polluted the opus family median: "
+        f"input={family_rates['opus']['input']!r}, expected 5.0"
+    )
+    assert "bedrock/claude-opus-4-7" not in model_rates
+    assert "vertex_ai/claude-opus-4-7" not in model_rates
+
+
+def test_build_rates_skip_beta_suffixed_ids() -> None:
+    """Beta-tagged entries (`claude-opus-4-7:beta`) are often
+    promotional discounts or pre-release placeholders with rates
+    that don't reflect what an Enterprise customer will be billed.
+    Both builders skip them."""
+    data = {
+        "claude-opus-4-7": {
+            "input_cost_per_token": 5e-6,
+            "output_cost_per_token": 25e-6,
+            "cache_creation_input_token_cost": 6.25e-6,
+            "cache_read_input_token_cost": 0.5e-6,
+        },
+        "claude-opus-4-7:beta": {
+            "input_cost_per_token": 1e-6,  # promotional, would skew
+            "output_cost_per_token": 5e-6,
+            "cache_creation_input_token_cost": 1.25e-6,
+            "cache_read_input_token_cost": 0.1e-6,
+        },
+    }
+    family_rates = pricing._build_family_rates(data)
+    model_rates = pricing._build_model_rates(data)
+    assert family_rates["opus"]["input"] == pytest.approx(5.0), (
+        f"beta variant polluted the opus median: {family_rates!r}"
+    )
+    assert "claude-opus-4-7:beta" not in model_rates
+
+
+def test_build_rates_skip_non_dict_info_defensively() -> None:
+    """LiteLLM's JSON occasionally carries top-level keys whose value
+    isn't a model-info dict (`"sample_spec": "..."`, future
+    schema-version markers, etc.). Both builders must skip them
+    rather than crash on `info[key]` access.
+
+    Catching this here guards the unification slice: a single-pass
+    rewrite that forgets the `isinstance(info, dict)` guard would
+    raise `TypeError` on the first non-dict value."""
+    data = {
+        "claude-opus-4-7": {
+            "input_cost_per_token": 5e-6,
+            "output_cost_per_token": 25e-6,
+            "cache_creation_input_token_cost": 6.25e-6,
+            "cache_read_input_token_cost": 0.5e-6,
+        },
+        "sample_spec": "this is a meta-key, not a model info dict",
+        "_schema_version": 2,
+        "deprecated_marker": None,
+    }
+    # Must not raise.
+    family_rates = pricing._build_family_rates(data)
+    model_rates = pricing._build_model_rates(data)
+    assert set(family_rates) == {"opus"}
+    assert set(model_rates) == {"claude-opus-4-7"}
+
+
+def test_build_family_rates_uses_median_across_versions() -> None:
+    """Multiple versions in the same family — median is the
+    aggregation, not mean. Median is robust to one anomalous entry
+    (e.g. a deprecated discounted version) pulling the family rate
+    sideways.
+
+    Three opus versions: input rates 3, 5, 7 → median 5.
+    Output: 20, 25, 30 → median 25."""
+    data = {
+        "claude-opus-4-5": {
+            "input_cost_per_token": 3e-6,
+            "output_cost_per_token": 20e-6,
+            "cache_creation_input_token_cost": 3.75e-6,
+            "cache_read_input_token_cost": 0.3e-6,
+        },
+        "claude-opus-4-6": {
+            "input_cost_per_token": 5e-6,
+            "output_cost_per_token": 25e-6,
+            "cache_creation_input_token_cost": 6.25e-6,
+            "cache_read_input_token_cost": 0.5e-6,
+        },
+        "claude-opus-4-7": {
+            "input_cost_per_token": 7e-6,
+            "output_cost_per_token": 30e-6,
+            "cache_creation_input_token_cost": 8.75e-6,
+            "cache_read_input_token_cost": 0.7e-6,
+        },
+    }
+    family_rates = pricing._build_family_rates(data)
+    assert family_rates["opus"]["input"] == pytest.approx(5.0)
+    assert family_rates["opus"]["output"] == pytest.approx(25.0)
+    assert family_rates["opus"]["cache_create"] == pytest.approx(6.25)
+    assert family_rates["opus"]["cache_read"] == pytest.approx(0.5)
+
+
+def test_build_rates_treat_missing_field_as_zero() -> None:
+    """A model entry that's missing one of the four cost fields
+    (e.g. a legacy entry from before cache pricing was published)
+    must produce a `0.0` rate for the missing kind, not crash, not
+    `None`. Downstream consumers (`cost_by_kind`, `cache_savings`)
+    compute `cost = tokens * rate / 1M` — None would `TypeError`,
+    zero correctly contributes nothing to the estimate.
+
+    For `_build_family_rates`, the median is taken over the entries
+    that DO have the key — a single-version family where the only
+    entry lacks the key still yields 0.0 (empty `vals` list)."""
+    data = {
+        "claude-opus-4-7": {
+            "input_cost_per_token": 5e-6,
+            "output_cost_per_token": 25e-6,
+            # cache_creation + cache_read intentionally missing
+        },
+    }
+    family_rates = pricing._build_family_rates(data)
+    model_rates = pricing._build_model_rates(data)
+
+    assert family_rates["opus"]["input"] == pytest.approx(5.0)
+    assert family_rates["opus"]["output"] == pytest.approx(25.0)
+    assert family_rates["opus"]["cache_create"] == 0.0
+    assert family_rates["opus"]["cache_read"] == 0.0
+
+    assert model_rates["claude-opus-4-7"]["input"] == pytest.approx(5.0)
+    assert model_rates["claude-opus-4-7"]["cache_create"] == 0.0
+    assert model_rates["claude-opus-4-7"]["cache_read"] == 0.0
