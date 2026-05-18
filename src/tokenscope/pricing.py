@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from statistics import median
-from typing import TypedDict
+from typing import Iterator, TypedDict
 
 from tokenscope import config
 from tokenscope.log import get_logger
@@ -112,44 +112,65 @@ def _per_token_to_per_mtok(per_token: float | None) -> float:
     return float(per_token) * 1_000_000 if per_token else 0.0
 
 
-def _build_family_rates(pricing_data: dict) -> dict[str, FamilyRates]:
-    """Group Claude models in the LiteLLM schema by family, pick the
-    median rate across versions within each family.
+# Single source for the LiteLLM JSON-field-name → kind mapping. Both
+# builders below resolve a kind's rate by looking up the LiteLLM key
+# here. Adding a new kind to `pricing.KINDS` requires one new entry
+# in this dict; a LiteLLM schema rename requires editing one value.
+# Pre-Slice-E both builders re-listed these four strings inline.
+_LITELLM_KEY_BY_KIND: dict[str, str] = {
+    KIND_INPUT:        "input_cost_per_token",
+    KIND_OUTPUT:       "output_cost_per_token",
+    KIND_CACHE_CREATE: "cache_creation_input_token_cost",
+    KIND_CACHE_READ:   "cache_read_input_token_cost",
+}
 
-    Median is robust to one anomalous version (e.g. a deprecated
-    discounted entry) pulling the family's rate sideways.
+
+def _iter_claude_pricing(
+    pricing_data: dict,
+) -> Iterator[tuple[str, str, dict]]:
+    """Yield `(model_id, family, info_dict)` for every Claude entry in
+    the LiteLLM pricing data that survives the shared filter chain.
+
+    Pre-Slice-E both `_build_family_rates` and `_build_model_rates`
+    re-applied this filter chain independently. Consolidating here
+    means the filter contract has exactly one definition — adding a
+    new prefix to skip (e.g. `sagemaker/`) is a one-line edit, not
+    two.
+
+    Filters (in order):
+      1. `info` must be a dict — LiteLLM JSON occasionally carries
+         meta-keys like `sample_spec` whose value is a string;
+         silently skipping them keeps the loop crash-free.
+      2. `model_id` must start with `claude-` — Anthropic-only.
+      3. `model_id` must not contain `/` — skips bedrock / vertex /
+         sagemaker aliases whose rates often differ by an order of
+         magnitude and would skew family medians.
+      4. `model_id` must not end with `:beta` — promotional /
+         pre-release rates that don't reflect production billing.
     """
-    # Local import to avoid analytics ↔ pricing cycle at import time.
+    # Local import to avoid the analytics ↔ pricing cycle at module
+    # load time. `model_family` is a pure pattern match — no I/O.
     from tokenscope.analytics import model_family
 
-    by_family: dict[str, list[dict]] = {}
     for model_id, info in pricing_data.items():
-        if not isinstance(info, dict) or not model_id.startswith("claude-"):
+        if not isinstance(info, dict):
             continue
-        # Skip entries that are clearly bedrock/vertex aliases — they
-        # often have different pricing and would skew the median.
+        if not model_id.startswith("claude-"):
+            continue
         if "/" in model_id or model_id.endswith(":beta"):
             continue
-        family = model_family(model_id)
-        by_family.setdefault(family, []).append(info)
+        yield model_id, model_family(model_id), info
 
-    rates: dict[str, FamilyRates] = {}
-    for family, entries in by_family.items():
-        def med(key: str) -> float:
-            vals = [
-                _per_token_to_per_mtok(e[key])
-                for e in entries
-                if e.get(key) is not None
-            ]
-            return float(median(vals)) if vals else 0.0
 
-        rates[family] = FamilyRates(
-            input=med("input_cost_per_token"),
-            output=med("output_cost_per_token"),
-            cache_create=med("cache_creation_input_token_cost"),
-            cache_read=med("cache_read_input_token_cost"),
-        )
-    return rates
+def _rates_from_info(info: dict) -> FamilyRates:
+    """Convert a single LiteLLM `info` dict into per-MTok rates for
+    every kind. Missing fields surface as `0.0` — downstream
+    consumers compute `cost = tokens * rate / 1M`, where zero
+    correctly contributes nothing to the estimate."""
+    return FamilyRates(**{
+        kind: _per_token_to_per_mtok(info.get(litellm_key))
+        for kind, litellm_key in _LITELLM_KEY_BY_KIND.items()
+    })
 
 
 def _build_model_rates(pricing_data: dict) -> dict[str, FamilyRates]:
@@ -159,23 +180,41 @@ def _build_model_rates(pricing_data: dict) -> dict[str, FamilyRates]:
     than averaging across every opus-* alias (the rate sometimes shifts
     significantly between version numbers).
     """
-    out: dict[str, FamilyRates] = {}
-    for model_id, info in pricing_data.items():
-        if not isinstance(info, dict) or not model_id.startswith("claude-"):
-            continue
-        if "/" in model_id or model_id.endswith(":beta"):
-            continue
-        out[model_id] = FamilyRates(
-            input=_per_token_to_per_mtok(info.get("input_cost_per_token")),
-            output=_per_token_to_per_mtok(info.get("output_cost_per_token")),
-            cache_create=_per_token_to_per_mtok(
-                info.get("cache_creation_input_token_cost")
-            ),
-            cache_read=_per_token_to_per_mtok(
-                info.get("cache_read_input_token_cost")
-            ),
-        )
-    return out
+    return {
+        model_id: _rates_from_info(info)
+        for model_id, _, info in _iter_claude_pricing(pricing_data)
+    }
+
+
+def _build_family_rates(pricing_data: dict) -> dict[str, FamilyRates]:
+    """Group Claude models in the LiteLLM schema by family, pick the
+    median rate across versions within each family.
+
+    Median is robust to one anomalous version (e.g. a deprecated
+    discounted entry) pulling the family's rate sideways. Missing
+    per-field values are EXCLUDED from the median — a legacy entry
+    that lacks `cache_read_input_token_cost` shouldn't be counted
+    as a 0.0 sample that would drag the family's cache_read median
+    toward zero. The `e.get(key) is not None` guard preserves that
+    contract; an empty `vals` list (every entry in the family lacks
+    the key) collapses to 0.0, matching the per-entry default.
+    """
+    by_family: dict[str, list[dict]] = {}
+    for _, family, info in _iter_claude_pricing(pricing_data):
+        by_family.setdefault(family, []).append(info)
+
+    rates: dict[str, FamilyRates] = {}
+    for family, entries in by_family.items():
+        per_kind: dict[str, float] = {}
+        for kind, litellm_key in _LITELLM_KEY_BY_KIND.items():
+            vals = [
+                _per_token_to_per_mtok(e[litellm_key])
+                for e in entries
+                if e.get(litellm_key) is not None
+            ]
+            per_kind[kind] = float(median(vals)) if vals else 0.0
+        rates[family] = FamilyRates(**per_kind)
+    return rates
 
 
 def _ensure_loaded() -> bool:

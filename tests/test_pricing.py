@@ -173,26 +173,23 @@ def test_rates_for_model_returns_none_when_unavailable(monkeypatch) -> None:
     assert pricing.rates_for_model("claude-opus-4-7") is None
 
 
-# --- Builder filter logic (pre-Slice E regression pins) -----------------
+# --- Builder filter logic + Slice E consolidation invariants ------------
 #
-# `_build_family_rates` and `_build_model_rates` each walk
-# `pricing_data.items()` and apply the SAME four filters:
+# `_build_family_rates` and `_build_model_rates` USED to walk
+# `pricing_data.items()` independently and re-apply the same four filters:
 #
-#   1. `not isinstance(info, dict)`     — defensive against bad schema
-#   2. `not model_id.startswith("claude-")` — Anthropic-only
-#   3. `"/" in model_id`                — skip bedrock/vertex aliases
-#   4. `model_id.endswith(":beta")`     — skip beta variants
+#   1. `not isinstance(info, dict)`           — defensive against bad schema
+#   2. `not model_id.startswith("claude-")`   — Anthropic-only
+#   3. `"/" in model_id`                      — skip bedrock/vertex aliases
+#   4. `model_id.endswith(":beta")`           — skip beta variants
 #
-# Plus `_build_family_rates` takes a median across the surviving
-# versions in a family. None of the four filters or the median path
-# is directly tested today — the existing test fixture has one entry
-# per family with no aliases, so the filter chain never sees a value
-# it must reject.
-#
-# An upcoming slice will unify the two builders into a single pass
-# yielding `(model_id, family, FamilyRates)` tuples. These tests pin
-# the filter contract so any drift between the pre-unification
-# behaviour and the post-unification single-pass behaviour fails loudly.
+# Slice E unified them onto a single shared iterator
+# (`_iter_claude_pricing`). The first block of tests below (added in
+# commit b0788af, pre-slice) pin the FILTER CONTRACT — each filter
+# must continue to reject the inputs it rejected before. The second
+# block (added in Slice E itself) pin the CONSOLIDATION CONTRACT —
+# both builders must accept the same set of model_ids since they
+# share the iterator.
 
 
 def test_build_rates_skip_non_claude_model_ids() -> None:
@@ -387,3 +384,123 @@ def test_build_rates_treat_missing_field_as_zero() -> None:
     assert model_rates["claude-opus-4-7"]["input"] == pytest.approx(5.0)
     assert model_rates["claude-opus-4-7"]["cache_create"] == 0.0
     assert model_rates["claude-opus-4-7"]["cache_read"] == 0.0
+
+
+# --- Slice E consolidation invariants -----------------------------------
+
+
+def _mixed_pricing_data() -> dict:
+    """Pricing data that exercises every filter branch + multiple
+    families + missing fields. Used by the consolidation tests to
+    prove both builders consume from the same iterator."""
+    return {
+        "claude-opus-4-7": {
+            "input_cost_per_token": 5e-6,
+            "output_cost_per_token": 25e-6,
+            "cache_creation_input_token_cost": 6.25e-6,
+            "cache_read_input_token_cost": 0.5e-6,
+        },
+        "claude-haiku-4-5-20251001": {
+            "input_cost_per_token": 1e-6,
+            "output_cost_per_token": 5e-6,
+            "cache_creation_input_token_cost": 1.25e-6,
+            "cache_read_input_token_cost": 0.1e-6,
+        },
+        # filtered: non-claude
+        "gpt-4o": {
+            "input_cost_per_token": 2.5e-6,
+            "output_cost_per_token": 10e-6,
+        },
+        # filtered: bedrock alias
+        "bedrock/claude-opus-4-7": {
+            "input_cost_per_token": 50e-6,
+            "output_cost_per_token": 250e-6,
+        },
+        # filtered: beta suffix
+        "claude-opus-4-7:beta": {
+            "input_cost_per_token": 1e-6,
+            "output_cost_per_token": 5e-6,
+        },
+        # filtered: non-dict info
+        "sample_spec": "this is a meta-key, not a model info dict",
+        "_schema_version": 2,
+    }
+
+
+def test_iter_claude_pricing_filters_match_documented_chain() -> None:
+    """Slice E consolidation invariant — direct test of the shared
+    iterator. Two `claude-*` entries pass; everything else is
+    filtered. A regression that loosened any one filter would
+    surface here as an extra tuple."""
+    accepted = list(pricing._iter_claude_pricing(_mixed_pricing_data()))
+    accepted_ids = [model_id for model_id, _, _ in accepted]
+    assert sorted(accepted_ids) == sorted(
+        ["claude-opus-4-7", "claude-haiku-4-5-20251001"]
+    ), f"iterator accepted unexpected set: {accepted_ids!r}"
+
+
+def test_iter_claude_pricing_yields_family_per_model() -> None:
+    """The yielded `family` field uses `analytics.model_family`. Two
+    different model versions in the same family yield the same
+    family name; a different family yields a different name."""
+    data = {
+        "claude-opus-4-5": {"input_cost_per_token": 3e-6},
+        "claude-opus-4-7": {"input_cost_per_token": 5e-6},
+        "claude-haiku-4-5-20251001": {"input_cost_per_token": 1e-6},
+    }
+    families = {
+        model_id: family
+        for model_id, family, _ in pricing._iter_claude_pricing(data)
+    }
+    assert families == {
+        "claude-opus-4-5": "opus",
+        "claude-opus-4-7": "opus",
+        "claude-haiku-4-5-20251001": "haiku",
+    }
+
+
+def test_build_model_rates_keys_match_iter_claude_pricing() -> None:
+    """Slice E consolidation invariant — `_build_model_rates` and
+    `_iter_claude_pricing` must accept the same set of model_ids.
+    If a future change diverged the filter chain in the model
+    builder (e.g. inlined a different filter), this test catches
+    the divergence as a key-set mismatch."""
+    data = _mixed_pricing_data()
+    model_keys = set(pricing._build_model_rates(data))
+    iter_keys = {model_id for model_id, _, _ in pricing._iter_claude_pricing(data)}
+    assert model_keys == iter_keys, (
+        f"_build_model_rates and _iter_claude_pricing disagree on the "
+        f"accepted set: model={model_keys!r}, iter={iter_keys!r}"
+    )
+
+
+def test_build_family_rates_families_match_iter_claude_pricing() -> None:
+    """Slice E consolidation invariant — `_build_family_rates`'s
+    family set must equal the family set yielded by
+    `_iter_claude_pricing`. Same divergence-detection contract as
+    the model builder."""
+    data = _mixed_pricing_data()
+    family_keys = set(pricing._build_family_rates(data))
+    iter_families = {
+        family for _, family, _ in pricing._iter_claude_pricing(data)
+    }
+    assert family_keys == iter_families, (
+        f"_build_family_rates and _iter_claude_pricing disagree on "
+        f"the family set: family={family_keys!r}, iter={iter_families!r}"
+    )
+
+
+def test_litellm_key_by_kind_covers_every_canonical_kind() -> None:
+    """Slice E LiteLLM mapping invariant — `_LITELLM_KEY_BY_KIND`
+    must have an entry for every kind in `pricing.KINDS`. Without
+    this, a new kind added to `KINDS` would silently get `None`
+    looked up in the LiteLLM info dict and resolve to `0.0` —
+    the chart layer would draw a missing-rate segment without any
+    warning."""
+    from tokenscope.pricing import KINDS, _LITELLM_KEY_BY_KIND
+
+    assert set(_LITELLM_KEY_BY_KIND) == set(KINDS), (
+        f"_LITELLM_KEY_BY_KIND keys must cover KINDS exactly; "
+        f"missing={set(KINDS) - set(_LITELLM_KEY_BY_KIND)!r}, "
+        f"extra={set(_LITELLM_KEY_BY_KIND) - set(KINDS)!r}"
+    )
