@@ -386,3 +386,123 @@ def test_utc_iso_to_local_clock_unknown_zone_returns_raw_iso() -> None:
     than crashing the live view's banner render."""
     out = utc_iso_to_local_clock("2026-05-16T13:00:00.000Z", "Atlantis/Lost")
     assert out == "2026-05-16T13:00:00.000Z"
+
+
+# --- Slice C: private helper contracts ----------------------------------
+#
+# The five `utc_iso_to_local_*` wrappers and `minutes_since_utc_iso`
+# share two private helpers (`_parse_utc`, `_to_local`) introduced in
+# Slice C. The wrappers' public behaviour is pinned by the 29 tests
+# above + the 7 tz tests in test_live.py — these helper-contract tests
+# add direct coverage of the helpers so a future change can localize
+# the failure to the helper rather than seeing every wrapper test fail
+# with the same symptom.
+
+
+def test_parse_utc_returns_tz_aware_datetime_for_valid_iso() -> None:
+    """`_parse_utc` produces a tz-aware datetime — the downstream
+    `astimezone()` in `_to_local` requires tz-aware input, so a
+    regression that returned a naive datetime would propagate as a
+    confusing TypeError deep in the wrappers."""
+    from datetime import timezone
+    from tokenscope.tz import _parse_utc
+
+    parsed = _parse_utc("2026-05-16T13:00:00.000Z")
+    assert parsed is not None
+    assert parsed.tzinfo is not None, (
+        "_parse_utc must return tz-aware datetime; "
+        f"got naive {parsed!r}"
+    )
+    # Trailing `Z` resolves to UTC offset, not some local-default zone.
+    assert parsed.utcoffset() == timezone.utc.utcoffset(parsed), (
+        f"_parse_utc must anchor to UTC; got offset {parsed.utcoffset()!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_iso",
+    [
+        # --- parse failures (ValueError caught + None returned) ---
+        "",                    # empty short-circuit (truthy guard)
+        "not-a-date",          # no parse possible
+        "13:00:00",            # time-only (no date)
+        "2026/05/16T13:00Z",   # wrong separators
+        "this-is-definitely-not-a-date-2026",  # arbitrary garbage
+        # --- naive-parse failures (parses, but no tzinfo: rejected) ---
+        #
+        # `datetime.fromisoformat` accepts bare dates and offset-less
+        # datetimes and returns them as naive. The helper rejects them
+        # at the boundary because downstream `astimezone()` does NOT
+        # raise on naive input — it silently interprets the value as
+        # SYSTEM-LOCAL time and converts, producing different output
+        # on different hosts for the same input. That is the
+        # "host-dependent garbage" failure the helper exists to prevent.
+        "2026-05-16",                 # bare date → naive midnight
+        "2026-05-16T13:00:00",        # date+time without offset
+        "2026-05-16T13:00:00.000",    # with subsecond, still no offset
+    ],
+)
+def test_parse_utc_returns_none_for_empty_malformed_or_naive_iso(
+    bad_iso: str,
+) -> None:
+    """Empty / malformed / naive ISO → None. Every wrapper treats
+    None as "data missing, hide the field". The naive-parse cases
+    catch the silent-wrong-data failure mode where Python's
+    `astimezone()` would interpret a naive datetime as the system's
+    local zone — fix landed in commit after Slice C ("tz: reject
+    naive datetimes at the parse boundary")."""
+    from tokenscope.tz import _parse_utc
+
+    assert _parse_utc(bad_iso) is None
+
+
+def test_to_local_preserves_instant_across_zone_conversion() -> None:
+    """`_to_local` converts the same absolute instant into a different
+    wall-clock representation. The UTC instant must be preserved —
+    only the displayed clock time changes. Verified by converting
+    13:00 UTC to America/New_York (EDT, UTC-4 in May) and asserting
+    the wall clock reads 09:00 while the underlying timestamp is
+    unchanged."""
+    from datetime import datetime, timezone
+    from tokenscope.tz import _to_local
+
+    utc_dt = datetime(2026, 5, 16, 13, 0, tzinfo=timezone.utc)
+    local_dt = _to_local(utc_dt, "America/New_York")
+    assert local_dt is not None
+    # Wall-clock representation shifts.
+    assert local_dt.hour == 9, (
+        f"expected 09:00 wall-clock in EDT; got {local_dt.hour!r}:??"
+    )
+    assert local_dt.minute == 0
+    # But the absolute instant is identical.
+    assert local_dt == utc_dt, (
+        "instant must be preserved across zone conversion"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_zone",
+    [
+        "Atlantis/Lost",                  # unknown IANA name
+        "EST5EDT,M3.2.0,M11.1.0",         # POSIX-style, not IANA
+        "/absolute/path",                 # absolute path
+        "",                               # empty string
+        "America/New_York/extra-suffix",  # malformed
+    ],
+)
+def test_to_local_returns_none_for_unknown_or_malformed_zone(
+    bad_zone: str,
+) -> None:
+    """`_to_local` returns None for any zone `ZoneInfo` can't
+    resolve — caller decides the fallback (raw ISO for most
+    wrappers, ISO date-prefix for `utc_iso_to_local_date`).
+
+    Anything other than `ZoneInfoNotFoundError` / `ValueError` is
+    a genuine bug (corrupt tzdata, etc.) and must propagate — but
+    that contract is enforced by the `_ZONE_INVALID` tuple at the
+    module top, not retested here."""
+    from datetime import datetime, timezone
+    from tokenscope.tz import _to_local
+
+    utc_dt = datetime(2026, 5, 16, 13, 0, tzinfo=timezone.utc)
+    assert _to_local(utc_dt, bad_zone) is None

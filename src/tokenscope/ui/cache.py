@@ -60,7 +60,7 @@ def render(state: SidebarState, nav: Navigation) -> None:
     if daily_report is None:
         return
 
-    _render_data_range_banner(daily_report, sidebar_since=state.query.since)
+    _render_data_range_banner(daily_report, since_date=state.query.since_date())
 
     if not daily_report.daily:
         st.info(
@@ -81,33 +81,8 @@ def render(state: SidebarState, nav: Navigation) -> None:
 # --- data-range banner --------------------------------------------------
 
 
-def _parse_ccusage_date(raw: str | None) -> date | None:
-    """Parse the sidebar's `state.query.since` / `state.query.until`
-    back into a `date`.
-
-    The sidebar formats both as ccusage's compact `YYYYMMDD` form
-    (driven by `_to_ccusage_date` in `sidebar.py`) so the
-    downstream subprocess call is well-formed; for comparison
-    against `cache_data_range`'s `YYYY-MM-DD` strings, we have to
-    parse it back. Returns ``None`` for missing or malformed
-    inputs — the banner is suppressed defensively rather than
-    crashing on a surprise format.
-    """
-    if not raw:
-        return None
-    if len(raw) == 8 and raw.isdigit():
-        try:
-            return date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
-        except ValueError:
-            return None
-    try:
-        return date.fromisoformat(raw)
-    except ValueError:
-        return None
-
-
 def _render_data_range_banner(
-    daily_report: DailyReport, *, sidebar_since: str | None
+    daily_report: DailyReport, *, since_date: date | None
 ) -> None:
     """If the actual cache data range starts AFTER the sidebar's
     selected `since`, surface that gap explicitly.
@@ -119,11 +94,11 @@ def _render_data_range_banner(
     to guess whether caching kicked in part-way through the
     window or there's a bug.
 
-    No banner when the data covers (or exceeds) the sidebar
-    window's start date, or when the sidebar's `since` is missing
-    or unparseable.
+    `since_date` is the already-parsed sidebar `since` (caller
+    invokes `state.query.since_date()`). No banner when the bound
+    is missing or unparseable, or when the data covers / exceeds
+    that start date.
     """
-    since_date = _parse_ccusage_date(sidebar_since)
     if since_date is None:
         return
     actual_range = cache_data_range(daily_report)

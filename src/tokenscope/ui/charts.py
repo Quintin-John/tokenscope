@@ -38,6 +38,7 @@ from tokenscope.analytics import (
     rolling_cost_average,
 )
 from tokenscope.models import BlockEntry, DailyEntry, DailyReport, SessionEntry
+from tokenscope.pricing import KINDS
 
 _log = logging.getLogger("tokenscope.ui.charts")
 
@@ -137,10 +138,13 @@ PALETTE: dict[str, str] = {
 # `color_discrete_map=TOKEN_KIND_COLORS` in token-mix charts so
 # Plotly emits one trace per known kind with an explicit name + a
 # stable brand color.
-TOKEN_KIND_COLORS: dict[str, str] = {
-    kind: PALETTE[kind]
-    for kind in ("input", "output", "cache_create", "cache_read")
-}
+#
+# Keyed by `pricing.KINDS` — the single source of truth for the
+# token-kind tuple. A new kind in KINDS automatically requires a
+# matching PALETTE entry; the dict-build raises `KeyError` at
+# import time if one is missing, which is the right failure mode
+# (load-time loud > runtime silent).
+TOKEN_KIND_COLORS: dict[str, str] = {kind: PALETTE[kind] for kind in KINDS}
 
 # The valid set of token-kind labels. Defensive filter: rows whose
 # `kind` falls outside this set are dropped before reaching Plotly,
@@ -617,7 +621,7 @@ def token_mix_percent_bar(daily_report: DailyReport) -> go.Figure | None:
         totals > 0, 0.0
     )
 
-    kind_order = ["input", "output", "cache_create", "cache_read"]
+    kind_order = list(KINDS)
 
     # Hand-build one go.Bar per known kind rather than `px.bar(...,
     # color="kind", ...)`. Plotly Express can auto-introduce a phantom
@@ -665,7 +669,12 @@ def token_mix_percent_bar(daily_report: DailyReport) -> go.Figure | None:
 # height on real Claude Code data, crushing the other three into a
 # 2% sliver; this chart re-bases the percentages on the non-cache
 # total so input / output / cache_create read as meaningful slices.
-_NON_CACHE_KINDS: frozenset[str] = frozenset({"input", "output", "cache_create"})
+#
+# Derived from `KINDS` minus the one excluded entry so a future
+# addition to KINDS automatically counts as non-cache (the default
+# for a new kind). Explicit cache-related additions would update
+# the exclusion list here.
+_NON_CACHE_KINDS: frozenset[str] = frozenset(k for k in KINDS if k != "cache_read")
 
 
 def token_mix_non_cache_percent_bar(
@@ -700,7 +709,10 @@ def token_mix_non_cache_percent_bar(
         totals > 0, 0.0
     )
 
-    kind_order = ["input", "output", "cache_create"]
+    # Preserve canonical KINDS order while filtering to the non-cache
+    # subset — the chart layer's iteration order matches every other
+    # token-kind chart in the app.
+    kind_order = [k for k in KINDS if k in _NON_CACHE_KINDS]
     fig = go.Figure()
     for kind in kind_order:
         sub = df[df["kind"] == kind].sort_values("date")
@@ -772,7 +784,7 @@ def session_token_mix(entry: SessionEntry) -> go.Figure:
         x="kind",
         y="tokens",
         color="kind",
-        category_orders={"kind": ["input", "output", "cache_create", "cache_read"]},
+        category_orders={"kind": list(KINDS)},
         labels={"kind": "", "tokens": "Tokens"},
     )
     fig.update_layout(
@@ -1059,7 +1071,7 @@ def per_model_token_kind_bar(daily_report: DailyReport) -> go.Figure | None:
         return None
 
     df = pd.DataFrame(rows)
-    kind_order = ["input", "output", "cache_create", "cache_read"]
+    kind_order = list(KINDS)
 
     fig = go.Figure()
     for kind in kind_order:
@@ -1385,19 +1397,14 @@ def live_token_kind_composition_bar(
     Returns ``None`` when the block has zero tokens (the caller
     renders an empty-state caption).
     """
-    from tokenscope.analytics import format_compact_int
+    from tokenscope.analytics import block_token_counts_by_kind, format_compact_int
 
-    counts = {
-        "input": block.token_counts.input_tokens,
-        "output": block.token_counts.output_tokens,
-        "cache_create": block.token_counts.cache_creation_input_tokens,
-        "cache_read": block.token_counts.cache_read_input_tokens,
-    }
+    counts = block_token_counts_by_kind(block)
     total = sum(counts.values())
     if total == 0:
         return None
 
-    kind_order = ["input", "output", "cache_create", "cache_read"]
+    kind_order = list(KINDS)
     fig = go.Figure()
     for kind in kind_order:
         tokens = counts[kind]

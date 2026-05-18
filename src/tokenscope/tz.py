@@ -97,30 +97,88 @@ def detect_local_iana() -> str:
     return DEFAULT_FALLBACK
 
 
+# --- shared parse + zone helpers ---------------------------------------
+#
+# Every public `utc_iso_to_local_*` wrapper below shares the same two
+# operations: parse a UTC ISO timestamp (with ccusage's trailing `Z`)
+# into a tz-aware datetime, then convert it into a target IANA zone.
+# Pulling them into named helpers means there is exactly one place that
+# knows the ccusage ISO quirk (the `Z` → `+00:00` substitution) and one
+# place that knows the zone-failure contract — adding a new local-format
+# wrapper is one strftime line, not a 7-line ceremony.
+
+
+def _parse_utc(iso: str) -> datetime | None:
+    """Parse a UTC ISO timestamp (with trailing `Z`) into a tz-aware
+    datetime.
+
+    Returns ``None`` for empty input, malformed input, OR input that
+    parses but yields a naive datetime — `datetime.fromisoformat`
+    accepts bare dates (`"2026-05-16"`) and date+time without an
+    offset (`"2026-05-16T13:00:00"`) and returns them as naive
+    midnight / naive local-clock. A naive datetime silently violates
+    this helper's "UTC" contract: downstream `astimezone()` does NOT
+    raise on a naive value — it implicitly assumes SYSTEM-LOCAL
+    timezone, producing different output on different hosts for the
+    same input. Reject these at the boundary so the contract holds.
+
+    Anything else (corrupt tzdata file, OSError) propagates — those
+    represent genuine bugs the user should see.
+
+    The `Z` → `+00:00` substitution is the one-line workaround for
+    Python ≤ 3.10's `fromisoformat` rejecting the bare `Z` marker
+    ccusage emits.
+    """
+    if not iso:
+        return None
+    try:
+        parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        # Bare date or naive datetime — does not satisfy the
+        # tz-aware UTC contract. Caller's view stays "hide the
+        # field" rather than rendering host-TZ-dependent garbage.
+        return None
+    return parsed
+
+
+def _to_local(utc_dt: datetime, zone: str) -> datetime | None:
+    """Convert a tz-aware UTC datetime into the given IANA zone.
+
+    Returns ``None`` when the zone is unknown, malformed, or an
+    empty string. Each wrapper decides its own fallback (raw ISO,
+    date prefix, etc.) — the helper just signals "couldn't convert".
+    """
+    try:
+        return utc_dt.astimezone(ZoneInfo(zone))
+    except _ZONE_INVALID:
+        return None
+
+
+# --- public conversion wrappers ----------------------------------------
+
+
 def utc_iso_to_local(iso: str, zone: str) -> str | None:
     """Convert a UTC ISO timestamp (with trailing `Z`) to a local-time
     string in the user's IANA zone.
 
     Returns ``None`` when parsing fails (defensive — ccusage's output
     has been stable, but a corrupted block id shouldn't crash a view).
+    Falls back to the raw ISO input when the zone itself can't be
+    resolved.
 
     Example:
         utc_iso_to_local("2026-05-16T13:00:00.000Z", "America/Los_Angeles")
             → "2026-05-16 06:00:00 PDT"
     """
-    if not iso:
+    utc_dt = _parse_utc(iso)
+    if utc_dt is None:
         return None
-    try:
-        # Python 3.11+ handles the trailing `Z`; older versions don't.
-        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    try:
-        local_dt = utc_dt.astimezone(ZoneInfo(zone))
-    except _ZONE_INVALID:
+    local_dt = _to_local(utc_dt, zone)
+    if local_dt is None:
         # Unknown / malformed zone — caller passed something we can't
         # resolve. Return the raw input rather than crashing the view.
-        # Any other exception (e.g. tzdata corruption) is a bug; surface it.
         return iso
     return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
@@ -131,15 +189,11 @@ def utc_iso_to_local_clock(iso: str, zone: str) -> str | None:
     is implicit (the active block always covers the current day's
     5-hour slice) and only the start/end clock times need to render.
     """
-    if not iso:
+    utc_dt = _parse_utc(iso)
+    if utc_dt is None:
         return None
-    try:
-        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    try:
-        local_dt = utc_dt.astimezone(ZoneInfo(zone))
-    except _ZONE_INVALID:
+    local_dt = _to_local(utc_dt, zone)
+    if local_dt is None:
         return iso
     return local_dt.strftime("%H:%M")
 
@@ -160,9 +214,8 @@ def utc_iso_to_local_naive_iso(iso: str, zone: str) -> str | None:
     any ``...Z`` value into the browser's locale. Naive ISO sidesteps
     the coercion entirely.
 
-    Returns ``None`` for empty / malformed input (defensive — a
-    corrupted block id shouldn't crash a Plotly figure build); the
-    raw input is returned if the zone itself can't be resolved.
+    Returns ``None`` for empty / malformed input; the raw ISO is
+    returned if the zone itself can't be resolved.
 
     Example:
         utc_iso_to_local_naive_iso(
@@ -170,15 +223,11 @@ def utc_iso_to_local_naive_iso(iso: str, zone: str) -> str | None:
         )
             → "2026-05-17T15:00:00"   (3pm EDT, the wall-clock time)
     """
-    if not iso:
+    utc_dt = _parse_utc(iso)
+    if utc_dt is None:
         return None
-    try:
-        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    try:
-        local_dt = utc_dt.astimezone(ZoneInfo(zone))
-    except _ZONE_INVALID:
+    local_dt = _to_local(utc_dt, zone)
+    if local_dt is None:
         return iso
     return local_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -197,11 +246,8 @@ def minutes_since_utc_iso(iso: str, now_utc: datetime | None = None) -> float | 
     test surface can inject a frozen instant. Returns ``None`` for
     empty / unparseable input.
     """
-    if not iso:
-        return None
-    try:
-        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
+    utc_dt = _parse_utc(iso)
+    if utc_dt is None:
         return None
     reference = now_utc if now_utc is not None else datetime.now(timezone.utc)
     return (reference - utc_dt).total_seconds() / 60.0
@@ -211,17 +257,14 @@ def utc_iso_to_local_date(iso: str, zone: str) -> str | None:
     """Return just the YYYY-MM-DD local-zone date of a UTC ISO timestamp.
 
     Used by `analytics.blocks_on_day` to bucket a block by its local
-    start-of-day rather than its UTC date.
+    start-of-day rather than its UTC date. Falls back to the UTC
+    date prefix when the zone can't be resolved — a last-resort
+    label rather than crashing the view.
     """
-    if not iso:
+    utc_dt = _parse_utc(iso)
+    if utc_dt is None:
         return None
-    try:
-        utc_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    try:
-        return utc_dt.astimezone(ZoneInfo(zone)).strftime("%Y-%m-%d")
-    except _ZONE_INVALID:
-        # Unknown / malformed zone — return the UTC date-prefix as a
-        # last-resort label rather than crashing the view.
+    local_dt = _to_local(utc_dt, zone)
+    if local_dt is None:
         return iso[:10]
+    return local_dt.strftime("%Y-%m-%d")
