@@ -690,3 +690,99 @@ def test_live_token_kind_table_rows_pair_each_kind_with_correct_count(
     assert actual_by_kind == expected_rows, (
         f"token-kind table row mapping wrong: {actual_by_kind!r}"
     )
+
+
+# --- Pre-slice P1: compute-once invariant for Live block helpers -------
+#
+# Pinning the CURRENT call count of the two block-analytics helpers on
+# the Live render path. Slice P1 will compute each helper exactly ONCE
+# in `_live_panel` and pass the result down to all consumers; this test
+# locks today's upper bounds so a regression that ADDS a redundant call
+# fires immediately, even before Slice P1's per-slice tightening test.
+#
+# Today's actual counts (instrumented):
+#
+#   * `block_cost_by_kind`: 2 calls per render
+#       - live.py:348 (`_render_token_kind_kpis`)
+#       - live.py:455 (`_render_token_kind_table`)
+#
+#   * `block_token_counts_by_kind`: 5 calls per render
+#       - live.py:354 (`_render_token_kind_kpis`, direct)
+#       - live.py:461 (`_render_token_kind_table`, direct)
+#       - charts.py:1402 (`live_token_kind_composition_bar` for the
+#         segment widths)
+#       - analytics.py:807 (`block_cost_by_kind` internal), called
+#         twice via the two `block_cost_by_kind` invocations above
+#
+# Slice P1 will collapse these to ≤ 1 each (one call in `_live_panel`,
+# results threaded through the renderer call chain). The slice's own
+# tests will assert the tightened bound; this pin protects the looser
+# upper bound against an UNRELATED regression.
+
+
+def test_block_helpers_call_count_bounded_on_live_render(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Counter wrappers around `block_cost_by_kind` and
+    `block_token_counts_by_kind` lock the upper bound of calls per
+    Live render at today's measured values (2 / 5 respectively).
+    Any regression that ADDS a redundant call fails here, before the
+    Slice-P1 tightening test that asserts ≤ 1 each."""
+    from tokenscope import analytics
+
+    cost_calls: list[BlockEntry] = []
+    counts_calls: list[BlockEntry] = []
+
+    original_cost = analytics.block_cost_by_kind
+    original_counts = analytics.block_token_counts_by_kind
+
+    def _counted_cost(block: BlockEntry):
+        cost_calls.append(block)
+        return original_cost(block)
+
+    def _counted_counts(block: BlockEntry) -> dict[str, int]:
+        counts_calls.append(block)
+        return original_counts(block)
+
+    # Patch at every binding point. Both `live.py` and `charts.py`
+    # import the names directly; `block_cost_by_kind` ALSO calls
+    # `block_token_counts_by_kind` via the analytics module's own
+    # binding. Patch all three locations so every call routes
+    # through the counter.
+    monkeypatch.setattr(analytics, "block_cost_by_kind", _counted_cost)
+    monkeypatch.setattr(analytics, "block_token_counts_by_kind", _counted_counts)
+    monkeypatch.setattr(
+        "tokenscope.ui.live.block_cost_by_kind", _counted_cost
+    )
+    monkeypatch.setattr(
+        "tokenscope.ui.live.block_token_counts_by_kind", _counted_counts
+    )
+    # `charts.live_token_kind_composition_bar` does a local import
+    # of `block_token_counts_by_kind` inside the function body, so
+    # the analytics-module patch above already catches it.
+
+    payload = _make_active_block_payload(
+        "2026-05-16T13:00:00.000Z",
+        input_tokens=11, output_tokens=22,
+        cache_create_tokens=33, cache_read_tokens=44,
+    )
+    _wire_live_fixtures(mock_ccusage, payload)
+    at = AppTest.from_file(APP_PATH, default_timeout=30)
+    at.query_params["view"] = "live"
+    at.run()
+
+    assert not at.exception, [str(e.value)[:200] for e in at.exception]
+
+    # Pre-slice-P1 upper bounds (measured on the current branch tip).
+    # Slice P1 tightens both to ≤ 1 via its own per-slice tests.
+    assert len(cost_calls) <= 2, (
+        f"block_cost_by_kind called {len(cost_calls)} times per "
+        f"Live render; pre-slice upper bound is 2"
+    )
+    assert len(counts_calls) <= 5, (
+        f"block_token_counts_by_kind called {len(counts_calls)} times "
+        f"per Live render; pre-slice upper bound is 5"
+    )
+    # Lower bound: each helper IS called at least once.
+    assert len(cost_calls) >= 1
+    assert len(counts_calls) >= 1
