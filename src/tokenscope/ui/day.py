@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import streamlit as st
 
 from tokenscope import data
@@ -33,10 +35,27 @@ def render(state: SidebarState, nav: Navigation) -> None:
 
     st.subheader(f"Day detail — {nav.day}")
 
+    # Three ccusage fetches run concurrently on cold cache — wall-clock
+    # latency drops from sum to max. On hot cache (within the
+    # @st.cache_data TTL at data.py:50) all three are dict-lookup cheap;
+    # the executor's overhead is the only cost and remains sub-ms.
+    #
+    # ANY raising CcusageError → the first error encountered when
+    # reading futures in order surfaces via the existing except branch
+    # (st.error + return). The other two futures may have already
+    # completed; their results are discarded. The ThreadPoolExecutor's
+    # __exit__ waits for in-flight workers before the function returns,
+    # so no thread leaks past the render boundary.
     try:
-        daily_report = data.daily(state.query)
-        session_report = data.session(state.query)
-        blocks_report = data.blocks(active=False, query=state.query)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            daily_future = pool.submit(data.daily, state.query)
+            session_future = pool.submit(data.session, state.query)
+            blocks_future = pool.submit(
+                data.blocks, active=False, query=state.query
+            )
+            daily_report = daily_future.result()
+            session_report = session_future.result()
+            blocks_report = blocks_future.result()
     except CcusageError as exc:
         st.error(f"ccusage failed:\n\n```\n{exc}\n```")
         return

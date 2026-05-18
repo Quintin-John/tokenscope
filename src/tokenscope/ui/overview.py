@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 
@@ -119,23 +120,38 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
     today = today or date.today()
     refresh_time = datetime.now()
 
-    daily_report = load_daily(state)
-    if daily_report is None:
-        return
-
-    # Prior-period comparison fetch (cached). Only meaningful when the
-    # current query has explicit since/until.
+    # Prior-period comparison fetch runs concurrently with the main
+    # `load_daily(state)` so its subprocess latency is hidden behind
+    # the main fetch's on cold cache. Only meaningful when the current
+    # query has explicit since/until (otherwise prior_q is None and the
+    # executor takes no submissions — creating an empty pool is free
+    # since ThreadPoolExecutor lazily spawns workers only on submit).
+    #
+    # `load_daily` MUST run on the main thread: it calls `st.error` on
+    # failure, and Streamlit widget calls aren't safe from a worker
+    # thread. The prior fetch is the only call dispatched to the pool.
+    #
+    # On main-fetch failure, the pool's `__exit__` waits for the
+    # in-flight prior worker to complete before the function returns —
+    # acceptable: the error path is rare and the prior is a short fetch.
     prior_total: float | None = None
     prior_q = prior_window_query(state.query)
     chosen = set(state.selected_models)
-    if prior_q is not None:
-        try:
-            prior_report = data.daily(prior_q)
-            if chosen and chosen != set(available_models(prior_report)):
-                prior_report = filter_daily_by_models(prior_report, chosen)
-            prior_total = window_cost(prior_report)
-        except CcusageError:
-            prior_total = None
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        prior_future = (
+            pool.submit(data.daily, prior_q) if prior_q is not None else None
+        )
+        daily_report = load_daily(state)
+        if daily_report is None:
+            return
+        if prior_future is not None:
+            try:
+                prior_report = prior_future.result()
+                if chosen and chosen != set(available_models(prior_report)):
+                    prior_report = filter_daily_by_models(prior_report, chosen)
+                prior_total = window_cost(prior_report)
+            except CcusageError:
+                prior_total = None
 
     window_days = state.query.window_days() or config.DEFAULT_RANGE_DAYS
     spike = spike_day(daily_report, threshold_multiplier=config.OVERVIEW_SPIKE_THRESHOLD)

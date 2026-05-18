@@ -1697,6 +1697,236 @@ def test_day_view_renders_error_when_any_of_three_fetches_fails(
     )
 
 
+# --- Slice P5: parallel-execution proofs + cross-thread cache --------
+#
+# These tests pin the BEHAVIOUR that the slice introduces (parallelism)
+# and the architectural assumption it depends on (cross-thread cache
+# hits). The pre-slice partial-failure pins above continue to pass —
+# they capture the user-visible contract Slice P5 must preserve.
+#
+# Parallelism proof strategy: `threading.Barrier(N)` blocks each
+# patched fetch at entry until N parties arrive. If the production
+# code is sequential, only one party ever reaches the barrier — the
+# barrier times out and raises `BrokenBarrierError`, which AppTest
+# surfaces as an exception, failing the test. If parallel, all N
+# arrive within microseconds and all proceed. This is a deterministic
+# proof of concurrent execution, NOT a wall-clock timing assertion.
+
+
+def test_day_view_fetches_run_in_parallel_under_slice_p5(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Day view dispatches `data.daily / data.session / data.blocks`
+    concurrently via ThreadPoolExecutor. Proof: a 3-party
+    `threading.Barrier` blocks each patched fetch until all three
+    parties have arrived. A sequential implementation would deadlock
+    until the 5s timeout fires; the parallel implementation lets all
+    three reach the barrier within microseconds and proceed."""
+    import threading
+    from tokenscope import data as _data_mod
+
+    barrier = threading.Barrier(3, timeout=5.0)
+    original_daily = _data_mod.daily
+    original_session = _data_mod.session
+    original_blocks = _data_mod.blocks
+
+    # The sidebar's `_fetch_discovery_options` calls `data.daily` once
+    # BEFORE Day view's render runs (sidebar.py:492 → :335). Letting
+    # that call consume a barrier slot would deadlock — the slot would
+    # never be filled by a second/third party. Gate the discovery call
+    # through without barriering it.
+    discovery_seen = False
+
+    def _barriered_daily(*a, **kw):
+        nonlocal discovery_seen
+        if not discovery_seen:
+            discovery_seen = True
+            return original_daily(*a, **kw)
+        barrier.wait()
+        return original_daily(*a, **kw)
+
+    def _barriered_session(*a, **kw):
+        barrier.wait()
+        return original_session(*a, **kw)
+
+    def _barriered_blocks(*a, **kw):
+        barrier.wait()
+        return original_blocks(*a, **kw)
+
+    monkeypatch.setattr("tokenscope.data.daily", _barriered_daily)
+    monkeypatch.setattr("tokenscope.data.session", _barriered_session)
+    monkeypatch.setattr("tokenscope.data.blocks", _barriered_blocks)
+    _wire_default_fixtures(mock_ccusage)
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+
+    # Lower bound: if the barrier deadlocked, AppTest would surface a
+    # BrokenBarrierError as a Python exception. Reaching this point
+    # proves all three fetches arrived at the barrier concurrently.
+    assert barrier.n_waiting == 0, (
+        f"barrier left with {barrier.n_waiting} parties still waiting "
+        "— a fetch was patched but never invoked"
+    )
+    assert discovery_seen, (
+        "sidebar discovery call never fired; the gating logic is "
+        "stale and the test is asserting against the wrong call set"
+    )
+
+
+def test_overview_fetches_run_in_parallel_under_slice_p5(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Overview dispatches the main `load_daily` fetch (on the main
+    thread, since it calls `st.error` on failure) alongside the
+    prior-window `data.daily(prior_q)` fetch on a worker thread. A
+    2-party `threading.Barrier` patches `data.daily` to block at
+    entry; both the main-thread call and the worker-thread call
+    must reach the barrier before either proceeds."""
+    import threading
+    from tokenscope import data as _data_mod
+
+    # Sidebar's `_fetch_discovery_options` ALSO calls data.daily for
+    # its model/project discovery query (sidebar.py:492). That single
+    # call runs BEFORE Overview's render begins, so the barrier must
+    # be re-armed (or guarded) so the discovery call doesn't consume
+    # a party slot. Solution: patch data.daily with a wrapper that
+    # only blocks once the Overview render is in flight.
+    discovery_seen = False
+    barrier = threading.Barrier(2, timeout=5.0)
+    original_daily = _data_mod.daily
+
+    def _gated_daily(*a, **kw):
+        nonlocal discovery_seen
+        if not discovery_seen:
+            # The sidebar's pre-render discovery query — let it through
+            # without consuming a barrier slot.
+            discovery_seen = True
+            return original_daily(*a, **kw)
+        barrier.wait()
+        return original_daily(*a, **kw)
+
+    monkeypatch.setattr("tokenscope.data.daily", _gated_daily)
+    _wire_default_fixtures(mock_ccusage)
+
+    # Sidebar `since`/`until` must be set so `prior_window_query`
+    # returns non-None — otherwise no prior fetch is dispatched and
+    # the barrier sees only one party.
+    at = _at("overview", since="2026-04-18", until="2026-05-17")
+    at.run()
+    _assert_clean(at)
+
+    assert barrier.n_waiting == 0, (
+        f"barrier left with {barrier.n_waiting} parties still waiting"
+    )
+    assert discovery_seen, (
+        "sidebar discovery call never fired; the gating logic is "
+        "stale and the test is asserting against the wrong call set"
+    )
+
+
+def test_day_view_renders_error_when_all_three_fetches_fail(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Extends the pre-slice parametrized one-fails-others-succeed
+    coverage to the all-three-fail case. Slice P5's parallel dispatch
+    means all three failing futures arrive concurrently; the executor
+    must surface ONE exception cleanly via the existing except branch
+    without leaking a multi-exception traceback."""
+    from tokenscope.ccusage import CcusageError
+
+    def _raises_daily(*a, **kw):
+        raise CcusageError("simulated daily failure")
+
+    def _raises_session(*a, **kw):
+        raise CcusageError("simulated session failure")
+
+    def _raises_blocks(*a, **kw):
+        raise CcusageError("simulated blocks failure")
+
+    monkeypatch.setattr("tokenscope.data.daily", _raises_daily)
+    monkeypatch.setattr("tokenscope.data.session", _raises_session)
+    monkeypatch.setattr("tokenscope.data.blocks", _raises_blocks)
+    _wire_default_fixtures(mock_ccusage)
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+
+    error_values = [e.value for e in at.error]
+    assert any(v.startswith("ccusage failed") for v in error_values), (
+        f"expected ccusage-failed st.error when all three fail; "
+        f"got: {error_values!r}"
+    )
+    # Exactly ONE st.error — the executor surfaces the first exception
+    # via daily_future.result(); the other two errors are discarded.
+    # A regression that tried to "collect all errors" and rendered
+    # multiple st.error blocks would fail this.
+    assert len(error_values) == 1, (
+        f"expected exactly one st.error; got {len(error_values)}: "
+        f"{error_values!r}"
+    )
+    assert len(at.exception) == 0, (
+        [str(e.value)[:300] for e in at.exception]
+    )
+
+
+def test_data_cache_hits_from_worker_thread_under_slice_p5(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Slice P5 dispatches `data.daily / data.session / data.blocks`
+    from worker threads. `@st.cache_data` MUST hit cross-thread —
+    otherwise parallelisation forces a subprocess invocation on every
+    render instead of leveraging the 30-second TTL cache at data.py:50.
+
+    Streamlit documents `@st.cache_data` as thread-safe; this test
+    pins the property empirically by counting `_run_json` invocations
+    across two successive renders against the same query. The second
+    render must add ZERO new `_run_json` calls — every fetch dispatched
+    from the executor's worker pool must hit the cache populated by
+    the first render's main-thread (sidebar) + worker-thread calls."""
+    from tokenscope import ccusage
+
+    call_count = [0]
+    # `mock_ccusage` already patched `_run_json`; capture that patched
+    # function and wrap it with a counter. `monkeypatch.setattr`
+    # replaces the binding with our wrapper.
+    patched_run_json = ccusage._run_json
+
+    def _counted(args):
+        call_count[0] += 1
+        return patched_run_json(args)
+
+    monkeypatch.setattr(ccusage, "_run_json", _counted)
+    _wire_default_fixtures(mock_ccusage)
+
+    # First render: cache empty; Day view's three fetches + sidebar's
+    # discovery query all invoke `_run_json` at the bottom of the stack.
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+    first_render_calls = call_count[0]
+    assert first_render_calls >= 3, (
+        f"first render made only {first_render_calls} _run_json calls "
+        "— at least 3 Day-view fetches expected on cold cache"
+    )
+
+    # Second render: same query → `@st.cache_data` at data.py:56 must
+    # hit for every fetch, regardless of which thread dispatches the
+    # call. Zero new `_run_json` invocations.
+    at2 = _at("day", day="2026-04-05")
+    at2.run()
+    _assert_clean(at2)
+    second_render_calls = call_count[0] - first_render_calls
+
+    assert second_render_calls == 0, (
+        f"@st.cache_data did NOT hit cross-thread: second render made "
+        f"{second_render_calls} additional _run_json calls. Slice P5's "
+        "parallelisation would force a subprocess on every render "
+        "without cross-thread cache hits."
+    )
+
+
 def test_session_renders_with_valid_id(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     session = json.loads((FIXTURES / "session.json").read_text())
