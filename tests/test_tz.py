@@ -506,3 +506,49 @@ def test_to_local_returns_none_for_unknown_or_malformed_zone(
 
     utc_dt = datetime(2026, 5, 16, 13, 0, tzinfo=timezone.utc)
     assert _to_local(utc_dt, bad_zone) is None
+
+
+# --- Pre-slice P4: re-detection after explicit invalidation ------------
+#
+# Slice P4 will wrap `detect_local_iana()` in `functools.lru_cache` to
+# eliminate the full probe-chain (TZ env var → astimezone → /etc/localtime
+# symlink) running on every sidebar render. The load-bearing
+# precondition is that the cache MUST be clearable so tests can
+# monkeypatch a new environment and observe the re-detected result —
+# otherwise every test in this file after the first would return the
+# initially-cached value regardless of monkeypatched env.
+#
+# This test pins the re-detection contract on the current (pre-cache)
+# implementation: changing the environment causes the next call to
+# return a different value. After Slice P4 the same test continues to
+# pass via the lru_cache's `.cache_clear()` method.
+
+
+def test_detect_local_iana_re_runs_after_environment_change(monkeypatch) -> None:
+    """Pins the re-detection contract: changing the environment (here,
+    the `TZ` env var) and calling `detect_local_iana()` again returns
+    the NEW value, not a stale cached one. Slice P4 will introduce an
+    lru_cache layer that must respect `cache_clear()` to preserve this
+    behaviour — without explicit clearing the second call would return
+    the FIRST value, silently masking environment changes."""
+    # First detection: TZ set to America/New_York.
+    monkeypatch.setenv("TZ", "America/New_York")
+    first = detect_local_iana()
+    assert first == "America/New_York"
+
+    # Change TZ to a different zone.
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+
+    # Today (pre-Slice-P4) the function re-detects on every call, so
+    # the new TZ is immediately reflected. Post-Slice-P4 the test
+    # must explicitly clear the lru_cache before the call to honour
+    # the same contract — the assertion below catches a regression
+    # where `cache_clear()` was forgotten OR the cache layer didn't
+    # expose one.
+    if hasattr(detect_local_iana, "cache_clear"):
+        detect_local_iana.cache_clear()
+    second = detect_local_iana()
+    assert second == "Asia/Tokyo", (
+        f"detect_local_iana must re-detect after env change + "
+        f"cache_clear(); got {second!r}, expected 'Asia/Tokyo'"
+    )

@@ -484,6 +484,121 @@ def test_overview_token_mix_toggle_switches_chart_variant(
     assert toggle_after.value is False
 
 
+# --- Pre-slice P6: compute-once invariant for Overview window aggregates ---
+#
+# Pinning the CURRENT call count of `window_cost` and
+# `aggregate_cache_hit_ratio` on the Overview render path. Slice P6 will
+# compute both aggregates ONCE at the top of `overview.render()` and pass
+# the primitives down to `_render_kpis` / `_render_insight` /
+# `_render_cost_composition`. This test locks today's upper bounds so an
+# unrelated regression that ADDS a redundant call fires immediately.
+#
+# Today's actual counts on the MAIN daily_report (instrumented):
+#
+#   * `window_cost(daily_report)`: 3 calls per render
+#       - overview.py:220 (`_render_kpis`)
+#       - overview.py:316 (`_render_insight`)
+#       - overview.py:347 (`_render_cost_composition`)
+#
+#   * `aggregate_cache_hit_ratio(daily_report)`: 2 calls per render
+#       - overview.py:222 (`_render_kpis`)
+#       - overview.py:320 (`_render_insight`)
+#
+# Slice P6 collapses both to ≤ 1 on the main daily_report. The slice's
+# own per-slice test asserts ≤ 1; this pre-slice pin protects the looser
+# bounds (≤ 3 / ≤ 2) against unrelated regressions.
+#
+# Separately, `window_cost` is also called ONCE per render on the
+# PRIOR-window report (overview.py:136) — a different DailyReport
+# instance. Slice P6 does NOT touch that call (it's against a distinct
+# argument, not a redundant scan of the same report). The counter
+# discriminates by `id(daily_report)` so the pre-slice bound captures
+# "the most-scanned report is scanned ≤ 3 times" — Slice P6 reduces
+# that to ≤ 1 without conflating with the unrelated prior-report call.
+
+
+def test_overview_window_aggregates_called_at_most_thrice_per_render(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Counter wrappers around `window_cost` and
+    `aggregate_cache_hit_ratio` lock the upper bounds of per-report
+    calls per Overview render at today's MEASURED values (3 / 2 on the
+    main daily_report). Any regression that ADDS a redundant scan of
+    the same report fails here, before the Slice-P6 tightening test
+    that asserts ≤ 1 each."""
+    from collections import Counter
+    from tokenscope import analytics
+    from tokenscope.models import DailyReport
+
+    window_cost_ids: list[int] = []
+    ratio_ids: list[int] = []
+
+    original_wc = analytics.window_cost
+    original_ratio = analytics.aggregate_cache_hit_ratio
+
+    def _counted_wc(daily_report: DailyReport) -> float:
+        window_cost_ids.append(id(daily_report))
+        return original_wc(daily_report)
+
+    def _counted_ratio(daily_report: DailyReport) -> float:
+        ratio_ids.append(id(daily_report))
+        return original_ratio(daily_report)
+
+    # `overview.py` imports both names directly at module load
+    # (overview.py:77, 89), so patching the analytics module attribute
+    # alone is NOT sufficient — the local rebind in `overview` still
+    # points at the unpatched original. Patch both binding sites.
+    monkeypatch.setattr(analytics, "window_cost", _counted_wc)
+    monkeypatch.setattr(analytics, "aggregate_cache_hit_ratio", _counted_ratio)
+    monkeypatch.setattr("tokenscope.ui.overview.window_cost", _counted_wc)
+    monkeypatch.setattr(
+        "tokenscope.ui.overview.aggregate_cache_hit_ratio", _counted_ratio
+    )
+
+    # Default fixtures + default sidebar plan (Enterprise, non-flat-rate)
+    # → `_render_cost_composition` fires → all three `window_cost` call
+    # sites are exercised.
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+
+    # Discriminate by `id(daily_report)`: `window_cost` is called on
+    # both the main daily_report (3×) and the prior-window report (1×).
+    # The pin pins "the most-scanned report is scanned ≤ 3 times" — the
+    # main daily_report is the one Slice P6 collapses. Without the
+    # per-id partition, a regression that added a call to the prior
+    # report would mis-fire here.
+    wc_by_id = Counter(window_cost_ids)
+    ratio_by_id = Counter(ratio_ids)
+
+    assert wc_by_id, "window_cost was never called on the Overview render"
+    assert ratio_by_id, (
+        "aggregate_cache_hit_ratio was never called on the Overview render"
+    )
+
+    # Pre-slice-P6 upper bounds (measured on the current branch tip).
+    # Slice P6 tightens both to ≤ 1 via its own per-slice test.
+    assert max(wc_by_id.values()) <= 3, (
+        f"window_cost called {max(wc_by_id.values())} times on the "
+        f"most-scanned daily_report per Overview render; pre-slice "
+        f"upper bound is 3. Full per-id counts: {dict(wc_by_id)!r}"
+    )
+    assert max(ratio_by_id.values()) <= 2, (
+        f"aggregate_cache_hit_ratio called {max(ratio_by_id.values())} "
+        f"times on the most-scanned daily_report per Overview render; "
+        f"pre-slice upper bound is 2. Full per-id counts: "
+        f"{dict(ratio_by_id)!r}"
+    )
+    # Lower bounds: each helper IS called at least once on its most-
+    # scanned report. The cost-composition call (overview.py:347) is
+    # the third `window_cost` call site — guarded by `daily_report.daily`
+    # being non-empty AND plan not being flat-rate. The default fixture +
+    # default plan satisfy both, so today we expect exactly 3 / 2.
+    assert max(wc_by_id.values()) >= 1
+    assert max(ratio_by_id.values()) >= 1
+
+
 def test_live_renders(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     at = _at("live")
@@ -1075,6 +1190,199 @@ def test_cache_renders(mock_ccusage, mock_ccusage_version) -> None:
     assert "Effective $ / 1M tokens" in labels
 
 
+# --- Pre-slice P2: compute-once invariant for Cache view per-model rows ---
+#
+# Pinning the CURRENT call count of `per_model_cache_performance` on the
+# Cache render path. Slice P2 will compute the rows ONCE in
+# `_render_per_model_performance` and pass them to `per_model_cache_bar`;
+# this test locks today's upper bound (2) so an unrelated regression that
+# ADDS a redundant call fires immediately.
+#
+# Today's actual count (instrumented):
+#
+#   * `per_model_cache_performance`: 2 calls per render
+#       - cache.py:310   (`_render_per_model_performance`, table rows)
+#       - charts.py:1127 (`per_model_cache_bar`, internal re-fetch)
+#
+# Slice P2 collapses this to 1 by passing rows to `per_model_cache_bar(
+# rows=...)`. The slice's own per-slice test asserts ≤ 1; this pre-slice
+# pin protects the looser ≤ 2 upper bound against unrelated regressions.
+#
+# The companion `..._table_rows_match_analytics_output` test pins the
+# round-trip contract: whatever values analytics produces, those values
+# (formatted per cache.py:331-342) ARE what's rendered. Slice P2's
+# pass-rows-in refactor must preserve this exact rendering — the test
+# continues to pass after the slice.
+
+
+def test_cache_per_model_table_rows_match_analytics_output(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """The rendered per-model table on the Cache view MUST mirror
+    `per_model_cache_performance(daily_report)` row-for-row, formatted
+    per `cache.py:331-342`. Slice P2 reshapes the call chain (compute
+    once, pass rows) — this round-trip contract must survive."""
+    # Deterministic 2-model fixture: opus & haiku, distinct cache
+    # patterns so any row swap is unambiguous in the failure message.
+    two_model_daily = {
+        "daily": [
+            {
+                "date": "2026-05-15",
+                "inputTokens": 600, "outputTokens": 200,
+                "cacheCreationTokens": 600, "cacheReadTokens": 1200,
+                "totalTokens": 2600, "totalCost": 5.0,
+                "modelsUsed": [
+                    "claude-opus-4-7", "claude-haiku-4-5-20251001",
+                ],
+                "modelBreakdowns": [
+                    {
+                        "modelName": "claude-opus-4-7",
+                        "inputTokens": 500, "outputTokens": 150,
+                        "cacheCreationTokens": 500, "cacheReadTokens": 1000,
+                        "cost": 4.0,
+                    },
+                    {
+                        "modelName": "claude-haiku-4-5-20251001",
+                        "inputTokens": 100, "outputTokens": 50,
+                        "cacheCreationTokens": 100, "cacheReadTokens": 200,
+                        "cost": 1.0,
+                    },
+                ],
+            }
+        ],
+        "totals": {
+            "inputTokens": 600, "outputTokens": 200,
+            "cacheCreationTokens": 600, "cacheReadTokens": 1200,
+            "totalTokens": 2600, "totalCost": 5.0,
+        },
+    }
+    # Deterministic pricing — without this, the Savings column depends
+    # on whether LiteLLM is reachable in the test environment. Same
+    # patch site the no-rates fallback test uses (see
+    # test_cache_renders_savings_unavailable_fallback_when_no_rates).
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model",
+        lambda _name: {
+            "input": 15.0, "output": 75.0,
+            "cache_read": 1.5, "cache_create": 18.75,
+        },
+    )
+    mock_ccusage("daily", response=two_model_daily)
+    mock_ccusage(
+        "daily", "--instances",
+        response={
+            "projects": {"-project-a": two_model_daily["daily"]},
+            "totals": two_model_daily["totals"],
+        },
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    # Compute the expectation against the SAME report the app rendered.
+    from tokenscope.analytics import (
+        format_compact_int, per_model_cache_performance,
+    )
+    from tokenscope.models import DailyReport
+
+    report = DailyReport.model_validate(two_model_daily)
+    rows = per_model_cache_performance(report)
+    assert rows is not None
+    rows_with_activity = [
+        r for r in rows
+        if r["cache_read_tokens"] > 0 or r["cache_create_tokens"] > 0
+    ]
+    expected = [
+        {
+            "Model": r["model"],
+            "Cache hit ratio": f"{r['cache_hit_ratio']:.1%}",
+            "Reads": format_compact_int(r["cache_read_tokens"]),
+            "Writes": format_compact_int(r["cache_create_tokens"]),
+            "Savings": (
+                f"${r['savings_usd']:,.2f}" if r["has_rates"] else "—"
+            ),
+        }
+        for r in rows_with_activity
+    ]
+
+    # Locate the per-model table by its unique column signature.
+    per_model_df = None
+    for df_element in at.dataframe:
+        df = df_element.value
+        if list(df.columns) == [
+            "Model", "Cache hit ratio", "Reads", "Writes", "Savings",
+        ]:
+            per_model_df = df
+            break
+    assert per_model_df is not None, (
+        "per-model cache table not rendered; dataframes seen: "
+        f"{[list(d.value.columns) for d in at.dataframe]!r}"
+    )
+
+    actual = [
+        {
+            k: row[k]
+            for k in ("Model", "Cache hit ratio", "Reads", "Writes", "Savings")
+        }
+        for _, row in per_model_df.iterrows()
+    ]
+    assert actual == expected, (
+        f"per-model table rows diverge from analytics output\n"
+        f"  expected: {expected!r}\n"
+        f"  actual:   {actual!r}"
+    )
+
+
+def test_per_model_cache_performance_called_at_most_twice_per_cache_render(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Counter wrapper around `per_model_cache_performance` locks the
+    upper bound of calls per Cache render at today's measured value
+    (2). Any regression that ADDS a redundant call fails here, before
+    the Slice-P2 tightening test that asserts ≤ 1."""
+    from tokenscope import analytics
+
+    calls: list = []
+    original = analytics.per_model_cache_performance
+
+    def _counted(daily_report):
+        calls.append(daily_report)
+        return original(daily_report)
+
+    # Patch at every binding point: both `cache.py` and `charts.py`
+    # import the name directly, and the analytics module also exports
+    # it. Patching all three routes every call through the counter.
+    monkeypatch.setattr(analytics, "per_model_cache_performance", _counted)
+    monkeypatch.setattr(
+        "tokenscope.ui.cache.per_model_cache_performance", _counted
+    )
+    monkeypatch.setattr(
+        "tokenscope.ui.charts.per_model_cache_performance", _counted
+    )
+
+    # Default daily.json carries 4 models with cache activity → the
+    # `len(rows_with_activity) >= 2` gate at cache.py:317 passes and
+    # the per-model section renders.
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    # Pre-slice-P2 upper bound (measured on the current branch tip).
+    # Slice P2 tightens to ≤ 1 via its own per-slice test.
+    assert len(calls) <= 2, (
+        f"per_model_cache_performance called {len(calls)} times per "
+        f"Cache render; pre-slice upper bound is 2"
+    )
+    # Lower bound: the helper IS called at least once (per-model
+    # section renders).
+    assert len(calls) >= 1
+
+
 def test_models_renders(mock_ccusage, mock_ccusage_version) -> None:
     """Models view boots cleanly with the new H1 + 4-card KPI strip.
     Asserts the surface shape: H1 present, Total cost card present,
@@ -1196,6 +1504,426 @@ def test_day_renders_session_and_block_rows_via_shared_helper(
     )
     assert len(block_buttons) >= 1, (
         f"expected at least one 'open-block-*' button; got keys={button_keys}"
+    )
+
+
+# --- Pre-slice P5: partial-failure semantics for ccusage fetches --------
+#
+# Slice P5 parallelises the sequential ccusage fetches on the Overview
+# and Day views via `ThreadPoolExecutor`. Today's user-visible contract
+# under partial failure MUST survive the refactor; these three tests pin
+# it BEFORE the slice lands.
+#
+# Production code today:
+#
+#   * Overview (overview.py:122-138)
+#       1. main:  `load_daily(state)` → `data.daily(state.query)` —
+#          on CcusageError, `_data.load_daily` renders st.error and
+#          returns None; Overview short-circuits at line 124.
+#       2. prior: `data.daily(prior_q)` inside a `try`/CcusageError →
+#          `prior_total = None`; render proceeds unchanged.
+#
+#   * Day view (day.py:36-42)
+#       One try block around three sequential fetches:
+#         `data.daily(state.query)`,
+#         `data.session(state.query)`,
+#         `data.blocks(active=False, query=state.query)`.
+#       ANY raising CcusageError → st.error + early return; subsequent
+#       fetches in the sequence are NOT attempted today.
+#
+# Intentionally NOT pinned: the Day-view "subsequent fetches weren't
+# attempted" detail. Slice P5 fires all three concurrently; on failure
+# the others may have already completed and their results discarded.
+# The user-visible contract (st.error rendered, post-try body absent)
+# is what these tests lock — and that survives the refactor.
+#
+# Discriminator strategy for the Overview prior-fetch test: the prior
+# query's `since` is strictly earlier than the state query's `since`
+# (analytics.prior_window_query:612-613). With sidebar's
+# `since="2026-04-18"` (→ Query.since="20260418" via _to_ccusage_date),
+# the prior_q.since is "20260319". Patching `tokenscope.data.daily`
+# with a wrapper that raises iff `query.since < "20260418"` is stable
+# under Slice P5's parallel reordering — the prior is identified by
+# its `since` value, not arrival order.
+
+
+def test_overview_renders_when_prior_window_fetch_fails(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When ONLY the prior-window `data.daily(prior_q)` raises, the
+    main Overview render proceeds with `prior_total = None`; no
+    st.error fires. Slice P5 will parallelise the two daily fetches —
+    this contract must survive."""
+    from tokenscope import data as _data_mod
+    from tokenscope.ccusage import CcusageError
+
+    original_daily = _data_mod.daily
+
+    def _selective_raise(query=None):
+        # The prior_q has `since` strictly earlier than the state's
+        # since (== "20260418" from the URL param below). Raise iff
+        # this looks like the prior fetch.
+        if (
+            query is not None
+            and query.since is not None
+            and query.since < "20260418"
+        ):
+            raise CcusageError("simulated prior fetch failure")
+        return original_daily(query)
+
+    monkeypatch.setattr("tokenscope.data.daily", _selective_raise)
+    _wire_default_fixtures(mock_ccusage)
+
+    at = _at("overview", since="2026-04-18", until="2026-05-17")
+    at.run()
+    _assert_clean(at)
+
+    # Page header rendered. Match the markdown ELEMENT, not a
+    # substring of concatenated markdown — the page CSS embeds the
+    # literal text "# Overview" inside a /* ... */ comment, so a
+    # plain substring search would always hit.
+    md_values = [m.value for m in at.markdown]
+    assert "# Overview" in md_values, (
+        "page header missing — Overview short-circuited even though "
+        "only the prior-window fetch should have failed"
+    )
+    labels = {m.label for m in at.metric}
+    assert any(l.startswith("Window cost") for l in labels), (
+        f"Window cost KPI missing; labels={labels!r} — _render_kpis "
+        "did not run after prior-window failure"
+    )
+
+
+def test_overview_renders_error_when_main_fetch_fails(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When the MAIN `data.daily(state.query)` raises (via
+    `load_daily`), Overview short-circuits at overview.py:124:
+    st.error rendered, no page header, no KPIs. Slice P5 keeps this
+    contract — `load_daily` remains the gating call before the
+    parallel prior-window dispatch."""
+    from tokenscope.ccusage import CcusageError
+
+    def _always_raises(query=None):
+        raise CcusageError("simulated main fetch failure")
+
+    monkeypatch.setattr("tokenscope.data.daily", _always_raises)
+    _wire_default_fixtures(mock_ccusage)
+
+    at = _at()
+    at.run()
+
+    # Error path fires: at least one st.error with the ccusage-failed
+    # prefix is rendered (formatted at _data.py:43).
+    error_values = [e.value for e in at.error]
+    assert any(v.startswith("ccusage failed") for v in error_values), (
+        f"expected ccusage-failed st.error; got: {error_values!r}"
+    )
+    # And no Python exception leaked — the CcusageError was caught.
+    assert len(at.exception) == 0, (
+        [str(e.value)[:300] for e in at.exception]
+    )
+    # Render short-circuited BEFORE the page header was emitted.
+    # Element-exact match — the page CSS embeds the literal text
+    # "# Overview" inside a /* ... */ comment, so a substring search
+    # over concatenated markdown would always hit.
+    md_values = [m.value for m in at.markdown]
+    assert "# Overview" not in md_values, (
+        "page header rendered despite load_daily returning None — "
+        "Overview did not short-circuit at overview.py:124"
+    )
+    # Independent corroborator: _render_kpis emits the "Window cost"
+    # st.metric; its absence proves the render short-circuited.
+    labels = {m.label for m in at.metric}
+    assert not any(l.startswith("Window cost") for l in labels), (
+        f"Window cost KPI rendered despite load_daily failure; "
+        f"labels={labels!r}"
+    )
+
+
+@pytest.mark.parametrize("failing_fetch", ["daily", "session", "blocks"])
+def test_day_view_renders_error_when_any_of_three_fetches_fails(
+    mock_ccusage, mock_ccusage_version, monkeypatch, failing_fetch
+) -> None:
+    """When ANY of `data.daily / data.session / data.blocks` raises
+    in the Day-view try block (day.py:36-42), the error path fires
+    and the post-try body doesn't render. Parametrized over each
+    of the three fetches.
+
+    Slice P5 parallelises the three calls. The "subsequent fetches
+    weren't attempted today" detail goes away (the others may have
+    already completed and their results discarded), but the
+    user-visible contract — st.error + early return — is what this
+    test pins, and that survives the refactor."""
+    from tokenscope.ccusage import CcusageError
+
+    def _raises(*args, **kwargs):
+        raise CcusageError(f"simulated {failing_fetch} fetch failure")
+
+    monkeypatch.setattr(f"tokenscope.data.{failing_fetch}", _raises)
+    _wire_default_fixtures(mock_ccusage)
+
+    # 2026-04-05 is a real fixture date (matches the helper test above).
+    at = _at("day", day="2026-04-05")
+    at.run()
+
+    # Error path fires.
+    error_values = [e.value for e in at.error]
+    assert any(v.startswith("ccusage failed") for v in error_values), (
+        f"expected ccusage-failed st.error when {failing_fetch} fails; "
+        f"got: {error_values!r}"
+    )
+    # No Python exception leaked — the CcusageError was caught at
+    # day.py:40.
+    assert len(at.exception) == 0, (
+        [str(e.value)[:300] for e in at.exception]
+    )
+    # Post-try body did NOT render — the "Cost share by model" header
+    # at day.py:64 lives AFTER the try block, so its absence proves
+    # the early-return at day.py:42 fired.
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Cost share by model" not in md, (
+        f"post-try body rendered despite {failing_fetch} failure — "
+        "early-return at day.py:42 did not fire"
+    )
+    # Breadcrumb DID render — emitted BEFORE the try block at
+    # day.py:28. Sanity check that this test isn't passing because
+    # the entire view crashed.
+    back_buttons = [b for b in at.button if "Overview" in (b.label or "")]
+    assert back_buttons, (
+        f"breadcrumb missing when {failing_fetch} fails — Day view "
+        "didn't even reach the try block, so this test's signal is "
+        "ambiguous"
+    )
+
+
+# --- Slice P5: parallel-execution proofs + cross-thread cache --------
+#
+# These tests pin the BEHAVIOUR that the slice introduces (parallelism)
+# and the architectural assumption it depends on (cross-thread cache
+# hits). The pre-slice partial-failure pins above continue to pass —
+# they capture the user-visible contract Slice P5 must preserve.
+#
+# Parallelism proof strategy: `threading.Barrier(N)` blocks each
+# patched fetch at entry until N parties arrive. If the production
+# code is sequential, only one party ever reaches the barrier — the
+# barrier times out and raises `BrokenBarrierError`, which AppTest
+# surfaces as an exception, failing the test. If parallel, all N
+# arrive within microseconds and all proceed. This is a deterministic
+# proof of concurrent execution, NOT a wall-clock timing assertion.
+
+
+def test_day_view_fetches_run_in_parallel_under_slice_p5(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Day view dispatches `data.daily / data.session / data.blocks`
+    concurrently via ThreadPoolExecutor. Proof: a 3-party
+    `threading.Barrier` blocks each patched fetch until all three
+    parties have arrived. A sequential implementation would deadlock
+    until the 5s timeout fires; the parallel implementation lets all
+    three reach the barrier within microseconds and proceed."""
+    import threading
+    from tokenscope import data as _data_mod
+
+    barrier = threading.Barrier(3, timeout=5.0)
+    original_daily = _data_mod.daily
+    original_session = _data_mod.session
+    original_blocks = _data_mod.blocks
+
+    # The sidebar's `_fetch_discovery_options` calls `data.daily` once
+    # BEFORE Day view's render runs (sidebar.py:492 → :335). Letting
+    # that call consume a barrier slot would deadlock — the slot would
+    # never be filled by a second/third party. Gate the discovery call
+    # through without barriering it.
+    discovery_seen = False
+
+    def _barriered_daily(*a, **kw):
+        nonlocal discovery_seen
+        if not discovery_seen:
+            discovery_seen = True
+            return original_daily(*a, **kw)
+        barrier.wait()
+        return original_daily(*a, **kw)
+
+    def _barriered_session(*a, **kw):
+        barrier.wait()
+        return original_session(*a, **kw)
+
+    def _barriered_blocks(*a, **kw):
+        barrier.wait()
+        return original_blocks(*a, **kw)
+
+    monkeypatch.setattr("tokenscope.data.daily", _barriered_daily)
+    monkeypatch.setattr("tokenscope.data.session", _barriered_session)
+    monkeypatch.setattr("tokenscope.data.blocks", _barriered_blocks)
+    _wire_default_fixtures(mock_ccusage)
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+
+    # Lower bound: if the barrier deadlocked, AppTest would surface a
+    # BrokenBarrierError as a Python exception. Reaching this point
+    # proves all three fetches arrived at the barrier concurrently.
+    assert barrier.n_waiting == 0, (
+        f"barrier left with {barrier.n_waiting} parties still waiting "
+        "— a fetch was patched but never invoked"
+    )
+    assert discovery_seen, (
+        "sidebar discovery call never fired; the gating logic is "
+        "stale and the test is asserting against the wrong call set"
+    )
+
+
+def test_overview_fetches_run_in_parallel_under_slice_p5(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Overview dispatches the main `load_daily` fetch (on the main
+    thread, since it calls `st.error` on failure) alongside the
+    prior-window `data.daily(prior_q)` fetch on a worker thread. A
+    2-party `threading.Barrier` patches `data.daily` to block at
+    entry; both the main-thread call and the worker-thread call
+    must reach the barrier before either proceeds."""
+    import threading
+    from tokenscope import data as _data_mod
+
+    # Sidebar's `_fetch_discovery_options` ALSO calls data.daily for
+    # its model/project discovery query (sidebar.py:492). That single
+    # call runs BEFORE Overview's render begins, so the barrier must
+    # be re-armed (or guarded) so the discovery call doesn't consume
+    # a party slot. Solution: patch data.daily with a wrapper that
+    # only blocks once the Overview render is in flight.
+    discovery_seen = False
+    barrier = threading.Barrier(2, timeout=5.0)
+    original_daily = _data_mod.daily
+
+    def _gated_daily(*a, **kw):
+        nonlocal discovery_seen
+        if not discovery_seen:
+            # The sidebar's pre-render discovery query — let it through
+            # without consuming a barrier slot.
+            discovery_seen = True
+            return original_daily(*a, **kw)
+        barrier.wait()
+        return original_daily(*a, **kw)
+
+    monkeypatch.setattr("tokenscope.data.daily", _gated_daily)
+    _wire_default_fixtures(mock_ccusage)
+
+    # Sidebar `since`/`until` must be set so `prior_window_query`
+    # returns non-None — otherwise no prior fetch is dispatched and
+    # the barrier sees only one party.
+    at = _at("overview", since="2026-04-18", until="2026-05-17")
+    at.run()
+    _assert_clean(at)
+
+    assert barrier.n_waiting == 0, (
+        f"barrier left with {barrier.n_waiting} parties still waiting"
+    )
+    assert discovery_seen, (
+        "sidebar discovery call never fired; the gating logic is "
+        "stale and the test is asserting against the wrong call set"
+    )
+
+
+def test_day_view_renders_error_when_all_three_fetches_fail(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Extends the pre-slice parametrized one-fails-others-succeed
+    coverage to the all-three-fail case. Slice P5's parallel dispatch
+    means all three failing futures arrive concurrently; the executor
+    must surface ONE exception cleanly via the existing except branch
+    without leaking a multi-exception traceback."""
+    from tokenscope.ccusage import CcusageError
+
+    def _raises_daily(*a, **kw):
+        raise CcusageError("simulated daily failure")
+
+    def _raises_session(*a, **kw):
+        raise CcusageError("simulated session failure")
+
+    def _raises_blocks(*a, **kw):
+        raise CcusageError("simulated blocks failure")
+
+    monkeypatch.setattr("tokenscope.data.daily", _raises_daily)
+    monkeypatch.setattr("tokenscope.data.session", _raises_session)
+    monkeypatch.setattr("tokenscope.data.blocks", _raises_blocks)
+    _wire_default_fixtures(mock_ccusage)
+
+    at = _at("day", day="2026-04-05")
+    at.run()
+
+    error_values = [e.value for e in at.error]
+    assert any(v.startswith("ccusage failed") for v in error_values), (
+        f"expected ccusage-failed st.error when all three fail; "
+        f"got: {error_values!r}"
+    )
+    # Exactly ONE st.error — the executor surfaces the first exception
+    # via daily_future.result(); the other two errors are discarded.
+    # A regression that tried to "collect all errors" and rendered
+    # multiple st.error blocks would fail this.
+    assert len(error_values) == 1, (
+        f"expected exactly one st.error; got {len(error_values)}: "
+        f"{error_values!r}"
+    )
+    assert len(at.exception) == 0, (
+        [str(e.value)[:300] for e in at.exception]
+    )
+
+
+def test_data_cache_hits_from_worker_thread_under_slice_p5(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Slice P5 dispatches `data.daily / data.session / data.blocks`
+    from worker threads. `@st.cache_data` MUST hit cross-thread —
+    otherwise parallelisation forces a subprocess invocation on every
+    render instead of leveraging the 30-second TTL cache at data.py:50.
+
+    Streamlit documents `@st.cache_data` as thread-safe; this test
+    pins the property empirically by counting `_run_json` invocations
+    across two successive renders against the same query. The second
+    render must add ZERO new `_run_json` calls — every fetch dispatched
+    from the executor's worker pool must hit the cache populated by
+    the first render's main-thread (sidebar) + worker-thread calls."""
+    from tokenscope import ccusage
+
+    call_count = [0]
+    # `mock_ccusage` already patched `_run_json`; capture that patched
+    # function and wrap it with a counter. `monkeypatch.setattr`
+    # replaces the binding with our wrapper.
+    patched_run_json = ccusage._run_json
+
+    def _counted(args):
+        call_count[0] += 1
+        return patched_run_json(args)
+
+    monkeypatch.setattr(ccusage, "_run_json", _counted)
+    _wire_default_fixtures(mock_ccusage)
+
+    # First render: cache empty; Day view's three fetches + sidebar's
+    # discovery query all invoke `_run_json` at the bottom of the stack.
+    at = _at("day", day="2026-04-05")
+    at.run()
+    _assert_clean(at)
+    first_render_calls = call_count[0]
+    assert first_render_calls >= 3, (
+        f"first render made only {first_render_calls} _run_json calls "
+        "— at least 3 Day-view fetches expected on cold cache"
+    )
+
+    # Second render: same query → `@st.cache_data` at data.py:56 must
+    # hit for every fetch, regardless of which thread dispatches the
+    # call. Zero new `_run_json` invocations.
+    at2 = _at("day", day="2026-04-05")
+    at2.run()
+    _assert_clean(at2)
+    second_render_calls = call_count[0] - first_render_calls
+
+    assert second_render_calls == 0, (
+        f"@st.cache_data did NOT hit cross-thread: second render made "
+        f"{second_render_calls} additional _run_json calls. Slice P5's "
+        "parallelisation would force a subprocess on every render "
+        "without cross-thread cache hits."
     )
 
 

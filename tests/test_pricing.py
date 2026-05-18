@@ -852,3 +852,58 @@ def test_rates_for_family_returns_none_for_unknown_family(monkeypatch) -> None:
     monkeypatch.setattr(pricing, "_fetch_pricing_json", _minimal_pricing_data)
 
     assert pricing.rates_for_family("imaginary-family") is None
+
+
+# --- Pre-slice P3: reset_cache() invalidation contract -----------------
+#
+# Slice P3 will wrap `rates_for_model` / `rates_for_family` in
+# `functools.lru_cache` to eliminate redundant lookups across the five
+# analytics functions that walk `daily_report × model_breakdowns`. The
+# load-bearing precondition is that `pricing.reset_cache()` ALSO clears
+# the lru_caches — otherwise tests that change the fixture data via
+# monkeypatch would silently return stale lru-cached values from the
+# prior test.
+#
+# This test pins the invalidation contract on the current (pre-cache)
+# implementation: a fresh fetch after `reset_cache()` reflects the
+# latest fixture, not whatever `_PRICING_DATA_CACHE` held before. After
+# Slice P3 the same test must continue to pass, proving the lru_cache
+# layer respects `reset_cache()`.
+
+
+def test_reset_cache_invalidates_subsequent_rate_lookups(monkeypatch) -> None:
+    """After `reset_cache()`, subsequent `rates_for_model` calls must
+    reflect any change to the underlying `_fetch_pricing_json` source
+    (not stale values from the prior load). Slice P3 will add an
+    `lru_cache` layer that must respect this contract — without
+    explicit clearing, the lru_cache would keep returning the
+    pre-`reset` value."""
+    # First load: input rate 5.
+    monkeypatch.setattr(pricing, "_fetch_pricing_json", _minimal_pricing_data)
+    first = pricing.rates_for_model("claude-opus-4-7")
+    assert first is not None
+    assert first["input"] == pytest.approx(5.0)
+
+    # Swap the fetch source to return different rates.
+    def _altered_pricing_data() -> dict:
+        data = _minimal_pricing_data()
+        data["claude-opus-4-7"]["input_cost_per_token"] = 7e-6  # was 5e-6
+        return data
+
+    monkeypatch.setattr(pricing, "_fetch_pricing_json", _altered_pricing_data)
+
+    # Without reset: the in-process cache short-circuits, value unchanged.
+    cached = pricing.rates_for_model("claude-opus-4-7")
+    assert cached is not None
+    assert cached["input"] == pytest.approx(5.0), (
+        "before reset_cache: value must still reflect the FIRST load"
+    )
+
+    # After reset: next call re-fetches and returns the altered value.
+    pricing.reset_cache()
+    fresh = pricing.rates_for_model("claude-opus-4-7")
+    assert fresh is not None
+    assert fresh["input"] == pytest.approx(7.0), (
+        "after reset_cache: subsequent lookup must reflect the new "
+        "fixture, not the lru-cached value from before reset"
+    )
