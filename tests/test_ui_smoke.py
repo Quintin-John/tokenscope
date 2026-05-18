@@ -1075,6 +1075,199 @@ def test_cache_renders(mock_ccusage, mock_ccusage_version) -> None:
     assert "Effective $ / 1M tokens" in labels
 
 
+# --- Pre-slice P2: compute-once invariant for Cache view per-model rows ---
+#
+# Pinning the CURRENT call count of `per_model_cache_performance` on the
+# Cache render path. Slice P2 will compute the rows ONCE in
+# `_render_per_model_performance` and pass them to `per_model_cache_bar`;
+# this test locks today's upper bound (2) so an unrelated regression that
+# ADDS a redundant call fires immediately.
+#
+# Today's actual count (instrumented):
+#
+#   * `per_model_cache_performance`: 2 calls per render
+#       - cache.py:310   (`_render_per_model_performance`, table rows)
+#       - charts.py:1127 (`per_model_cache_bar`, internal re-fetch)
+#
+# Slice P2 collapses this to 1 by passing rows to `per_model_cache_bar(
+# rows=...)`. The slice's own per-slice test asserts ≤ 1; this pre-slice
+# pin protects the looser ≤ 2 upper bound against unrelated regressions.
+#
+# The companion `..._table_rows_match_analytics_output` test pins the
+# round-trip contract: whatever values analytics produces, those values
+# (formatted per cache.py:331-342) ARE what's rendered. Slice P2's
+# pass-rows-in refactor must preserve this exact rendering — the test
+# continues to pass after the slice.
+
+
+def test_cache_per_model_table_rows_match_analytics_output(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """The rendered per-model table on the Cache view MUST mirror
+    `per_model_cache_performance(daily_report)` row-for-row, formatted
+    per `cache.py:331-342`. Slice P2 reshapes the call chain (compute
+    once, pass rows) — this round-trip contract must survive."""
+    # Deterministic 2-model fixture: opus & haiku, distinct cache
+    # patterns so any row swap is unambiguous in the failure message.
+    two_model_daily = {
+        "daily": [
+            {
+                "date": "2026-05-15",
+                "inputTokens": 600, "outputTokens": 200,
+                "cacheCreationTokens": 600, "cacheReadTokens": 1200,
+                "totalTokens": 2600, "totalCost": 5.0,
+                "modelsUsed": [
+                    "claude-opus-4-7", "claude-haiku-4-5-20251001",
+                ],
+                "modelBreakdowns": [
+                    {
+                        "modelName": "claude-opus-4-7",
+                        "inputTokens": 500, "outputTokens": 150,
+                        "cacheCreationTokens": 500, "cacheReadTokens": 1000,
+                        "cost": 4.0,
+                    },
+                    {
+                        "modelName": "claude-haiku-4-5-20251001",
+                        "inputTokens": 100, "outputTokens": 50,
+                        "cacheCreationTokens": 100, "cacheReadTokens": 200,
+                        "cost": 1.0,
+                    },
+                ],
+            }
+        ],
+        "totals": {
+            "inputTokens": 600, "outputTokens": 200,
+            "cacheCreationTokens": 600, "cacheReadTokens": 1200,
+            "totalTokens": 2600, "totalCost": 5.0,
+        },
+    }
+    # Deterministic pricing — without this, the Savings column depends
+    # on whether LiteLLM is reachable in the test environment. Same
+    # patch site the no-rates fallback test uses (see
+    # test_cache_renders_savings_unavailable_fallback_when_no_rates).
+    monkeypatch.setattr(
+        "tokenscope.pricing.rates_for_model",
+        lambda _name: {
+            "input": 15.0, "output": 75.0,
+            "cache_read": 1.5, "cache_create": 18.75,
+        },
+    )
+    mock_ccusage("daily", response=two_model_daily)
+    mock_ccusage(
+        "daily", "--instances",
+        response={
+            "projects": {"-project-a": two_model_daily["daily"]},
+            "totals": two_model_daily["totals"],
+        },
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    # Compute the expectation against the SAME report the app rendered.
+    from tokenscope.analytics import (
+        format_compact_int, per_model_cache_performance,
+    )
+    from tokenscope.models import DailyReport
+
+    report = DailyReport.model_validate(two_model_daily)
+    rows = per_model_cache_performance(report)
+    assert rows is not None
+    rows_with_activity = [
+        r for r in rows
+        if r["cache_read_tokens"] > 0 or r["cache_create_tokens"] > 0
+    ]
+    expected = [
+        {
+            "Model": r["model"],
+            "Cache hit ratio": f"{r['cache_hit_ratio']:.1%}",
+            "Reads": format_compact_int(r["cache_read_tokens"]),
+            "Writes": format_compact_int(r["cache_create_tokens"]),
+            "Savings": (
+                f"${r['savings_usd']:,.2f}" if r["has_rates"] else "—"
+            ),
+        }
+        for r in rows_with_activity
+    ]
+
+    # Locate the per-model table by its unique column signature.
+    per_model_df = None
+    for df_element in at.dataframe:
+        df = df_element.value
+        if list(df.columns) == [
+            "Model", "Cache hit ratio", "Reads", "Writes", "Savings",
+        ]:
+            per_model_df = df
+            break
+    assert per_model_df is not None, (
+        "per-model cache table not rendered; dataframes seen: "
+        f"{[list(d.value.columns) for d in at.dataframe]!r}"
+    )
+
+    actual = [
+        {
+            k: row[k]
+            for k in ("Model", "Cache hit ratio", "Reads", "Writes", "Savings")
+        }
+        for _, row in per_model_df.iterrows()
+    ]
+    assert actual == expected, (
+        f"per-model table rows diverge from analytics output\n"
+        f"  expected: {expected!r}\n"
+        f"  actual:   {actual!r}"
+    )
+
+
+def test_per_model_cache_performance_called_at_most_twice_per_cache_render(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Counter wrapper around `per_model_cache_performance` locks the
+    upper bound of calls per Cache render at today's measured value
+    (2). Any regression that ADDS a redundant call fails here, before
+    the Slice-P2 tightening test that asserts ≤ 1."""
+    from tokenscope import analytics
+
+    calls: list = []
+    original = analytics.per_model_cache_performance
+
+    def _counted(daily_report):
+        calls.append(daily_report)
+        return original(daily_report)
+
+    # Patch at every binding point: both `cache.py` and `charts.py`
+    # import the name directly, and the analytics module also exports
+    # it. Patching all three routes every call through the counter.
+    monkeypatch.setattr(analytics, "per_model_cache_performance", _counted)
+    monkeypatch.setattr(
+        "tokenscope.ui.cache.per_model_cache_performance", _counted
+    )
+    monkeypatch.setattr(
+        "tokenscope.ui.charts.per_model_cache_performance", _counted
+    )
+
+    # Default daily.json carries 4 models with cache activity → the
+    # `len(rows_with_activity) >= 2` gate at cache.py:317 passes and
+    # the per-model section renders.
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("cache")
+    at.run()
+    _assert_clean(at)
+
+    # Pre-slice-P2 upper bound (measured on the current branch tip).
+    # Slice P2 tightens to ≤ 1 via its own per-slice test.
+    assert len(calls) <= 2, (
+        f"per_model_cache_performance called {len(calls)} times per "
+        f"Cache render; pre-slice upper bound is 2"
+    )
+    # Lower bound: the helper IS called at least once (per-model
+    # section renders).
+    assert len(calls) >= 1
+
+
 def test_models_renders(mock_ccusage, mock_ccusage_version) -> None:
     """Models view boots cleanly with the new H1 + 4-card KPI strip.
     Asserts the surface shape: H1 present, Total cost card present,
