@@ -1506,6 +1506,265 @@ def test_live_token_mix_empty_caption_uses_plan_aware_window_noun(
     )
 
 
+# --- Slice 3 (plan-usage-updates): plan-aware Projected-total KPI -------
+#
+# On flat-rate plans (Pro / Max 5× / Max 20×) the previous
+# Projected-total card showed a raw dollar projection (e.g. $42.00)
+# regardless of plan — misrepresenting user exposure for the ~$20/mo
+# Pro user who will NOT pay $42 no matter what the projection says.
+#
+# Slice 3 flips the card on flat-rate plans: headline becomes the
+# plan fee ("$20/mo plan cost"), API-equivalent figure surfaces as
+# the delta ("would cost $42.00 at API rates"). Architecturally
+# identical to the Overview's existing _render_window_cost_kpi
+# pattern (overview.py:285-296). Caption names the API-equivalent
+# semantics + flat-fee decoupling.
+#
+# Enterprise (pay-per-token) is unchanged — the dollar projection
+# IS the user's actual incremental spend.
+#
+# The fee numbers come from `plans.get_plan(name).flat_rate_usd_per_month`
+# in tests — no hardcoded fee literals; a plan-fee change in plans.py
+# propagates to tests automatically.
+
+
+def test_live_projected_total_kpi_unchanged_on_enterprise(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """On Enterprise / pay-per-token, the Projected-total card keeps
+    its `Projected total` label and dollar value — the user IS
+    paying per token, so the API-equivalent figure IS their actual
+    projected spend. No `Plan cost (...)` headline; no `at API
+    rates` delta."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")  # default Enterprise plan
+    at.run()
+    _assert_clean(at)
+
+    projected = next(
+        (m for m in at.metric if m.label == "Projected total"),
+        None,
+    )
+    assert projected is not None, (
+        f"expected `Projected total` label on Enterprise; got labels: "
+        f"{[m.label for m in at.metric]!r}"
+    )
+    assert projected.value.startswith("$"), (
+        f"Enterprise Projected-total value should start with `$`; "
+        f"got {projected.value!r}"
+    )
+
+    # No `Plan cost (...)` metric must exist on Enterprise.
+    plan_cost_metric = next(
+        (m for m in at.metric if m.label and m.label.startswith("Plan cost")),
+        None,
+    )
+    assert plan_cost_metric is None, (
+        f"unexpected `Plan cost` headline on Enterprise: "
+        f"{plan_cost_metric.label!r}"
+    )
+
+    # No `at API rates` delta on Enterprise.
+    delta = getattr(projected, "delta", None) or ""
+    assert "at API rates" not in delta, (
+        f"`at API rates` delta leaked on Enterprise: {delta!r}"
+    )
+
+
+@pytest.mark.parametrize("plan_name", ["Pro", "Max 5×", "Max 20×"])
+def test_live_projected_total_kpi_flips_to_plan_fee_on_flat_rate(
+    mock_ccusage, mock_ccusage_version, plan_name
+) -> None:
+    """On flat-rate plans, the Projected-total card flips:
+      * headline label → `Plan cost ({plan_name})`,
+      * headline value → `${fee}/mo` (the plan's monthly flat fee),
+      * delta          → `would cost $X.XX at API rates` (the API-
+                          equivalent projection).
+
+    Parametrized over all three flat-rate plans to prove the
+    branching is on `plan.is_flat_rate`, not hardcoded to one name.
+
+    Fee numbers come from `plans.get_plan(plan_name).flat_rate_usd_per_month`
+    — a fee change in plans.py propagates here automatically; no
+    literal fee number in this test."""
+    from tokenscope.plans import get_plan
+
+    expected_fee = get_plan(plan_name).flat_rate_usd_per_month
+    assert expected_fee is not None, (
+        f"test precondition: {plan_name} should have a flat fee"
+    )
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value(plan_name)
+    at.run()
+    _assert_clean(at)
+
+    plan_metric = next(
+        (
+            m for m in at.metric
+            if m.label and m.label.startswith(f"Plan cost ({plan_name})")
+        ),
+        None,
+    )
+    assert plan_metric is not None, (
+        f"expected metric labeled `Plan cost ({plan_name})`; got labels: "
+        f"{[m.label for m in at.metric]!r}"
+    )
+    # Exact value contract — `${fee:,.0f}/mo` matches the production
+    # format string in `_render_projected_total_kpi`. A format change
+    # here is a user-facing contract change and should fail loudly.
+    assert plan_metric.value == f"${expected_fee:,.0f}/mo", (
+        f"unexpected Plan-cost value on {plan_name}: {plan_metric.value!r}"
+    )
+
+    # Delta contains the API-equivalent figure with the "at API rates"
+    # framing — exact dollar number isn't asserted (it depends on the
+    # fixture's burn rate; what matters is the framing).
+    assert plan_metric.delta is not None, (
+        f"missing API-rates delta on {plan_name}"
+    )
+    assert "would cost" in plan_metric.delta, (
+        f"expected `would cost` in delta on {plan_name}; got: "
+        f"{plan_metric.delta!r}"
+    )
+    assert "at API rates" in plan_metric.delta, (
+        f"expected `at API rates` in delta on {plan_name}; got: "
+        f"{plan_metric.delta!r}"
+    )
+
+    # Old "Projected total" headline must NOT exist on flat-rate —
+    # it's been replaced by the Plan-cost headline.
+    projected_metric = next(
+        (m for m in at.metric if m.label == "Projected total"),
+        None,
+    )
+    assert projected_metric is None, (
+        f"old `Projected total` headline leaked on {plan_name}"
+    )
+
+
+def test_live_projected_total_caption_explains_flat_rate_decoupling(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """On flat-rate, the Projected-total caption names BOTH the
+    API-equivalent semantics ("API-equivalent projection for this
+    {window}") AND the flat-fee decoupling ("monthly fee is
+    fixed"). User must understand the dollar projection isn't their
+    bill."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    plan_select = next(
+        s for s in at.sidebar.selectbox if s.label == "Subscription"
+    )
+    plan_select.set_value("Pro")
+    at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "API-equivalent projection" in captions, (
+        f"flat-rate Projected-total caption missing `API-equivalent "
+        f"projection`; captions: {captions!r}"
+    )
+    assert "monthly fee is fixed" in captions, (
+        f"flat-rate Projected-total caption missing the flat-fee "
+        f"decoupling note; captions: {captions!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name",
+    [
+        pytest.param("Enterprise", id="enterprise"),
+        pytest.param("Pro", id="flat-rate-pro"),
+    ],
+)
+def test_live_projected_total_no_projection_state_preserved_on_both_plans(
+    mock_ccusage, mock_ccusage_version, plan_name
+) -> None:
+    """When the active block has no projection data, both plans
+    render the same no-data state — `Projected total` label, `—`
+    value, `no projection` caption. The missing-data state isn't
+    plan-aware (we have no projection number to reframe on either
+    plan). Critically: the Plan-cost headline must NOT leak through
+    in the no-projection branch on flat-rate."""
+    no_projection_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 10,
+                "tokenCounts": {
+                    "inputTokens": 100, "outputTokens": 200,
+                    "cacheCreationInputTokens": 300,
+                    "cacheReadInputTokens": 400,
+                },
+                "totalTokens": 1000,
+                "costUSD": 1.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": {
+                    "tokensPerMinute": 1.0,
+                    "tokensPerMinuteForIndicator": 1.0,
+                    "costPerHour": 2.0,
+                },
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=no_projection_payload)
+    mock_ccusage("blocks", "--active", response=no_projection_payload)
+
+    at = _at("live")
+    at.run()
+    if plan_name != "Enterprise":
+        plan_select = next(
+            s for s in at.sidebar.selectbox if s.label == "Subscription"
+        )
+        plan_select.set_value(plan_name)
+        at.run()
+    _assert_clean(at)
+
+    projected = next(
+        (m for m in at.metric if m.label == "Projected total"),
+        None,
+    )
+    assert projected is not None, (
+        f"missing `Projected total` label on {plan_name} no-projection "
+        f"state; got labels: {[m.label for m in at.metric]!r}"
+    )
+    assert projected.value == "—", (
+        f"unexpected no-projection value on {plan_name}: {projected.value!r}"
+    )
+
+    captions = " ".join(c.value for c in at.caption)
+    assert "no projection" in captions, (
+        f"`no projection` caption missing on {plan_name}: {captions!r}"
+    )
+
+    # No Plan-cost headline leak on flat-rate when projection is
+    # missing — the no-data state is plan-independent.
+    plan_cost_metric = next(
+        (m for m in at.metric if m.label and m.label.startswith("Plan cost")),
+        None,
+    )
+    assert plan_cost_metric is None, (
+        f"`Plan cost` headline leaked on {plan_name} no-projection "
+        f"state — the no-data branch should be plan-independent"
+    )
+
+
 def test_cache_renders_savings_hero(mock_ccusage, mock_ccusage_version) -> None:
     """Cache view's headline is the savings hero — the `$X saved`
     figure is the largest stat on the page. Locks the framing

@@ -234,6 +234,28 @@ def _token_mix_empty_caption(plan: Plan) -> str:
     return f"This {_window_noun(plan)} has no token activity yet."
 
 
+def _projected_total_caption(plan: Plan) -> str:
+    """Caption beneath the Projected-total KPI when projection data
+    is present.
+
+      * Flat-rate: names the API-equivalent semantics + flat-fee
+        decoupling — the dollar projection is NOT what the user
+        pays.
+      * Enterprise: "at the current rate" — the dollar IS the
+        user's incremental spend rate, so no qualifier needed.
+
+    The no-projection fallback caption ("no projection") is
+    plan-independent — it's a data-missing state, not a plan-aware
+    semantic — and stays inline in `_render_projected_total_kpi`.
+    """
+    if plan.is_flat_rate:
+        return (
+            f"API-equivalent projection for this {_window_noun(plan)}; "
+            "your plan's monthly fee is fixed."
+        )
+    return "at the current rate"
+
+
 def render(state: SidebarState, nav: Navigation) -> None:
     """Live view shell: H1 + plan-aware subtitle, then the fragment-
     refreshed panel for everything else.
@@ -432,15 +454,49 @@ def _render_kpis(
             st.caption("no burn rate yet")
 
     with c4, st.container(border=True):
-        if active.projection is not None:
-            st.metric(
-                "Projected total",
-                f"${active.projection.total_cost:,.2f}",
-            )
-            st.caption("at the current rate")
-        else:
-            st.metric("Projected total", "—")
-            st.caption("no projection")
+        _render_projected_total_kpi(active, plan=plan)
+
+
+# --- projected-total KPI (extracted, plan-aware) ------------------------
+
+
+def _render_projected_total_kpi(active: BlockEntry, *, plan: Plan) -> None:
+    """Plan-aware Projected-total KPI card.
+
+    On flat-rate plans (Pro / Max 5× / Max 20×), the dollar
+    projection misrepresents user exposure — the user pays the
+    monthly flat fee, not the API-equivalent projection. Flip the
+    metric headline to the plan fee and surface the API-equivalent
+    figure as the delta. Architecturally identical to the Overview's
+    `_render_window_cost_kpi` flat-rate branch
+    (overview.py:285-296).
+
+    On Enterprise / pay-per-token, the dollar projection IS the
+    user's actual incremental spend; leave the headline unchanged.
+
+    When `active.projection is None`, both plans render the same
+    no-data state ("Projected total: —" + "no projection") — the
+    missing data isn't plan-aware.
+    """
+    if active.projection is None:
+        st.metric("Projected total", "—")
+        st.caption("no projection")
+        return
+
+    api_projection = active.projection.total_cost
+    if plan.is_flat_rate:
+        st.metric(
+            f"Plan cost ({plan.name})",
+            f"${plan.flat_rate_usd_per_month:,.0f}/mo",
+            delta=f"would cost ${api_projection:,.2f} at API rates",
+            # Cost-comparison deltas use neutral gray — see Overview's
+            # `_render_window_cost_kpi` docstring for the rationale
+            # (neither green nor red is honest for a cost delta).
+            delta_color="off",
+        )
+    else:
+        st.metric("Projected total", f"${api_projection:,.2f}")
+    st.caption(_projected_total_caption(plan))
 
 
 # --- spend trajectory chart ---------------------------------------------
