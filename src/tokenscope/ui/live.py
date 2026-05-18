@@ -160,6 +160,80 @@ def _empty_state_text(plan: Plan) -> str:
     )
 
 
+def _window_noun(plan: Plan) -> str:
+    """The plan-aware noun for the currently-active block:
+
+      * "quota window" on flat-rate (the 5-hour block IS the user's
+        quota reset window).
+      * "session" on Enterprise (no quota; the block is just
+        ccusage's activity bucketing).
+
+    Every Live-view caption / card title / chart-fallback that
+    refers to the block-in-context interpolates this single source
+    of truth — a vocabulary change here propagates through every
+    surface in one edit."""
+    return "quota window" if plan.is_flat_rate else "session"
+
+
+def _cost_so_far_caption(plan: Plan) -> str:
+    """KPI caption for the Cost-so-far card. Names the user's
+    billing reality alongside the window context: on flat-rate the
+    dollar figure is an API-rate estimate (the actual bill is the
+    monthly fee); on Enterprise it's the user's actual spend."""
+    suffix = (
+        "estimated at API rates" if plan.is_flat_rate else "actual cost"
+    )
+    return f"this {_window_noun(plan)} · {suffix}"
+
+
+def _spend_chart_title(plan: Plan) -> str:
+    """Section header for the spend-trajectory card."""
+    return f"### Spend in this {_window_noun(plan)}"
+
+
+def _spend_chart_caption(plan: Plan) -> str:
+    """Body caption beneath the spend-trajectory chart. On flat-rate
+    plans, names the decoupling between the API-equivalent chart
+    values and the user's actual flat monthly fee — the chart's
+    dollar projection is NOT what the user will pay."""
+    if plan.is_flat_rate:
+        return (
+            f"Cumulative API-equivalent spend in your current "
+            f"{_window_noun(plan)}. Your plan's monthly fee is fixed "
+            "regardless of this projection."
+        )
+    return (
+        f"Cumulative actual spend since the current "
+        f"{_window_noun(plan)} started."
+    )
+
+
+def _spend_chart_no_projection_caption(plan: Plan) -> str:
+    """Fallback caption when ccusage hasn't computed a projection for
+    the active block yet (typically: brand-new block with no
+    burn-rate data)."""
+    return f"No projection available for this {_window_noun(plan)} yet."
+
+
+def _token_mix_title(plan: Plan) -> str:
+    """Section header for the token-mix composition card."""
+    return f"### Token mix in this {_window_noun(plan)}"
+
+
+def _token_mix_caption(plan: Plan) -> str:
+    """Body caption beneath the token-mix composition bar."""
+    return (
+        f"Cumulative token mix for your current {_window_noun(plan)}. "
+        f"Updated every {REFRESH_SECONDS}s."
+    )
+
+
+def _token_mix_empty_caption(plan: Plan) -> str:
+    """Fallback caption when the active block has zero token activity
+    across all four kinds."""
+    return f"This {_window_noun(plan)} has no token activity yet."
+
+
 def render(state: SidebarState, nav: Navigation) -> None:
     """Live view shell: H1 + plan-aware subtitle, then the fragment-
     refreshed panel for everything else.
@@ -197,7 +271,7 @@ def _live_panel(plan: Plan, offline: bool, tz: str | None = None) -> None:
 
     typical = typical_burn_rate(report)
     _render_window_banner(active, plan=plan, tz=tz)
-    _render_kpis(active, typical=typical)
+    _render_kpis(active, plan=plan, typical=typical)
     _render_token_kind_kpis(active)
     _render_cache_hit_callout(active)
     now_iso = _now_iso(now_utc)
@@ -211,8 +285,8 @@ def _live_panel(plan: Plan, offline: bool, tz: str | None = None) -> None:
         active.total_tokens,
         active.cost_usd,
     )
-    _render_spend_trajectory(active, now_iso=now_iso, tz=tz)
-    _render_token_kind_composition(active)
+    _render_spend_trajectory(active, plan=plan, now_iso=now_iso, tz=tz)
+    _render_token_kind_composition(active, plan=plan)
 
 
 # --- refresh indicator ---------------------------------------------------
@@ -303,7 +377,9 @@ def _render_window_banner(
 # --- KPIs ---------------------------------------------------------------
 
 
-def _render_kpis(active: BlockEntry, *, typical: float | None) -> None:
+def _render_kpis(
+    active: BlockEntry, *, plan: Plan, typical: float | None
+) -> None:
     """Four-card KPI row matching the Overview look. Every card has a
     value + a one-line plain-English caption — no formula captions,
     no help icons (the labels are self-explanatory; cache_hit-style
@@ -312,12 +388,17 @@ def _render_kpis(active: BlockEntry, *, typical: float | None) -> None:
     `45 min left` moved OUT of the Projected-total card and into the
     window banner above — minutes remaining is a property of the
     window, not the projected cost.
+
+    The Cost-so-far caption is plan-aware (see `_cost_so_far_caption`).
+    The other three cards' captions are plan-independent (`vs typical`
+    delta semantics, `indicator-weighted`, `at the current rate` all
+    describe the metric mechanics, not the user's billing reality).
     """
     c1, c2, c3, c4 = st.columns(4)
 
     with c1, st.container(border=True):
         st.metric("Cost so far", f"${active.cost_usd:,.2f}")
-        st.caption("this 5-hour block")
+        st.caption(_cost_so_far_caption(plan))
 
     with c2, st.container(border=True):
         if active.burn_rate is not None:
@@ -374,30 +455,33 @@ def _now_iso(now_utc: datetime) -> str:
 def _render_spend_trajectory(
     active: BlockEntry,
     *,
+    plan: Plan,
     now_iso: str,
     tz: str | None,
 ) -> None:
     """Cumulative-spend line with dashed projection to window end.
 
+    Section header and body caption are plan-aware (see
+    `_spend_chart_title` and `_spend_chart_caption`). The no-projection
+    fallback caption is also plan-aware (see
+    `_spend_chart_no_projection_caption`).
+
     Two anchor points: (block.start_time, $0) and (now, block.cost_usd),
     plus a dashed projection segment from "now" to the window end.
     The slope of the actual segment IS the average burn rate so far
-    in this block — users see acceleration vs. projection at a
-    glance.
+    in the active window — users see acceleration vs. projection at
+    a glance.
 
     The ``tz`` parameter routes the user's IANA zone through to the
     chart builder so every X-axis tick renders in local clock time
     rather than UTC.
     """
     with st.container(border=True):
-        st.markdown("### Spend in this block")
-        st.caption(
-            "Cumulative spend across the 5-hour block. Solid is "
-            "actual, dotted is projection at the current rate."
-        )
+        st.markdown(_spend_chart_title(plan))
+        st.caption(_spend_chart_caption(plan))
         fig = live_spend_trajectory(active, [], now_iso=now_iso, tz=tz)
         if fig is None:
-            st.caption("No projection available for this block yet.")
+            st.caption(_spend_chart_no_projection_caption(plan))
             return
         st.plotly_chart(
             fig, width="stretch", key="live-spend-trajectory"
@@ -498,13 +582,17 @@ def _render_cache_hit_callout(active: BlockEntry) -> None:
     )
 
 
-def _render_token_kind_composition(active: BlockEntry) -> None:
+def _render_token_kind_composition(active: BlockEntry, *, plan: Plan) -> None:
     """Horizontal stacked bar of the block's aggregate token-kind
     composition + a mini-table with absolute counts, estimated
     cost contribution, and share %.
 
+    Section header / body caption / empty-state fallback are all
+    plan-aware (see `_token_mix_title`, `_token_mix_caption`,
+    `_token_mix_empty_caption`).
+
     Honest answer to the question "what kinds of tokens has this
-    block burned?" given the data ccusage exposes (block-level
+    window burned?" given the data ccusage exposes (block-level
     aggregates only — no intra-block timestamps, no recoverable
     pre-page-load history). The prior `Token throughput` chart was
     structurally impossible from this data; this composition
@@ -515,14 +603,11 @@ def _render_token_kind_composition(active: BlockEntry) -> None:
     moving between Overview and Live reads the same vocabulary.
     """
     with st.container(border=True):
-        st.markdown("### Token mix in this block")
-        st.caption(
-            "Cumulative token mix for the active block so far. "
-            f"Updated every {REFRESH_SECONDS}s."
-        )
+        st.markdown(_token_mix_title(plan))
+        st.caption(_token_mix_caption(plan))
         fig = live_token_kind_composition_bar(active)
         if fig is None:
-            st.caption("Block has no token activity yet.")
+            st.caption(_token_mix_empty_caption(plan))
             return
         st.plotly_chart(
             fig, width="stretch", key="live-token-mix"

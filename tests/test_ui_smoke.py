@@ -806,55 +806,6 @@ def test_live_renders_cost_unavailable_caption_when_rates_missing(
     )
 
 
-def test_live_renders_empty_token_mix_caption_when_block_has_no_tokens(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """When the active block has zero tokens (a brand-new block
-    captured immediately after start), the composition bar has
-    nothing to render. `live_token_kind_composition_bar` returns
-    `None` and the UI shows a `Block has no token activity yet.`
-    caption instead of an empty chart frame."""
-    blocks_payload = {
-        "blocks": [
-            {
-                "id": "2026-05-16T13:00:00.000Z",
-                "startTime": "2026-05-16T13:00:00.000Z",
-                "endTime": "2026-05-16T18:00:00.000Z",
-                "actualEndTime": None,
-                "isActive": True,
-                "isGap": False,
-                "entries": 0,
-                "tokenCounts": {
-                    "inputTokens": 0,
-                    "outputTokens": 0,
-                    "cacheCreationInputTokens": 0,
-                    "cacheReadInputTokens": 0,
-                },
-                "totalTokens": 0,
-                "costUSD": 0.0,
-                "models": ["claude-opus-4-7"],
-                "burnRate": None,
-                "projection": None,
-            }
-        ]
-    }
-    mock_ccusage("daily", response=FIXTURES / "daily.json")
-    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
-    mock_ccusage("session", response=FIXTURES / "session.json")
-    mock_ccusage("blocks", response=blocks_payload)
-    mock_ccusage("blocks", "--active", response=blocks_payload)
-    at = _at("live")
-    at.run()
-    _assert_clean(at)
-    captions = "\n".join(
-        getattr(c, "value", "") for c in at.caption
-    ) if hasattr(at, "caption") else ""
-    md = "\n".join(m.value for m in at.markdown) + "\n" + captions
-    assert "Block has no token activity yet" in md, (
-        f"expected empty-block caption; got: {md!r}"
-    )
-
-
 def test_live_cache_hit_ratio_matches_token_counts(
     mock_ccusage, mock_ccusage_version
 ) -> None:
@@ -1207,6 +1158,351 @@ def test_live_empty_state_mentions_session_on_enterprise(
     )
     assert "billing block" not in info_text, (
         f"old `billing block` framing still present: {info_text!r}"
+    )
+
+
+# --- Slice 2 (plan-usage-updates): plan-aware KPI / chart captions ------
+#
+# Same DRY/SOLID pattern as Slice 1's banner work: every plan-aware
+# caption / chart title / fallback string lives in exactly one helper
+# in `live.py`. Tests assert on the user-facing semantic substrings
+# (the contract) — they don't import the helpers (that would defeat
+# the point of testing the contract).
+#
+# Each parametrized test covers BOTH the flat-rate AND Enterprise
+# branches in one shot, with negative assertions catching cross-plan
+# leaks and old framing regressions.
+#
+# Plan-set: Enterprise (the default + boundary value of `is_flat_rate
+# == False`) and Pro (the boundary value of `is_flat_rate == True`).
+# Slice 1's parametrized banner test already proved the flat-rate
+# branch is shared across Pro / Max 5× / Max 20×; no need to re-prove
+# in Slice 2.
+
+
+_LIVE_PLAN_NOUN_CASES = [
+    pytest.param("Enterprise", "session", "quota window", id="enterprise"),
+    pytest.param("Pro", "quota window", "session", id="flat-rate-pro"),
+]
+
+
+def _render_live_at_plan(mock_ccusage, plan_name: str):
+    """Render the Live view at a given plan with the default fixture
+    set. Switches the sidebar selectbox on non-default plans and
+    re-runs to pick up the change.
+
+    Consolidates the boilerplate so individual per-surface tests
+    just hand the resulting `AppTest` to their assertions."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("live")
+    at.run()
+    if plan_name != "Enterprise":
+        plan_select = next(
+            s for s in at.sidebar.selectbox if s.label == "Subscription"
+        )
+        plan_select.set_value(plan_name)
+        at.run()
+    _assert_clean(at)
+    return at
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_cost_so_far_caption_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """The Cost-so-far KPI caption names the user's active window
+    using the plan-aware noun ("quota window" / "session"), with a
+    plan-aware billing-reality suffix ("estimated at API rates" on
+    flat-rate; "actual cost" on Enterprise).
+
+    Old "this 5-hour block" framing must be gone on every plan."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    captions = " ".join(c.value for c in at.caption)
+    assert f"this {expected_noun}" in captions, (
+        f"Cost-so-far caption on {plan_name} missing `this "
+        f"{expected_noun}`; captions: {captions!r}"
+    )
+    assert f"this {forbidden_noun}" not in captions, (
+        f"`this {forbidden_noun}` leaked into {plan_name} captions: "
+        f"{captions!r}"
+    )
+    assert "5-hour block" not in captions, (
+        f"old `5-hour block` framing leaked on {plan_name}: {captions!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_substr,forbidden_substr",
+    [
+        pytest.param(
+            "Enterprise", "actual cost", "estimated at API rates",
+            id="enterprise",
+        ),
+        pytest.param(
+            "Pro", "estimated at API rates", "actual cost",
+            id="flat-rate-pro",
+        ),
+    ],
+)
+def test_live_cost_so_far_caption_uses_plan_aware_billing_suffix(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_substr, forbidden_substr,
+) -> None:
+    """The Cost-so-far caption's suffix names the user's billing
+    reality — "actual cost" on Enterprise (the dollar IS what they
+    pay), "estimated at API rates" on flat-rate (the dollar is API-
+    equivalent; the actual bill is the monthly fee)."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    captions = " ".join(c.value for c in at.caption)
+    assert expected_substr in captions, (
+        f"Cost-so-far caption on {plan_name} missing `{expected_substr}`; "
+        f"captions: {captions!r}"
+    )
+    assert forbidden_substr not in captions, (
+        f"`{forbidden_substr}` leaked into {plan_name} captions: "
+        f"{captions!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_spend_chart_title_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """The spend-trajectory card's section header ("### Spend in
+    this X") names the user's active window using the plan-aware
+    noun. Old "in this block" framing must be gone."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    md = "\n".join(m.value for m in at.markdown)
+    assert f"Spend in this {expected_noun}" in md, (
+        f"spend-chart title on {plan_name} missing `Spend in this "
+        f"{expected_noun}`"
+    )
+    assert f"Spend in this {forbidden_noun}" not in md, (
+        f"`Spend in this {forbidden_noun}` leaked on {plan_name}"
+    )
+    assert "Spend in this block" not in md, (
+        f"old `Spend in this block` framing leaked on {plan_name}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_substr,forbidden_substr",
+    [
+        pytest.param(
+            "Enterprise", "actual spend", "API-equivalent",
+            id="enterprise",
+        ),
+        pytest.param(
+            "Pro", "API-equivalent", "actual spend",
+            id="flat-rate-pro",
+        ),
+    ],
+)
+def test_live_spend_chart_caption_explains_plan_aware_billing(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_substr, forbidden_substr,
+) -> None:
+    """The spend-trajectory chart's body caption explains the
+    billing reality — Enterprise sees "actual spend"; flat-rate sees
+    "API-equivalent spend" with an explicit note about the flat
+    monthly fee decoupling from the projection."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    captions = " ".join(c.value for c in at.caption)
+    assert expected_substr in captions, (
+        f"spend-chart caption on {plan_name} missing "
+        f"`{expected_substr}`; captions: {captions!r}"
+    )
+    assert forbidden_substr not in captions, (
+        f"`{forbidden_substr}` leaked into {plan_name} spend-chart "
+        f"caption: {captions!r}"
+    )
+    # Flat-rate-specific: the decoupling explanation must appear.
+    if plan_name == "Pro":
+        assert "monthly fee" in captions, (
+            f"flat-rate spend-chart caption missing `monthly fee` "
+            f"decoupling explanation: {captions!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_spend_chart_no_projection_fallback_uses_plan_aware_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """When the active block has no projection (brand-new block, or
+    ccusage emits a degraded payload), the spend chart renders a
+    fallback caption. The fallback names the active window using
+    the plan-aware noun — never "this block"."""
+    no_projection_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 10,
+                "tokenCounts": {
+                    "inputTokens": 100, "outputTokens": 200,
+                    "cacheCreationInputTokens": 300,
+                    "cacheReadInputTokens": 400,
+                },
+                "totalTokens": 1000,
+                "costUSD": 1.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": {
+                    "tokensPerMinute": 1.0,
+                    "tokensPerMinuteForIndicator": 1.0,
+                    "costPerHour": 2.0,
+                },
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=no_projection_payload)
+    mock_ccusage("blocks", "--active", response=no_projection_payload)
+
+    at = _at("live")
+    at.run()
+    if plan_name != "Enterprise":
+        plan_select = next(
+            s for s in at.sidebar.selectbox if s.label == "Subscription"
+        )
+        plan_select.set_value(plan_name)
+        at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert f"this {expected_noun} yet" in captions, (
+        f"no-projection fallback on {plan_name} missing `this "
+        f"{expected_noun} yet`; captions: {captions!r}"
+    )
+    assert f"this {forbidden_noun} yet" not in captions
+    assert "this block yet" not in captions, (
+        f"old `this block yet` framing leaked on {plan_name}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_token_mix_title_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """The token-mix composition card's section header ("### Token
+    mix in this X") names the active window using the plan-aware
+    noun."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    md = "\n".join(m.value for m in at.markdown)
+    assert f"Token mix in this {expected_noun}" in md, (
+        f"token-mix title on {plan_name} missing `Token mix in this "
+        f"{expected_noun}`"
+    )
+    assert f"Token mix in this {forbidden_noun}" not in md
+    assert "Token mix in this block" not in md, (
+        f"old `Token mix in this block` framing leaked on {plan_name}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_token_mix_caption_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """The token-mix composition card's body caption names the
+    active window using the plan-aware noun."""
+    at = _render_live_at_plan(mock_ccusage, plan_name)
+    captions = " ".join(c.value for c in at.caption)
+    assert f"your current {expected_noun}" in captions, (
+        f"token-mix caption on {plan_name} missing `your current "
+        f"{expected_noun}`; captions: {captions!r}"
+    )
+    assert f"your current {forbidden_noun}" not in captions
+    # Old framing must be gone.
+    assert "active block so far" not in captions, (
+        f"old `active block so far` framing leaked on {plan_name}"
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_name,expected_noun,forbidden_noun", _LIVE_PLAN_NOUN_CASES
+)
+def test_live_token_mix_empty_caption_uses_plan_aware_window_noun(
+    mock_ccusage, mock_ccusage_version,
+    plan_name, expected_noun, forbidden_noun,
+) -> None:
+    """When the active block has zero tokens (brand-new block
+    captured immediately after start), the token-mix card falls
+    back to a "no activity yet" caption that names the active
+    window using the plan-aware noun.
+
+    Replaces the prior `test_live_renders_empty_token_mix_caption_when_block_has_no_tokens`
+    test which locked the old `Block has no token activity yet`
+    framing; this parametrized version pins both the code path
+    (empty-block fallback fires) AND the plan-aware copy."""
+    empty_tokens_payload = {
+        "blocks": [
+            {
+                "id": "2026-05-16T13:00:00.000Z",
+                "startTime": "2026-05-16T13:00:00.000Z",
+                "endTime": "2026-05-16T18:00:00.000Z",
+                "actualEndTime": None,
+                "isActive": True,
+                "isGap": False,
+                "entries": 0,
+                "tokenCounts": {
+                    "inputTokens": 0, "outputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                    "cacheReadInputTokens": 0,
+                },
+                "totalTokens": 0,
+                "costUSD": 0.0,
+                "models": ["claude-opus-4-7"],
+                "burnRate": None,
+                "projection": None,
+            }
+        ]
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=FIXTURES / "daily_by_project.json")
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=empty_tokens_payload)
+    mock_ccusage("blocks", "--active", response=empty_tokens_payload)
+
+    at = _at("live")
+    at.run()
+    if plan_name != "Enterprise":
+        plan_select = next(
+            s for s in at.sidebar.selectbox if s.label == "Subscription"
+        )
+        plan_select.set_value(plan_name)
+        at.run()
+    _assert_clean(at)
+
+    captions = " ".join(c.value for c in at.caption)
+    assert f"This {expected_noun} has no token activity yet" in captions, (
+        f"empty-token-mix fallback on {plan_name} missing expected "
+        f"copy; captions: {captions!r}"
+    )
+    assert f"This {forbidden_noun} has no token activity yet" not in captions
+    assert "Block has no token activity yet" not in captions, (
+        f"old `Block has no token activity yet` framing leaked on "
+        f"{plan_name}: {captions!r}"
     )
 
 
