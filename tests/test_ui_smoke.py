@@ -484,6 +484,121 @@ def test_overview_token_mix_toggle_switches_chart_variant(
     assert toggle_after.value is False
 
 
+# --- Pre-slice P6: compute-once invariant for Overview window aggregates ---
+#
+# Pinning the CURRENT call count of `window_cost` and
+# `aggregate_cache_hit_ratio` on the Overview render path. Slice P6 will
+# compute both aggregates ONCE at the top of `overview.render()` and pass
+# the primitives down to `_render_kpis` / `_render_insight` /
+# `_render_cost_composition`. This test locks today's upper bounds so an
+# unrelated regression that ADDS a redundant call fires immediately.
+#
+# Today's actual counts on the MAIN daily_report (instrumented):
+#
+#   * `window_cost(daily_report)`: 3 calls per render
+#       - overview.py:220 (`_render_kpis`)
+#       - overview.py:316 (`_render_insight`)
+#       - overview.py:347 (`_render_cost_composition`)
+#
+#   * `aggregate_cache_hit_ratio(daily_report)`: 2 calls per render
+#       - overview.py:222 (`_render_kpis`)
+#       - overview.py:320 (`_render_insight`)
+#
+# Slice P6 collapses both to ≤ 1 on the main daily_report. The slice's
+# own per-slice test asserts ≤ 1; this pre-slice pin protects the looser
+# bounds (≤ 3 / ≤ 2) against unrelated regressions.
+#
+# Separately, `window_cost` is also called ONCE per render on the
+# PRIOR-window report (overview.py:136) — a different DailyReport
+# instance. Slice P6 does NOT touch that call (it's against a distinct
+# argument, not a redundant scan of the same report). The counter
+# discriminates by `id(daily_report)` so the pre-slice bound captures
+# "the most-scanned report is scanned ≤ 3 times" — Slice P6 reduces
+# that to ≤ 1 without conflating with the unrelated prior-report call.
+
+
+def test_overview_window_aggregates_called_at_most_thrice_per_render(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Counter wrappers around `window_cost` and
+    `aggregate_cache_hit_ratio` lock the upper bounds of per-report
+    calls per Overview render at today's MEASURED values (3 / 2 on the
+    main daily_report). Any regression that ADDS a redundant scan of
+    the same report fails here, before the Slice-P6 tightening test
+    that asserts ≤ 1 each."""
+    from collections import Counter
+    from tokenscope import analytics
+    from tokenscope.models import DailyReport
+
+    window_cost_ids: list[int] = []
+    ratio_ids: list[int] = []
+
+    original_wc = analytics.window_cost
+    original_ratio = analytics.aggregate_cache_hit_ratio
+
+    def _counted_wc(daily_report: DailyReport) -> float:
+        window_cost_ids.append(id(daily_report))
+        return original_wc(daily_report)
+
+    def _counted_ratio(daily_report: DailyReport) -> float:
+        ratio_ids.append(id(daily_report))
+        return original_ratio(daily_report)
+
+    # `overview.py` imports both names directly at module load
+    # (overview.py:77, 89), so patching the analytics module attribute
+    # alone is NOT sufficient — the local rebind in `overview` still
+    # points at the unpatched original. Patch both binding sites.
+    monkeypatch.setattr(analytics, "window_cost", _counted_wc)
+    monkeypatch.setattr(analytics, "aggregate_cache_hit_ratio", _counted_ratio)
+    monkeypatch.setattr("tokenscope.ui.overview.window_cost", _counted_wc)
+    monkeypatch.setattr(
+        "tokenscope.ui.overview.aggregate_cache_hit_ratio", _counted_ratio
+    )
+
+    # Default fixtures + default sidebar plan (Enterprise, non-flat-rate)
+    # → `_render_cost_composition` fires → all three `window_cost` call
+    # sites are exercised.
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+
+    # Discriminate by `id(daily_report)`: `window_cost` is called on
+    # both the main daily_report (3×) and the prior-window report (1×).
+    # The pin pins "the most-scanned report is scanned ≤ 3 times" — the
+    # main daily_report is the one Slice P6 collapses. Without the
+    # per-id partition, a regression that added a call to the prior
+    # report would mis-fire here.
+    wc_by_id = Counter(window_cost_ids)
+    ratio_by_id = Counter(ratio_ids)
+
+    assert wc_by_id, "window_cost was never called on the Overview render"
+    assert ratio_by_id, (
+        "aggregate_cache_hit_ratio was never called on the Overview render"
+    )
+
+    # Pre-slice-P6 upper bounds (measured on the current branch tip).
+    # Slice P6 tightens both to ≤ 1 via its own per-slice test.
+    assert max(wc_by_id.values()) <= 3, (
+        f"window_cost called {max(wc_by_id.values())} times on the "
+        f"most-scanned daily_report per Overview render; pre-slice "
+        f"upper bound is 3. Full per-id counts: {dict(wc_by_id)!r}"
+    )
+    assert max(ratio_by_id.values()) <= 2, (
+        f"aggregate_cache_hit_ratio called {max(ratio_by_id.values())} "
+        f"times on the most-scanned daily_report per Overview render; "
+        f"pre-slice upper bound is 2. Full per-id counts: "
+        f"{dict(ratio_by_id)!r}"
+    )
+    # Lower bounds: each helper IS called at least once on its most-
+    # scanned report. The cost-composition call (overview.py:347) is
+    # the third `window_cost` call site — guarded by `daily_report.daily`
+    # being non-empty AND plan not being flat-rate. The default fixture +
+    # default plan satisfy both, so today we expect exactly 3 / 2.
+    assert max(wc_by_id.values()) >= 1
+    assert max(ratio_by_id.values()) >= 1
+
+
 def test_live_renders(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     at = _at("live")
