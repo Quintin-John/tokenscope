@@ -1,36 +1,49 @@
-"""Daily view — per-day breakdown matching ccusage's daily report layout.
+"""Daily view — single unified table matching Overview's Cost-composition
+visual language, with per-day breakdown rows interleaved.
 
 Surface (top-to-bottom):
 
-  * `# Daily` H1 + window/timezone caption + agent-constraint caption.
+  * `# Daily` H1 + window/timezone caption + agent-constraint caption
+    (one page-level statement; no per-row chip).
   * Plan banner (when the active plan supplies one).
-  * KPI strip (slice 5) — four bordered metric cards answering
-    questions Overview doesn't: peak day, active-days fraction,
-    avg-per-active-day, busiest model.
-  * Per-day expanders (slice 3) — one expander per date in the
-    window, descending order. The collapsed header carries the
-    day's totals so the user can scan without expanding. Expanded,
-    each shows a `(model, project)` sub-table sorted by cost desc.
+  * KPI strip (slice 5) — four bordered metric cards: peak day,
+    active-days fraction, avg-per-active-day, busiest model.
+  * One unified `st.dataframe` rendered via `render_data_table` —
+    same primitive Overview's Cost composition uses, same fonts,
+    widths, alignment by construction.
 
-Slice 5 replaced the window-totals strip (slice 2) with the four
-KPI cards above. The cost/tokens-by-kind window-wide rollup that
-strip surfaced already lives on Overview's Cost-composition table —
-duplicating it here added nothing Daily-specific. The KPI strip
-answers per-day-distribution questions Overview can't.
+Unified table shape (10 columns):
 
-Single source of truth for the per-day sub-table grid:
-`_COLUMNS` (numeric columns) and `_DAY_SUBTABLE_COLUMNS = (model,
-project, *_COLUMNS)`. Both are tuples of `_ColumnSpec(label, attr,
-kind)`; the `kind` discriminator drives formatting and the
-`st.column_config` rule. One column-grid definition, one render
-context now (sub-table only after slice 5), no parallel literal
-lists.
+    Date · Agent · Project · Models · Input · Output ·
+    Cache create · Cache read · Total tokens · Cost
+
+Row structure, descending date order (newest day at top):
+
+  - "All" row per day:        Date filled, Agent="All", Project blank,
+                              Models blank, numeric columns = day's
+                              aggregate sums across every cell.
+  - Project sub-row(s):       Date blank, Agent="- Claude Code",
+                              Project = `project_display_name(slug)`,
+                              Models = `, `-joined `display_model_label`
+                              outputs in per-(date, project, model)
+                              cost-descending order, numerics = the
+                              project's day total summed across models.
+                              One sub-row per project that ran that day.
+  - "Total" row at the bottom: Date="Total", Agent blank, Project
+                              blank, Models blank, numerics = window-
+                              wide sums.
+
+Column-config mirrors Overview Cost composition exactly: TextColumn
+for every label/token column carrying pre-formatted strings, Cost is
+the one NumberColumn. Explicit `width` on every column — no
+auto-detect. That's the DRY/SOLID anchor: one render primitive
+(`render_data_table`), one project-display rule
+(`paths.project_display_name`), one model-display rule
+(`analytics.display_model_label`), one per-(date, project) rollup
+(`analytics.daily_project_aggregates`).
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Literal
 
 import streamlit as st
 
@@ -38,61 +51,53 @@ from tokenscope import config
 from tokenscope.analytics import (
     DailyCell,
     DailySummary,
+    WindowTotals,
     active_days_count,
     avg_cost_per_active_day,
     busiest_model,
-    cells_for_date,
     daily_cells,
+    daily_project_aggregates,
     daily_summaries,
     display_model_label,
     format_compact_int,
     format_timezone_for_display,
-    friendly_project_label,
     peak_day,
     pluralize,
+    window_totals,
 )
 from tokenscope.navigation import Navigation
-from tokenscope.paths import home_slug
+from tokenscope.paths import project_display_name
 from tokenscope.ui._data import load_daily_by_project
+from tokenscope.ui._tables import render_data_table
 from tokenscope.ui.sidebar import SidebarState
 
 
 # Agent constraint caption — every row in the dataset is Claude Code
 # by construction (ccusage reads `~/.claude/projects/` JSONL only;
 # SDK / console / third-party API traffic doesn't write there). The
-# page-subtitle caption frames the constraint upfront so users don't
-# mistake the uniformity for a detection bug. No per-row chip on the
-# day-row header — the caption alone covers the contract; repeating
-# "Claude Code" on every header is noise that creates the perceived
-# 1-project-vs-3-projects pluralization inconsistency v1 surfaced.
+# caption frames the constraint upfront so users don't mistake the
+# uniform Agent column for a detection bug.
 #
-# Admin API ingestion (the real "differentiate Claude Code vs SDK
-# vs console vs third-party" path) is intentionally not in scope —
-# see BACKLOG.md "Slice 28 — Anthropic Admin API ingestion".
+# Admin API ingestion (the real client-source-axis fix) is out of
+# scope — see BACKLOG.md "Slice 28 — Anthropic Admin API ingestion".
 AGENT_CONSTRAINT_CAPTION = (
     "All traffic is Claude Code — ccusage reads Claude Code "
     "transcripts only. SDK / console / third-party traffic is not "
     "visible here."
 )
 
+# Empty-window info copy — shared by both short-circuit paths in
+# `render()` (no cells from ccusage / every cell filtered out by the
+# zero-cost rule). Single source.
+_EMPTY_WINDOW_MESSAGE = (
+    "No usage in the selected window. Try widening the **Date "
+    "range** in the sidebar, or clearing the **Project** filter "
+    "if one is set."
+)
 
-# KPI card labels and tooltip — module-level constants so the
-# renderer copy and smoke-test assertions reference one source
-# rather than racing string literals. Each KPI answers a question
-# the Overview tab doesn't answer:
-#
-#   Peak day                 — date + cost of the most expensive
-#                              day in the window.
-#   Active days              — N / window_days; how concentrated
-#                              the spend was in time.
-#   Avg per active day       — cost ÷ active days. Distinct from
-#                              Overview's "Avg daily cost" which
-#                              divides by window length. Tooltip
-#                              spells out the denominator.
-#   Busiest model            — top-cost model window-wide + its
-#                              share of total spend. Pairs with
-#                              the Claude Code chip; saves a click
-#                              into the Models tab.
+# KPI card labels + tooltip — module-level constants so renderer copy
+# and smoke-test assertions reference one source rather than racing
+# string literals.
 KPI_LABEL_PEAK_DAY = "Peak day"
 KPI_LABEL_ACTIVE_DAYS = "Active days"
 KPI_LABEL_AVG_PER_ACTIVE_DAY = "Avg per active day"
@@ -105,65 +110,44 @@ KPI_HELP_AVG_PER_ACTIVE_DAY = (
     "of different lengths; use this to weight by busy days only."
 )
 
+# Unified-table row-type labels and agent indent marker. Every
+# user-facing string in the table that isn't a function-call result
+# lives in one of these constants. Tests reference these by name —
+# a copy edit propagates from one place.
+_ALL_LABEL = "All"
+_TOTAL_LABEL = "Total"
+# Leading dash mirrors ccusage's sub-row indent convention. The
+# "Claude Code" suffix keeps the agent label consistent with our
+# app's terminology (vs ccusage's bare "Claude" abbreviation) AND
+# with `AGENT_CONSTRAINT_CAPTION` above.
+_AGENT_BREAKDOWN_LABEL = "- Claude Code"
 
-# `kind` discriminates how the renderer pulls a value out of the
-# source object (`WindowTotals` / `DailyCell`) and how it presents
-# it. "tokens" / "cost" / "model" / "project" are the only kinds
-# the Daily view needs; introducing a new kind requires extending
-# both `_metric_value` and `_subtable_value` (and the test surface).
-_ColumnKind = Literal["tokens", "cost", "model", "project"]
+# Column-config for the unified table. Same column-type pattern as
+# Overview's Cost-composition table (TextColumn for label/token
+# columns carrying pre-formatted strings, NumberColumn for cost,
+# explicit width on every column). The visual language is shared by
+# construction — Streamlit's render path for these column types is
+# identical between the two consumers.
+_TABLE_COLUMN_CONFIG: dict = {
+    "Date":         st.column_config.TextColumn(width="small"),
+    "Agent":        st.column_config.TextColumn(width="small"),
+    "Project":      st.column_config.TextColumn(width="medium"),
+    "Models":       st.column_config.TextColumn(width="medium"),
+    "Input":        st.column_config.TextColumn(width="small"),
+    "Output":       st.column_config.TextColumn(width="small"),
+    "Cache create": st.column_config.TextColumn(width="small"),
+    "Cache read":   st.column_config.TextColumn(width="small"),
+    "Total tokens": st.column_config.TextColumn(width="small"),
+    "Cost":         st.column_config.NumberColumn(format="$%.2f", width="medium"),
+}
 
-
-@dataclass(frozen=True, slots=True)
-class _ColumnSpec:
-    """One column of the Daily view's row grid.
-
-    `attr` names the field on the source object (`WindowTotals` for
-    the totals card; `DailyCell` for the sub-table). `kind` selects
-    the formatting rule — see `_metric_value` and `_subtable_value`.
-    No format callbacks live on the spec itself: a single dispatch
-    function per render context owns the kind→format mapping, so
-    the rule cannot drift between the totals card and the sub-table.
-    """
-
-    label: str
-    attr: str
-    kind: _ColumnKind
-
-
-def _fmt_tokens(value: int | float) -> str:
-    """Compact integer formatting for token counts (e.g. 1.37B)."""
-    return format_compact_int(int(value))
-
-
-def _fmt_cost(value: int | float) -> str:
-    """USD formatting for cost values."""
-    return f"${value:,.2f}"
-
-
-# Numeric-only columns — shared by the totals card and the sub-table.
-_COLUMNS: tuple[_ColumnSpec, ...] = (
-    _ColumnSpec("Input", "input_tokens", "tokens"),
-    _ColumnSpec("Output", "output_tokens", "tokens"),
-    _ColumnSpec("Cache create", "cache_creation_tokens", "tokens"),
-    _ColumnSpec("Cache read", "cache_read_tokens", "tokens"),
-    _ColumnSpec("Total tokens", "total_tokens", "tokens"),
-    _ColumnSpec("Cost", "cost", "cost"),
-)
-
-
-# Sub-table columns — the numeric columns above prefixed with Model
-# and Project labels. The prefix order is fixed (label columns first)
-# so the table reads "what · where · how much" left-to-right.
-_DAY_SUBTABLE_COLUMNS: tuple[_ColumnSpec, ...] = (
-    _ColumnSpec("Model", "model", "model"),
-    _ColumnSpec("Project", "project", "project"),
-    *_COLUMNS,
-)
+# Public for tests — the column-order contract that smoke tests pin.
+TABLE_COLUMNS: tuple[str, ...] = tuple(_TABLE_COLUMN_CONFIG.keys())
 
 
 def render(state: SidebarState, nav: Navigation) -> None:
-    """Daily tab entry-point. Mirrors the `render(state, nav)` signature
+    """Daily tab entry-point. Renders KPI strip + single unified
+    table. No expanders. Mirrors the `render(state, nav)` signature
     every other top-level view uses so `app._RENDERERS` can dispatch
     uniformly."""
     _render_page_header(state)
@@ -177,46 +161,29 @@ def render(state: SidebarState, nav: Navigation) -> None:
         return
 
     cells = daily_cells(report)
-    if not cells:
-        st.info(_EMPTY_WINDOW_MESSAGE)
-        return
-
-    # Zero-cost days are silently dropped — ccusage doesn't currently
+    # Zero-cost days are silently dropped. ccusage doesn't currently
     # emit them, but if it ever does they'd render as a `$0.00` row
     # carrying no useful signal. The cells list is narrowed to the
-    # surviving dates so `cells_for_date` and `busiest_model` stay
-    # consistent with `summaries`.
+    # surviving dates so `daily_project_aggregates` and
+    # `busiest_model` stay consistent with `summaries`.
     summaries = [s for s in daily_summaries(cells) if s.cost > 0]
-    active_dates = {s.date for s in summaries}
-    cells = [c for c in cells if c.date in active_dates]
-    if not cells:
+    if not summaries:
         st.info(_EMPTY_WINDOW_MESSAGE)
         return
+    active_dates = {s.date for s in summaries}
+    cells = [c for c in cells if c.date in active_dates]
 
     window_days = state.query.window_days() or config.DEFAULT_RANGE_DAYS
     _render_kpi_strip(summaries, cells, window_days)
-    _render_day_rows(cells, summaries)
-
-
-# Empty-window info copy — shared by the two short-circuit paths in
-# `render()` (no cells at all from ccusage / every cell filtered out
-# by the zero-cost rule). Single source so the user reads the same
-# guidance regardless of which branch fired.
-_EMPTY_WINDOW_MESSAGE = (
-    "No usage in the selected window. Try widening the **Date "
-    "range** in the sidebar, or clearing the **Project** filter "
-    "if one is set."
-)
+    _render_unified_table(summaries, cells, window_totals(cells))
 
 
 def _render_page_header(state: SidebarState) -> None:
     """H1 + window/timezone caption + agent-constraint caption. The
     second caption sits inline with the window/tz line as a sibling
     sub-line — same `st.caption` weight, so the user reads them as
-    one block of context rather than as a banner / warning. Copy is
-    `AGENT_CONSTRAINT_CAPTION` (module-level constant) so the
-    constraint statement lives in exactly one place.
-    """
+    one block of context rather than as a banner/warning. Copy is
+    `AGENT_CONSTRAINT_CAPTION` (module-level) — one place."""
     window_days = state.query.window_days() or config.DEFAULT_RANGE_DAYS
     tz_display = format_timezone_for_display(state.query.tz or "")
     st.markdown("# Daily")
@@ -229,29 +196,24 @@ def _render_kpi_strip(
     cells: list[DailyCell],
     window_days: int,
 ) -> None:
-    """Four Daily-specific KPI cards in a bordered row. Each card
-    answers a question the Overview tab doesn't:
+    """Four Daily-specific KPI cards. Each answers a question the
+    Overview tab doesn't:
 
-      1. Peak day                — the most expensive day in the
-                                   window (date + cost).
-      2. Active days             — `N / window_days`; how
+      1. Peak day                — most expensive day in the window
+                                   (date + cost).
+      2. Active days             — `N / window_days` — how
                                    concentrated the spend was.
-      3. Avg per active day      — cost ÷ active days. Tooltip
+      3. Avg per active day      — cost ÷ active days; help tooltip
                                    spells out the distinction from
-                                   Overview's `Avg daily cost`
-                                   (which divides by window length).
-      4. Busiest model           — top-cost model across the window
-                                   + its share of spend. Pairs
-                                   with the Claude Code agent chip.
+                                   Overview's `Avg daily cost`.
+      4. Busiest model           — top-cost model window-wide + its
+                                   share of spend.
 
-    Inputs are the already-computed `summaries` / `cells` from
-    `render()`; no data refetch.
-
-    None-handling: `peak_day` and `busiest_model` return None on
-    empty input. The renderer's empty-window branch short-circuits
-    before this strip is shown, so the `is None` branches below
-    are defensive (e.g. fixture / monkeypatch paths) — they render
-    `—` with a "no activity" caption rather than crashing.
+    Inputs are the already-filtered `summaries` / `cells` from
+    `render()`. None-handling on `peak_day` / `busiest_model` is
+    defensive — the render() empty-window branch short-circuits
+    before this strip is shown, but the `is None` arms below render
+    `—` rather than crashing if reached via monkeypatch paths.
     """
     peak = peak_day(summaries)
     active = active_days_count(summaries)
@@ -266,7 +228,7 @@ def _render_kpi_strip(
             st.caption("no activity in window")
         else:
             date, cost = peak
-            st.metric(KPI_LABEL_PEAK_DAY, _fmt_cost(cost))
+            st.metric(KPI_LABEL_PEAK_DAY, f"${cost:,.2f}")
             st.caption(f"on {date}")
 
     with c2, st.container(border=True):
@@ -276,7 +238,7 @@ def _render_kpi_strip(
     with c3, st.container(border=True):
         st.metric(
             KPI_LABEL_AVG_PER_ACTIVE_DAY,
-            _fmt_cost(avg_active),
+            f"${avg_active:,.2f}",
             help=KPI_HELP_AVG_PER_ACTIVE_DAY,
         )
         st.caption(f"across {pluralize(active, 'active day')}")
@@ -291,144 +253,84 @@ def _render_kpi_strip(
             st.caption(f"{share:.1%} of window spend")
 
 
-def _render_day_rows(
-    cells: list[DailyCell], summaries: list[DailySummary]
+def _render_unified_table(
+    summaries: list[DailySummary],
+    cells: list[DailyCell],
+    totals: WindowTotals,
 ) -> None:
-    """One `st.expander` per day in descending date order. Expanders
-    open by default — manually clicking each one to inspect a day's
-    breakdown is friction without a payoff (the header carries the
-    summary fields, but the sub-table is what the user came here for).
-    Streamlit preserves the user's collapse choice across reruns
-    within a session, so anyone who wants the scan-only view can
-    collapse a row once and it stays collapsed.
-    """
-    for summary in summaries:
-        with st.expander(_day_header(summary), expanded=True):
-            _render_day_subtable(cells_for_date(cells, summary.date))
+    """Build the table rows (per-day All + per-project sub-rows + one
+    Total row) and hand off to `render_data_table`. The render
+    primitive is shared with Overview's Cost composition — same
+    Streamlit invocation, same fonts/widths/alignment by
+    construction."""
+    summary_by_date = {s.date: s for s in summaries}
+    project_rows = daily_project_aggregates(cells)
+    project_rows_by_date: dict[str, list[dict]] = {}
+    for row in project_rows:
+        project_rows_by_date.setdefault(row["date"], []).append(row)
+
+    table_rows: list[dict] = []
+    for date in sorted(summary_by_date, reverse=True):
+        table_rows.append(_all_row(summary_by_date[date]))
+        for project_row in project_rows_by_date.get(date, []):
+            table_rows.append(_project_sub_row(project_row))
+    table_rows.append(_total_row(totals))
+
+    render_data_table(table_rows, _TABLE_COLUMN_CONFIG)
 
 
-def _day_header(summary: DailySummary) -> str:
-    """Collapsed-state expander header. Format:
-    `<date> · <cost> · <tokens> tokens · <N models> · <N projects>`.
-
-    Order is scan-optimised: cost second (the field users come here
-    to compare), tokens third, model/project counts fourth/fifth.
-    The "what client made these requests" axis is covered by the
-    page-subtitle `AGENT_CONSTRAINT_CAPTION`; repeating "Claude Code"
-    on every header was noise per the v1 review.
-
-    Uses the same `_fmt_tokens` / `_fmt_cost` helpers as the KPI
-    strip so header text and KPI values cannot drift on formatting.
-    """
-    return (
-        f"{summary.date} · "
-        f"{_fmt_cost(summary.cost)} · "
-        f"{_fmt_tokens(summary.total_tokens)} tokens · "
-        f"{pluralize(summary.distinct_models, 'model')} · "
-        f"{pluralize(summary.distinct_projects, 'project')}"
-    )
-
-
-def _render_day_subtable(day_cells: list[DailyCell]) -> None:
-    """`(model, project)` rows for one day. Sorted by cost desc by
-    `cells_for_date`. Token columns reach the dataframe as
-    pre-formatted compact strings (`1.37B`); cost reaches as a raw
-    float that Streamlit formats via `NumberColumn`. Every column
-    carries an explicit width and column type — see
-    `_subtable_column_config` for the per-kind rule. Every day's
-    sub-table renders the full `_DAY_SUBTABLE_COLUMNS` set including
-    the Project column (no per-day column hiding) so column layout
-    stays consistent from one day-row to the next.
-    """
-    rows = [
-        {spec.label: _subtable_value(spec, cell) for spec in _DAY_SUBTABLE_COLUMNS}
-        for cell in day_cells
-    ]
-    column_config = {
-        spec.label: _subtable_column_config(spec)
-        for spec in _DAY_SUBTABLE_COLUMNS
+def _all_row(summary: DailySummary) -> dict:
+    """Aggregate row for one day. Date filled with the date string;
+    Agent = `All`; Project / Models blank; numeric columns carry the
+    day's aggregate sums."""
+    return {
+        "Date": summary.date,
+        "Agent": _ALL_LABEL,
+        "Project": "",
+        "Models": "",
+        "Input": format_compact_int(summary.input_tokens),
+        "Output": format_compact_int(summary.output_tokens),
+        "Cache create": format_compact_int(summary.cache_creation_tokens),
+        "Cache read": format_compact_int(summary.cache_read_tokens),
+        "Total tokens": format_compact_int(summary.total_tokens),
+        "Cost": summary.cost,
     }
-    st.dataframe(
-        rows,
-        width="stretch",
-        hide_index=True,
-        column_config=column_config,
-    )
 
 
-def _subtable_value(
-    spec: _ColumnSpec, cell: DailyCell
-) -> str | float:
-    """Format a `DailyCell` field for the per-day sub-table.
-
-    Tokens are pre-formatted into compact strings (`1.37B`) via
-    `_fmt_tokens` and reach the dataframe as `str`, NOT raw ints —
-    paired with `TextColumn` in `_subtable_column_config`. Cost
-    stays as a raw `float` so its `NumberColumn(format="$%.2f")`
-    entry can do the currency formatting Streamlit-side.
-
-    Label kinds use the same helpers the sidebar uses, so the
-    Daily view never carries a parallel display rule:
-
-      * `model`   → `display_model_label`  (`Opus 4.7`)
-      * `project` → `friendly_project_label(slug, home_slug=...)`
-                    — same encoding as the sidebar Project dropdown;
-                    `~/` for paths under home, raw slug elsewhere.
-
-    Replaced the slice-6 basename heuristic (`project_basename`)
-    after the v1 review surfaced that it returned the user's
-    username ("johnsmith") for the home-directory slug and
-    silently mangled multi-segment repo names. The home-relative
-    form is longer but never wrong.
-    """
-    value = getattr(cell, spec.attr)
-    if spec.kind == "tokens":
-        return _fmt_tokens(value)
-    if spec.kind == "cost":
-        return value
-    if spec.kind == "model":
-        return display_model_label(value)
-    if spec.kind == "project":
-        return friendly_project_label(value, home_slug=home_slug())
-    raise ValueError(f"_subtable_value: unknown kind {spec.kind!r}")
+def _project_sub_row(project_row: dict) -> dict:
+    """Per-project breakdown row under a day's All row. Date blank
+    (visual cue that this row continues the day above); Agent has
+    the leading-dash indent marker; Project is the resolved display
+    name; Models is the `, `-joined model labels for this
+    (date, project) bucket in per-model cost-desc order."""
+    return {
+        "Date": "",
+        "Agent": _AGENT_BREAKDOWN_LABEL,
+        "Project": project_display_name(project_row["project"]),
+        "Models": ", ".join(
+            display_model_label(m) for m in project_row["models"]
+        ),
+        "Input": format_compact_int(project_row["input_tokens"]),
+        "Output": format_compact_int(project_row["output_tokens"]),
+        "Cache create": format_compact_int(project_row["cache_creation_tokens"]),
+        "Cache read": format_compact_int(project_row["cache_read_tokens"]),
+        "Total tokens": format_compact_int(project_row["total_tokens"]),
+        "Cost": project_row["cost"],
+    }
 
 
-_PROJECT_COLUMN_HELP = (
-    "Project = ccusage's project key (the cwd Claude Code ran in). "
-    "Paths under your home directory render as `~/…`; other paths "
-    "(external drives etc.) keep their full encoded form. ccusage "
-    "encodes path separators as `-`, so directory names that "
-    "contain a hyphen are indistinguishable from nested paths."
-)
-
-
-def _subtable_column_config(spec: _ColumnSpec):
-    """Per-column `st.column_config` entry. Every column has an
-    explicit `width` so Streamlit's auto-sizer never resolves a
-    non-integer pixel width (mirrors Overview's Cost-composition
-    discipline; auto-detect produced inconsistent column sizing on
-    Daily).
-
-      - `tokens`  → `TextColumn(width="small")`. Pre-formatted
-        compact string (`1.37B`). Left-aligned. Matches Overview's
-        Tokens column exactly.
-      - `cost`    → `NumberColumn(format="$%.2f", width="medium")`.
-        Right-aligned currency, the one numeric-rendered column —
-        matches Overview's `Est. cost (USD)` exactly.
-      - `model`   → `TextColumn(width="small")`. Carries
-        `display_model_label` output (`Opus 4.7`).
-      - `project` → `TextColumn(width="medium",
-        help=_PROJECT_COLUMN_HELP)`. Wider because slug values can
-        be 30+ chars; help text describes the lossy encoding.
-    """
-    if spec.kind == "tokens":
-        return st.column_config.TextColumn(width="small")
-    if spec.kind == "cost":
-        return st.column_config.NumberColumn(format="$%.2f", width="medium")
-    if spec.kind == "model":
-        return st.column_config.TextColumn(width="small")
-    if spec.kind == "project":
-        return st.column_config.TextColumn(
-            width="medium", help=_PROJECT_COLUMN_HELP
-        )
-    raise ValueError(f"_subtable_column_config: unknown kind {spec.kind!r}")
+def _total_row(totals: WindowTotals) -> dict:
+    """Final window-wide totals row. Date = "Total" literal;
+    Agent / Project / Models blank; numerics are the window sums."""
+    return {
+        "Date": _TOTAL_LABEL,
+        "Agent": "",
+        "Project": "",
+        "Models": "",
+        "Input": format_compact_int(totals.input_tokens),
+        "Output": format_compact_int(totals.output_tokens),
+        "Cache create": format_compact_int(totals.cache_creation_tokens),
+        "Cache read": format_compact_int(totals.cache_read_tokens),
+        "Total tokens": format_compact_int(totals.total_tokens),
+        "Cost": totals.cost,
+    }

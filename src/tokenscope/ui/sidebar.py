@@ -28,12 +28,11 @@ import streamlit as st
 from tokenscope import config, data
 from tokenscope.analytics import (
     available_models,
-    friendly_project_label,
     short_model_label,
 )
 from tokenscope.ccusage import CcusageError
 from tokenscope.log import get_logger
-from tokenscope.paths import home_slug
+from tokenscope.paths import project_display_name
 from tokenscope.plans import Plan, get_plan, plan_names
 from tokenscope.query import Query
 from tokenscope.tz import detect_local_iana
@@ -336,16 +335,17 @@ def _fetch_discovery_options(query: Query) -> tuple[list[str], list[str]]:
 
 def _render_project_selectbox(project_options: list[str]) -> str | None:
     """Project filter. Returns None for "All projects" so the caller
-    can plumb it straight into `Query.project`."""
+    can plumb it straight into `Query.project`. Display labels go
+    through `project_display_name` — same helper the Daily table's
+    Project column uses, one rule across the dashboard."""
     project_kwargs: dict = {"key": _KEY_PROJECT}
     if _KEY_PROJECT not in st.session_state:
         project_kwargs["index"] = 0
-    home = home_slug()
     project_choice = st.selectbox(
         "Project",
         options=[ALL_PROJECTS, *project_options],
         format_func=lambda v: (
-            v if v == ALL_PROJECTS else friendly_project_label(v, home_slug=home)
+            v if v == ALL_PROJECTS else project_display_name(v)
         ),
         **project_kwargs,
     )

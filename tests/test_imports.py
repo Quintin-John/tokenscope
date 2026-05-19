@@ -148,7 +148,6 @@ def test_analytics_public_surface() -> None:
         "window_cost",
         "last_day_cost",
         "model_breakdown",
-        "friendly_project_label",
         "short_model_label",
         "prior_window_query",
         "window_effective_per_mtok",
@@ -171,6 +170,7 @@ def test_analytics_public_surface() -> None:
         "filter_daily_by_project_models",
         "available_models_by_project",
         "cells_for_date",
+        "daily_project_aggregates",
         "pluralize",
         "peak_day",
         "active_days_count",
@@ -179,6 +179,27 @@ def test_analytics_public_surface() -> None:
         "display_model_label",
     ):
         assert callable(getattr(analytics, name)), name
+
+
+def test_paths_public_surface() -> None:
+    """`tokenscope.paths` exposes the project-display helpers used
+    by both Daily (table Project column) and Sidebar (Project
+    dropdown). One module hosts the rule; one drift guard pins it.
+
+    `friendly_project_label` lives here after migrating out of
+    `analytics.py` — analytics was the wrong home for a slug-string
+    helper. `resolve_project_slug` + `project_display_name` are
+    Slice-8 additions: the filesystem-backed authoritative rule.
+    """
+    from tokenscope import paths
+
+    for name in (
+        "home_slug",
+        "friendly_project_label",
+        "resolve_project_slug",
+        "project_display_name",
+    ):
+        assert callable(getattr(paths, name)), name
 
 
 def test_navigation_public_surface() -> None:

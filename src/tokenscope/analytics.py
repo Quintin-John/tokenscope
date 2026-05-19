@@ -805,6 +805,73 @@ def busiest_model(cells: Iterable[DailyCell]) -> tuple[str, float] | None:
     return top_name, cost_by_model[top_name] / total
 
 
+def daily_project_aggregates(cells: Iterable[DailyCell]) -> list[dict]:
+    """Rollup `DailyCell`s per `(date, project)` for the Daily view's
+    unified table. Each row carries:
+
+        date:                     str (YYYY-MM-DD)
+        project:                  str — raw ccusage slug, unformatted
+                                   (renderer applies `project_display_name`)
+        models:                   list[str] — raw model names that ran
+                                   in this (date, project) bucket,
+                                   sorted by descending per-model cost
+                                   (ties broken by name descending)
+        input_tokens:             int
+        output_tokens:            int
+        cache_creation_tokens:    int
+        cache_read_tokens:        int
+        total_tokens:             int
+        cost:                     float
+
+    Rows sorted by `date` descending (newest first); within a date,
+    rows sorted by `cost` descending. Empty input → `[]`. Pure
+    function — no I/O, no display formatting. Renderer is responsible
+    for `display_model_label`, `project_display_name`, etc.
+    """
+    bucket: dict[tuple[str, str], dict] = {}
+    for c in cells:
+        key = (c.date, c.project)
+        row = bucket.setdefault(
+            key,
+            {
+                "date": c.date,
+                "project": c.project,
+                # Private: per-model cost map; collapsed into a sorted
+                # `models` list at the end. Keeps the rollup loop
+                # O(N) — we'd otherwise re-walk cells to compute model
+                # ordering.
+                "_models_cost": {},
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "total_tokens": 0,
+                "cost": 0.0,
+            },
+        )
+        row["_models_cost"][c.model] = (
+            row["_models_cost"].get(c.model, 0.0) + c.cost
+        )
+        row["input_tokens"] += c.input_tokens
+        row["output_tokens"] += c.output_tokens
+        row["cache_creation_tokens"] += c.cache_creation_tokens
+        row["cache_read_tokens"] += c.cache_read_tokens
+        row["total_tokens"] += c.total_tokens
+        row["cost"] += c.cost
+    rows: list[dict] = []
+    for row in bucket.values():
+        models_cost = row.pop("_models_cost")
+        # Tie-break: lex-greater model name wins on equal cost — same
+        # deterministic rule used by `busiest_model`, so two models
+        # with identical cost never flicker between renders.
+        row["models"] = sorted(
+            models_cost, key=lambda m: (models_cost[m], m), reverse=True
+        )
+        rows.append(row)
+    rows.sort(key=lambda r: (r["date"], r["cost"]), reverse=True)
+    return rows
+
+
 def cells_for_date(cells: Iterable[DailyCell], date_str: str) -> list[DailyCell]:
     """Return the subset of `cells` whose `date == date_str`, sorted by
     cost descending so the renderer iterates "where the money went"
@@ -857,47 +924,6 @@ def window_totals(cells: Iterable[DailyCell]) -> WindowTotals:
         cache_read_tokens=cache_r,
         cost=cost,
     )
-
-
-def friendly_project_label(slug: str, home_slug: str | None = None) -> str:
-    """Make a ccusage project slug scannable.
-
-    ccusage encodes a project's absolute path as a slugified string with
-    `-` separators (e.g. `-Users-q-johnsmith-Documents-RiderProjects-WorldForge`).
-    The encoding is *lossy* — hyphens inside directory names collide
-    with the separator. `mini-ollama-ui` looks identical to `mini/ollama/ui`
-    in slug form, so any "split on `-` and label the last bit" heuristic
-    invents wrong leaves the moment a project name contains a hyphen.
-
-    We deliberately do **not** try to recover directory structure. Instead:
-
-    1. If the slug matches the user's home-directory slug (passed in as
-       `home_slug` — sidebar.py computes it from `pathlib.Path.home()`),
-       substitute the home prefix with `~`. That's where 90% of the
-       sidebar noise lives.
-    2. Otherwise, strip the leading `-` and leave the rest verbatim.
-       The user reads "Volumes-SSK-Drive--Foo" and instantly recognises
-       it as their external drive without us mangling it further.
-
-    Examples (with `home_slug="-Users-q-johnsmith"`):
-        "-Users-q-johnsmith"                              → "~"
-        "-Users-q-johnsmith-Documents-RiderProjects-tok"  → "~/Documents-RiderProjects-tok"
-        "-Users-q-johnsmith-baremetal-audit"              → "~/baremetal-audit"
-        "-Volumes-SSK-Drive--ManageLiterature"            → "Volumes-SSK-Drive--ManageLiterature"
-        "Unknown Project"                                  → "Unknown Project"   (pass-through)
-        ""                                                 → ""                  (pass-through)
-    """
-    if not slug:
-        return slug
-    if home_slug:
-        if slug == home_slug:
-            return "~"
-        prefix = home_slug + "-"
-        if slug.startswith(prefix):
-            return "~/" + slug[len(prefix):]
-    if slug.startswith("-"):
-        return slug[1:]
-    return slug
 
 
 def display_model_label(model_name: str) -> str:

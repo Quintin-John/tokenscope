@@ -28,7 +28,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
 _log = logging.getLogger("tokenscope.ui.overview")
@@ -96,6 +95,7 @@ from tokenscope.plans import Plan
 from tokenscope.query import Query
 from tokenscope.ui._data import load_daily
 from tokenscope.ui._nav import handle_chart_drill
+from tokenscope.ui._tables import render_data_table
 from tokenscope.ui.charts import (
     cost_trend_with_rolling,
     token_mix_non_cache_percent_bar,
@@ -392,11 +392,8 @@ def _render_cost_composition(daily_report: DailyReport) -> None:
         }
     )
 
-    df = pd.DataFrame(table_rows)
-    st.dataframe(
-        df,
-        width="stretch",
-        hide_index=True,
+    render_data_table(
+        table_rows,
         column_config={
             "Kind": st.column_config.TextColumn(width="small"),
             "Tokens": st.column_config.TextColumn(width="small"),

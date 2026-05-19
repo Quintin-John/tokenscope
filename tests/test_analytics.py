@@ -36,6 +36,7 @@ from tokenscope.analytics import (
     cells_for_date,
     daily_cache_savings,
     daily_cells,
+    daily_project_aggregates,
     daily_summaries,
     pluralize,
     per_model_cache_performance,
@@ -53,7 +54,6 @@ from tokenscope.analytics import (
     find_session,
     format_compact_int,
     format_timezone_for_display,
-    friendly_project_label,
     last_day_cost,
     overview_insight,
     peak_day,
@@ -1006,69 +1006,6 @@ def test_model_breakdown_keeps_versions_separate() -> None:
 
 def test_model_breakdown_empty_report() -> None:
     assert model_breakdown(_report([])) == []
-
-
-HOME_SLUG = "-Users-quintin-johnsmith"
-
-
-def test_friendly_project_label_home_dir_itself() -> None:
-    """Regression for the johnsmith bug: the home directory slug must NOT
-    be rendered as 'johnsmith — Users/quintin'."""
-    assert friendly_project_label(HOME_SLUG, home_slug=HOME_SLUG) == "~"
-
-
-def test_friendly_project_label_under_home() -> None:
-    assert (
-        friendly_project_label(
-            "-Users-quintin-johnsmith-Documents-RiderProjects-WorldForge",
-            home_slug=HOME_SLUG,
-        )
-        == "~/Documents-RiderProjects-WorldForge"
-    )
-
-
-def test_friendly_project_label_under_home_hyphenated_dir() -> None:
-    """Hyphenated directory name (mini-ollama-ui) survives verbatim — we
-    can't recover its structure from the slug but we shouldn't mangle it."""
-    assert (
-        friendly_project_label(
-            "-Users-quintin-johnsmith-Downloads-mini-ollama-ui",
-            home_slug=HOME_SLUG,
-        )
-        == "~/Downloads-mini-ollama-ui"
-    )
-
-
-def test_friendly_project_label_outside_home() -> None:
-    """Path not under home → strip leading dash, leave the rest verbatim."""
-    assert (
-        friendly_project_label(
-            "-Volumes-SSK-Drive--ManageLiterature", home_slug=HOME_SLUG
-        )
-        == "Volumes-SSK-Drive--ManageLiterature"
-    )
-
-
-def test_friendly_project_label_no_home_slug() -> None:
-    """Without home info, we just strip the leading dash."""
-    assert (
-        friendly_project_label("-Users-anyone-Documents-Foo")
-        == "Users-anyone-Documents-Foo"
-    )
-
-
-def test_friendly_project_label_passthrough() -> None:
-    assert friendly_project_label("Unknown Project") == "Unknown Project"
-    assert friendly_project_label("") == ""
-
-
-def test_friendly_project_label_home_lookalike() -> None:
-    """A different user's home should not match — we require exact prefix."""
-    result = friendly_project_label(
-        "-Users-jane-Documents-Hack", home_slug=HOME_SLUG
-    )
-    # No home match → fall back to leading-dash strip.
-    assert result == "Users-jane-Documents-Hack"
 
 
 @pytest.mark.parametrize(
@@ -3015,6 +2952,116 @@ def test_busiest_model_ties_break_by_name_descending() -> None:
     ]
     name, _share = busiest_model(cells)
     assert name == "claude-opus-4-7"
+
+
+# ---------- daily_project_aggregates ----------
+
+
+def test_daily_project_aggregates_empty_cells() -> None:
+    """Empty input yields an empty list — no crash on empty windows."""
+    assert daily_project_aggregates([]) == []
+
+
+def test_daily_project_aggregates_single_day_single_project() -> None:
+    """One cell → one row carrying the cell's values verbatim plus
+    a single-element `models` list."""
+    cells = [
+        DailyCell("2026-05-16", "claude-opus-4-7", "-proj-A", 10, 20, 30, 40, 5.0),
+    ]
+    rows = daily_project_aggregates(cells)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["date"] == "2026-05-16"
+    assert row["project"] == "-proj-A"
+    assert row["models"] == ["claude-opus-4-7"]
+    assert row["input_tokens"] == 10
+    assert row["output_tokens"] == 20
+    assert row["cache_creation_tokens"] == 30
+    assert row["cache_read_tokens"] == 40
+    assert row["total_tokens"] == 100
+    assert row["cost"] == pytest.approx(5.0)
+
+
+def test_daily_project_aggregates_groups_by_date_and_project() -> None:
+    """Cells sharing `(date, project)` collapse into one row; different
+    `(date, project)` pairs stay as separate rows."""
+    cells = [
+        DailyCell("2026-05-16", "claude-opus-4-7", "-A", 1, 2, 3, 4, 1.0),
+        DailyCell("2026-05-16", "claude-haiku-4-5", "-A", 1, 1, 1, 1, 0.5),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-B", 10, 10, 10, 10, 3.0),
+        DailyCell("2026-05-15", "claude-opus-4-7", "-A", 100, 100, 100, 100, 50.0),
+    ]
+    rows = daily_project_aggregates(cells)
+    keys = {(r["date"], r["project"]) for r in rows}
+    assert keys == {
+        ("2026-05-16", "-A"),
+        ("2026-05-16", "-B"),
+        ("2026-05-15", "-A"),
+    }
+
+
+def test_daily_project_aggregates_models_sorted_by_cost_desc_in_row() -> None:
+    """Within a (date, project) row, the `models` list is sorted by
+    descending per-(date, project, model) cost — the most expensive
+    model leads. Display renders this list left-to-right; cost order
+    is what the user reads first."""
+    cells = [
+        DailyCell("2026-05-16", "claude-haiku-4-5", "-A", 1, 1, 1, 1, 1.0),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-A", 1, 1, 1, 1, 10.0),
+        DailyCell("2026-05-16", "claude-sonnet-4-6", "-A", 1, 1, 1, 1, 5.0),
+    ]
+    rows = daily_project_aggregates(cells)
+    assert len(rows) == 1
+    assert rows[0]["models"] == [
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+    ]
+
+
+def test_daily_project_aggregates_rows_sorted_newest_first_cost_desc_within_day() -> None:
+    """Rows sorted by date descending; within a date, by cost
+    descending. Matches the Daily table's render order so the
+    renderer doesn't re-sort."""
+    cells = [
+        DailyCell("2026-05-14", "claude-opus-4-7", "-A", 1, 1, 1, 1, 5.0),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-A", 1, 1, 1, 1, 100.0),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-B", 1, 1, 1, 1, 50.0),
+        DailyCell("2026-05-15", "claude-opus-4-7", "-A", 1, 1, 1, 1, 30.0),
+    ]
+    rows = daily_project_aggregates(cells)
+    keys = [(r["date"], r["project"]) for r in rows]
+    assert keys == [
+        ("2026-05-16", "-A"),  # newest day, highest cost
+        ("2026-05-16", "-B"),  # newest day, lower cost
+        ("2026-05-15", "-A"),
+        ("2026-05-14", "-A"),
+    ]
+
+
+def test_daily_project_aggregates_sums_match_input_cells() -> None:
+    """The load-bearing invariant: summing every row's numerics
+    equals summing every cell's numerics. If a regression drops or
+    double-counts a cell, this trips."""
+    cells = [
+        DailyCell("2026-05-16", "claude-opus-4-7", "-A", 10, 20, 30, 40, 5.0),
+        DailyCell("2026-05-16", "claude-haiku-4-5", "-A", 1, 2, 3, 4, 0.5),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-B", 100, 200, 300, 400, 50.0),
+        DailyCell("2026-05-15", "claude-opus-4-7", "-A", 7, 7, 7, 7, 7.0),
+    ]
+    rows = daily_project_aggregates(cells)
+    assert sum(r["input_tokens"] for r in rows) == sum(c.input_tokens for c in cells)
+    assert sum(r["output_tokens"] for r in rows) == sum(c.output_tokens for c in cells)
+    assert sum(r["cache_creation_tokens"] for r in rows) == sum(
+        c.cache_creation_tokens for c in cells
+    )
+    assert sum(r["cache_read_tokens"] for r in rows) == sum(
+        c.cache_read_tokens for c in cells
+    )
+    assert sum(r["total_tokens"] for r in rows) == sum(c.total_tokens for c in cells)
+    assert sum(r["cost"] for r in rows) == pytest.approx(
+        sum(c.cost for c in cells)
+    )
 
 
 # ---------- cells_for_date ----------
