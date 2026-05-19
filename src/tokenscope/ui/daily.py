@@ -330,10 +330,13 @@ def _render_day_subtable(
     summary: DailySummary, day_cells: list[DailyCell]
 ) -> None:
     """`(model, project)` rows for one day. Sorted by cost desc by
-    `cells_for_date`. Numeric token / cost columns reach the
-    dataframe as raw numbers; `column_config` formats them and
-    Streamlit right-aligns numeric columns automatically. The Project
-    column is dropped on single-project days (see `_columns_for_day`).
+    `cells_for_date`. Token columns reach the dataframe as
+    pre-formatted compact strings (`1.37B`); cost reaches as a raw
+    float that Streamlit formats via `NumberColumn`. Every column
+    carries an explicit width and column type — see
+    `_subtable_column_config` for the per-kind rule. The Project
+    column is dropped on single-project days (see
+    `_columns_for_day`).
     """
     columns = _columns_for_day(summary.distinct_projects)
     rows = [
@@ -341,9 +344,7 @@ def _render_day_subtable(
         for cell in day_cells
     ]
     column_config = {
-        spec.label: cc
-        for spec in columns
-        if (cc := _subtable_column_config(spec)) is not None
+        spec.label: _subtable_column_config(spec) for spec in columns
     }
     st.dataframe(
         rows,
@@ -355,20 +356,34 @@ def _render_day_subtable(
 
 def _subtable_value(
     spec: _ColumnSpec, cell: DailyCell
-) -> str | int | float:
+) -> str | float:
     """Format a `DailyCell` field for the per-day sub-table.
 
-    Numeric kinds (`tokens`, `cost`) return raw values; the
-    corresponding `NumberColumn` entries in `_subtable_column_config`
-    format them and Streamlit right-aligns numeric columns by default.
+    Tokens are pre-formatted into compact strings (`1.37B`) via
+    `_fmt_tokens` and reach the dataframe as `str`, NOT raw ints —
+    paired with `TextColumn` in `_subtable_column_config`. Cost
+    stays as a raw `float` so its `NumberColumn(format="$%.2f")`
+    entry can do the currency formatting Streamlit-side.
+
+    Why tokens are TextColumn and not NumberColumn: glide-data-grid
+    renders NumberColumn cells at a heavier font weight than
+    TextColumn cells and headers. Overview's Cost-composition table
+    runs into the same asymmetry but only one column (Est. cost)
+    triggers it; on Daily with five numeric token columns it
+    dominated every row. Matching Overview's pattern (TextColumn
+    for compact tokens, NumberColumn only for currency) makes the
+    two tables render with the same column-type ratio and the
+    weight asymmetry stops being visible. Trade-off accepted: lose
+    right-aligned token columns, gain cross-table consistency.
+
     Label kinds (`model`, `project`) return pre-formatted strings
-    from `display_model_label` / `project_basename` — those helpers
-    live in `analytics.py` so the Daily view doesn't introduce a
+    via `display_model_label` / `project_basename` — both helpers
+    live in `analytics.py` so the Daily view never carries a
     parallel display rule.
     """
     value = getattr(cell, spec.attr)
     if spec.kind == "tokens":
-        return int(value)
+        return _fmt_tokens(value)
     if spec.kind == "cost":
         return value
     if spec.kind == "model":
@@ -387,18 +402,32 @@ _PROJECT_COLUMN_HELP = (
 
 
 def _subtable_column_config(spec: _ColumnSpec):
-    """Per-column `st.column_config` entry. Numeric columns get
-    `NumberColumn` (Streamlit right-aligns those automatically):
-    cost → `$%.2f`, tokens → `localized` (`1,374,041,578` with comma
-    separators). The Project column gets a `TextColumn` with column-
-    level help explaining the basename heuristic. Model column falls
-    through to Streamlit's default `TextColumn` (no help needed —
-    the display values are unambiguous).
+    """Per-column `st.column_config` entry. Every column has an
+    explicit `width` so Streamlit's auto-sizer never resolves a
+    non-integer pixel width (mirrors Overview's Cost-composition
+    discipline; auto-detect produced inconsistent column sizing on
+    Daily).
+
+      - `tokens`  → `TextColumn(width="small")`. Pre-formatted
+        compact string (`1.37B`). Left-aligned. Matches Overview's
+        Tokens column exactly.
+      - `cost`    → `NumberColumn(format="$%.2f", width="medium")`.
+        Right-aligned currency, the one numeric-rendered column —
+        matches Overview's `Est. cost (USD)` exactly.
+      - `model`   → `TextColumn(width="small")`. Carries
+        `display_model_label` output (`Opus 4.7`).
+      - `project` → `TextColumn(width="medium",
+        help=_PROJECT_COLUMN_HELP)`. Wider because slug values can
+        be 30+ chars; help text describes the lossy encoding.
     """
-    if spec.kind == "cost":
-        return st.column_config.NumberColumn(format="$%.2f")
     if spec.kind == "tokens":
-        return st.column_config.NumberColumn(format="localized")
+        return st.column_config.TextColumn(width="small")
+    if spec.kind == "cost":
+        return st.column_config.NumberColumn(format="$%.2f", width="medium")
+    if spec.kind == "model":
+        return st.column_config.TextColumn(width="small")
     if spec.kind == "project":
-        return st.column_config.TextColumn(help=_PROJECT_COLUMN_HELP)
-    return None
+        return st.column_config.TextColumn(
+            width="medium", help=_PROJECT_COLUMN_HELP
+        )
+    raise ValueError(f"_subtable_column_config: unknown kind {spec.kind!r}")

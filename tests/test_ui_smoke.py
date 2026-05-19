@@ -1169,6 +1169,88 @@ def test_daily_sub_table_project_column_uses_basename(
     assert not any(v.startswith("-") for v in rendered)
 
 
+def test_daily_sub_table_token_columns_are_compact_strings(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Token columns (Input/Output/Cache create/Cache read/Total
+    tokens) reach the dataframe as pre-formatted compact strings
+    (`1.37B`, `522.2M`) via `_fmt_tokens` → `format_compact_int`,
+    NOT as raw ints. This is the cross-table-consistency contract
+    with Overview's Cost-composition Tokens column: both views
+    render tokens as TextColumn carrying compact strings, so the
+    NumberColumn font-weight asymmetry in glide-data-grid doesn't
+    manifest as a visible difference between rows."""
+    from tokenscope.analytics import format_compact_int
+    from tokenscope.ui.daily import _DAY_SUBTABLE_COLUMNS
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+
+    token_columns = [
+        spec.label for spec in _DAY_SUBTABLE_COLUMNS if spec.kind == "tokens"
+    ]
+    assert token_columns, "no token-kind columns in _DAY_SUBTABLE_COLUMNS"
+
+    seen_values: set[str] = set()
+    for df in at.dataframe:
+        for col in token_columns:
+            if col not in df.value.columns:
+                continue
+            for value in df.value[col].tolist():
+                # Every rendered token value must be a string (not
+                # int / float) — the NumberColumn → TextColumn swap
+                # is what avoids the font-weight asymmetry.
+                assert isinstance(value, str), (
+                    f"column {col!r} carries non-string value "
+                    f"{value!r} ({type(value).__name__}); expected "
+                    f"compact-formatted string"
+                )
+                seen_values.add(value)
+
+    # Sanity: at least one rendered value must round-trip through
+    # format_compact_int — pins the helper as the actual formatter,
+    # not just "any string accepted".
+    fixture_token_values: set[int] = set()
+    raw = json.loads((FIXTURES / "daily_by_project.json").read_text())
+    for entries in raw["projects"].values():
+        for e in entries:
+            for b in e["modelBreakdowns"]:
+                fixture_token_values.add(b["inputTokens"])
+                fixture_token_values.add(b["outputTokens"])
+                fixture_token_values.add(b["cacheCreationTokens"])
+                fixture_token_values.add(b["cacheReadTokens"])
+    expected_some = {format_compact_int(v) for v in fixture_token_values}
+    assert seen_values & expected_some, (
+        f"rendered token values don't match format_compact_int output: "
+        f"saw {sorted(seen_values)[:5]}, expected some of "
+        f"{sorted(expected_some)[:5]}"
+    )
+
+
+def test_daily_sub_table_cost_column_stays_numeric(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Cost column must stay as raw floats reaching `NumberColumn`
+    — that's what lets `format="$%.2f"` do the currency formatting
+    Streamlit-side. Regression guard against accidentally moving
+    cost into the same `TextColumn` pre-format path as tokens
+    (which would lose right-alignment AND the currency format)."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    for df in at.dataframe:
+        assert "Cost" in df.value.columns
+        for value in df.value["Cost"].tolist():
+            assert isinstance(value, (int, float)) and not isinstance(value, bool), (
+                f"Cost column carries non-numeric value {value!r} "
+                f"({type(value).__name__}); NumberColumn formatting "
+                f"requires raw floats"
+            )
+
+
 # ---------- Live view rework ----------
 
 
