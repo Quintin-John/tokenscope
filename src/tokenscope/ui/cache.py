@@ -86,10 +86,14 @@ def _page_caption(plan: Plan) -> str:
 def _hero_label(plan: Plan) -> str:
     """Label inside the savings hero. Flat-rate gets the explicit
     `API-equivalent` qualifier so the dollar figure beneath it
-    isn't mistaken for money out of pocket."""
+    isn't mistaken for money out of pocket. Pay-per-token names
+    the rate source (`Anthropic API rates`) explicitly so the
+    figure isn't read as "savings from caching in the abstract"
+    when it's specifically the rate delta at Anthropic's published
+    pay-per-token rates."""
     if plan.is_flat_rate:
         return "API-equivalent savings from caching"
-    return "Estimated savings from caching"
+    return "Estimated savings at Anthropic API rates"
 
 
 def _hero_savings_context_html(
@@ -114,11 +118,11 @@ def _hero_savings_context_html(
             "throughput budget, not money out of pocket."
         )
     return (
-        f"Over the selected window. Without caching, your spend would "
-        f"have been <strong>${uncached:,.2f}</strong> — you actually "
-        f"paid <strong>${actual:,.2f}</strong>. The saving is the rate "
-        "delta on cache_read tokens: (input rate − cache_read rate) × "
-        "tokens, summed per model."
+        f"Over the selected window. Estimated bill at Anthropic API "
+        f"rates: <strong>${actual:,.2f}</strong> with caching, "
+        f"<strong>${uncached:,.2f}</strong> without. The saving is "
+        f"the rate delta on cache_read tokens: (input rate − "
+        f"cache_read rate) × tokens, summed per model."
     )
 
 
@@ -161,9 +165,10 @@ def _effective_rate_help(plan: Plan) -> str:
     """Help-icon tooltip for the Effective $/MTok KPI. Flat-rate
     adds the flat-fee decoupling note."""
     base = (
-        "Blended cost per 1M tokens across the window. Compare "
-        "to a model's published input rate (~$15/MTok for opus, "
-        "$3 for sonnet, $1 for haiku) — caching pulls this down."
+        "Blended cost per 1M tokens across the window, computed "
+        "from ccusage's per-entry totals. Compare to Anthropic's "
+        "published input rate for the dominant model in your "
+        "window — caching pulls this down."
     )
     if plan.is_flat_rate:
         return (
@@ -192,7 +197,7 @@ def _daily_savings_caption(plan: Plan) -> str:
         )
     return (
         "Estimated $ saved each day by caching reads instead of "
-        "paying the full input rate."
+        "paying the Anthropic input rate."
     )
 
 
