@@ -15,6 +15,7 @@ walk algorithm are all load-bearing. Tests pin each.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -157,128 +158,256 @@ def test_friendly_project_label_home_lookalike() -> None:
 
 
 # ---------- resolve_project_slug ----------
+#
+# `resolve_project_slug` reads the authoritative cwd from JSONL
+# transcript files Claude Code writes under
+# `~/.claude/projects/<slug>/*.jsonl`. The directory tree is
+# mounted into the Docker container even though the cwd-encoded
+# host paths inside the slug aren't, which is why the JSONL path
+# (not a filesystem walk) is the right oracle.
+#
+# Tests build a fake `~/.claude/projects/<slug>/` directory under
+# `tmp_path` and monkeypatch `Path.home()` to that tmp_path. That
+# gives each test an isolated filesystem with the exact JSONL
+# content it needs.
 
 
-def test_resolve_project_slug_returns_none_for_empty() -> None:
+def _write_session_jsonl(
+    project_dir: Path, cwd: str, *, filename: str = "session.jsonl"
+) -> Path:
+    """Build a minimal session JSONL with a single record carrying
+    `cwd`. Mirrors the real Claude Code format: each line is a
+    standalone JSON object; substantive records carry `cwd`."""
+    project_dir.mkdir(parents=True, exist_ok=True)
+    jsonl = project_dir / filename
+    jsonl.write_text(
+        json.dumps({"type": "user", "cwd": cwd, "sessionId": "test-session"})
+        + "\n"
+    )
+    return jsonl
+
+
+def test_resolve_project_slug_returns_none_for_empty(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert resolve_project_slug("") is None
 
 
-def test_resolve_project_slug_returns_none_without_leading_dash() -> None:
-    """A bare-name slug (`tokenscope`, no leading dash) isn't a
-    ccusage-encoded path — bail out rather than guess."""
-    assert resolve_project_slug("tokenscope") is None
+def test_resolve_project_slug_returns_none_when_project_dir_missing(
+    monkeypatch, tmp_path
+) -> None:
+    """No `~/.claude/projects/<slug>/` directory → None. The slug
+    is unknown locally; fallback kicks in at the caller."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert resolve_project_slug("-this-slug-has-no-transcripts") is None
 
 
-def test_resolve_project_slug_returns_none_when_no_path_exists(monkeypatch) -> None:
-    """No decoding of the slug lands on a real directory → None."""
-    monkeypatch.setattr(Path, "is_dir", lambda self: False)
-    assert resolve_project_slug("-Users-nope-nothere") is None
+def test_resolve_project_slug_returns_none_when_no_jsonl_has_cwd(
+    monkeypatch, tmp_path
+) -> None:
+    """Project directory exists but no JSONL line yields a cwd
+    field. Possible if every record is session metadata (e.g.
+    older Claude Code versions). Returns None defensively."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-test-proj"
+    project_dir = tmp_path / ".claude" / "projects" / slug
+    project_dir.mkdir(parents=True)
+    # JSONL with records that lack a `cwd` field.
+    (project_dir / "session.jsonl").write_text(
+        json.dumps({"type": "user", "sessionId": "x"}) + "\n"
+        + json.dumps({"type": "snapshot"}) + "\n"
+    )
+    assert resolve_project_slug(slug) is None
 
 
-def test_resolve_project_slug_walks_simple_path(tmp_path) -> None:
-    """Build a real directory tree under tmp_path and walk into it.
-    The greedy algorithm finds `/<tmp>/Users/q/proj` for the slug
-    `-Users-q-proj` (when rooted at tmp_path)."""
-    real = tmp_path / "Users" / "q" / "proj"
-    real.mkdir(parents=True)
-    fake_root_slug = "-" + str(tmp_path).lstrip("/").replace("/", "-")
-    slug = fake_root_slug + "-Users-q-proj"
-    resolved = resolve_project_slug(slug)
-    assert resolved == real
+def test_resolve_project_slug_reads_cwd_from_jsonl(monkeypatch, tmp_path) -> None:
+    """The first JSONL record with a `cwd` field is the authoritative
+    source. `resolve_project_slug` returns `Path(cwd)` verbatim —
+    the slug→cwd transform is delegated to Claude Code's own
+    transcript metadata, not reverse-engineered from the slug."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-test-Documents-RiderProjects-tokenscope"
+    cwd = "/Users/test/Documents/RiderProjects/tokenscope"
+    _write_session_jsonl(
+        tmp_path / ".claude" / "projects" / slug, cwd=cwd
+    )
+    assert resolve_project_slug(slug) == Path(cwd)
 
 
-def test_resolve_project_slug_disambiguates_hyphenated_dir(tmp_path) -> None:
-    """Two possible decodings: `tmp/Users/q/repo-with-dash` (one
-    dir) or `tmp/Users/q/repo/with/dash` (nested). Only the first
-    exists on disk; the greedy walk must pick it via the longest-
-    match rule."""
-    real = tmp_path / "Users" / "q" / "repo-with-dash"
-    real.mkdir(parents=True)
-    fake_root_slug = "-" + str(tmp_path).lstrip("/").replace("/", "-")
-    slug = fake_root_slug + "-Users-q-repo-with-dash"
-    resolved = resolve_project_slug(slug)
-    assert resolved == real
-    # Sanity: `.name` is the full hyphenated dir, not a fragment.
-    assert resolved.name == "repo-with-dash"
+def test_resolve_project_slug_works_with_hyphenated_dir_names(
+    monkeypatch, tmp_path
+) -> None:
+    """The JSONL cwd preserves the original directory name verbatim,
+    so a repo named `baremetal-audit` (with a literal hyphen)
+    resolves to `/Users/test/baremetal-audit` — the lossy
+    `-`-encoding ambiguity is bypassed entirely by reading the
+    cwd directly."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-test-baremetal-audit"
+    cwd = "/Users/test/baremetal-audit"
+    _write_session_jsonl(
+        tmp_path / ".claude" / "projects" / slug, cwd=cwd
+    )
+    assert resolve_project_slug(slug) == Path(cwd)
+    assert resolve_project_slug(slug).name == "baremetal-audit"
 
 
-def test_resolve_project_slug_returns_home_path_when_slug_is_home(monkeypatch) -> None:
-    """The slug `-Users-q-johnsmith` should resolve to `/Users/q-johnsmith`
-    when that directory exists. project_display_name then renders this as `~`."""
-    # Real filesystem under macOS: /Users/quintin-johnsmith exists.
-    # Use Path.home() to make this portable.
-    home = Path.home()
-    if not home.is_dir():
-        pytest.skip("Path.home() doesn't resolve to a real directory")
-    home_str = str(home).lstrip("/")
-    slug = "-" + home_str.replace("/", "-")
-    assert resolve_project_slug(slug) == home
+def test_resolve_project_slug_skips_records_without_cwd(
+    monkeypatch, tmp_path
+) -> None:
+    """Real Claude Code JSONLs lead with session-metadata records
+    (no `cwd`) before substantive records. The function must skip
+    cwd-less lines and find the first one that has it."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-test-proj"
+    project_dir = tmp_path / ".claude" / "projects" / slug
+    project_dir.mkdir(parents=True)
+    (project_dir / "session.jsonl").write_text(
+        json.dumps({"type": "user", "sessionId": "abc"}) + "\n"
+        + json.dumps({"type": "snapshot"}) + "\n"
+        + json.dumps({"type": "user", "cwd": "/Users/test/proj"}) + "\n"
+    )
+    assert resolve_project_slug(slug) == Path("/Users/test/proj")
+
+
+def test_resolve_project_slug_skips_malformed_json_lines(
+    monkeypatch, tmp_path
+) -> None:
+    """Defensive: corrupt JSONL lines (truncated writes, etc.)
+    must not raise — the function moves on and tries the next
+    line / file."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-test-proj"
+    project_dir = tmp_path / ".claude" / "projects" / slug
+    project_dir.mkdir(parents=True)
+    (project_dir / "session.jsonl").write_text(
+        "this is not json\n"
+        + "{broken: json\n"
+        + json.dumps({"type": "user", "cwd": "/Users/test/proj"}) + "\n"
+    )
+    assert resolve_project_slug(slug) == Path("/Users/test/proj")
 
 
 def test_resolve_project_slug_cached(monkeypatch, tmp_path) -> None:
-    """Cache hit on the second call — `Path.is_dir` should be invoked
-    only on the first resolution of a given slug."""
-    real = tmp_path / "Users" / "q" / "proj"
-    real.mkdir(parents=True)
-    fake_root_slug = "-" + str(tmp_path).lstrip("/").replace("/", "-")
-    slug = fake_root_slug + "-Users-q-proj"
+    """Cache hit on the second call — the JSONL files should be
+    opened only on the first resolution of a given slug."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-test-proj"
+    cwd = "/Users/test/proj"
+    _write_session_jsonl(
+        tmp_path / ".claude" / "projects" / slug, cwd=cwd
+    )
 
-    call_count = {"n": 0}
-    original_is_dir = Path.is_dir
+    open_count = {"n": 0}
+    original_open = Path.open
 
-    def counting_is_dir(self) -> bool:
-        call_count["n"] += 1
-        return original_is_dir(self)
+    def counting_open(self, *args, **kwargs):
+        if self.suffix == ".jsonl":
+            open_count["n"] += 1
+        return original_open(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "is_dir", counting_is_dir)
+    monkeypatch.setattr(Path, "open", counting_open)
     resolve_project_slug.cache_clear()
     first = resolve_project_slug(slug)
-    calls_after_first = call_count["n"]
+    calls_after_first = open_count["n"]
     second = resolve_project_slug(slug)
-    calls_after_second = call_count["n"]
-    assert first == second
-    assert calls_after_first > 0, "first call must walk the filesystem"
+    calls_after_second = open_count["n"]
+    assert first == second == Path(cwd)
+    assert calls_after_first > 0, "first call must read the JSONL"
     assert calls_after_second == calls_after_first, (
-        "second call must hit the cache and not re-walk"
+        "second call must hit the cache, not re-open the JSONL"
     )
 
 
 # ---------- project_display_name ----------
 
 
-def test_project_display_name_basename_for_resolved_path(tmp_path) -> None:
-    """When the slug resolves to a real path, render its basename."""
-    real = tmp_path / "Users" / "q" / "tokenscope"
-    real.mkdir(parents=True)
-    fake_root_slug = "-" + str(tmp_path).lstrip("/").replace("/", "-")
-    slug = fake_root_slug + "-Users-q-tokenscope"
+def test_project_display_name_basename_for_resolved_path(
+    monkeypatch, tmp_path
+) -> None:
+    """When the slug's JSONL yields a cwd, render the cwd's basename."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-test-Documents-tokenscope"
+    _write_session_jsonl(
+        tmp_path / ".claude" / "projects" / slug,
+        cwd="/Users/test/Documents/tokenscope",
+    )
     assert project_display_name(slug) == "tokenscope"
 
 
-def test_project_display_name_tilde_for_home() -> None:
-    """When the slug resolves to exactly Path.home(), render `~` —
-    not the basename (which would be `q-johnsmith` or similar)."""
-    home = Path.home()
-    if not home.is_dir():
-        pytest.skip("Path.home() doesn't resolve to a real directory")
-    home_str = str(home).lstrip("/")
-    slug = "-" + home_str.replace("/", "-")
+def test_project_display_name_basename_preserves_hyphenated_dir(
+    monkeypatch, tmp_path
+) -> None:
+    """The cwd preserves the original directory name verbatim, so
+    a repo literally named `baremetal-audit` renders as
+    `baremetal-audit` — not the wrong `audit` leaf the old
+    basename heuristic would have produced."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-test-baremetal-audit"
+    _write_session_jsonl(
+        tmp_path / ".claude" / "projects" / slug,
+        cwd="/Users/test/baremetal-audit",
+    )
+    assert project_display_name(slug) == "baremetal-audit"
+
+
+def test_project_display_name_tilde_for_macos_home(
+    monkeypatch, tmp_path
+) -> None:
+    """Cwd of the form `/Users/<single-segment>` renders as `~`,
+    not as the username. The heuristic is environment-independent
+    (works in Docker where container HOME is `/root` but the
+    host's HOME under `Path.home()` would still be wrong)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-alice"
+    _write_session_jsonl(
+        tmp_path / ".claude" / "projects" / slug, cwd="/Users/alice"
+    )
     assert project_display_name(slug) == "~"
 
 
-def test_project_display_name_falls_back_to_friendly_label(monkeypatch) -> None:
-    """When `resolve_project_slug` returns None (path missing, drive
-    unmounted, etc.), fall back to `friendly_project_label` so the
-    column still renders something readable."""
-    monkeypatch.setattr(Path, "is_dir", lambda self: False)
-    monkeypatch.setattr(Path, "home", lambda: Path("/Users/quintin-johnsmith"))
+def test_project_display_name_tilde_for_linux_home(
+    monkeypatch, tmp_path
+) -> None:
+    """`/home/<single-segment>` renders as `~` on Linux paths."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-home-bob"
+    _write_session_jsonl(
+        tmp_path / ".claude" / "projects" / slug, cwd="/home/bob"
+    )
+    assert project_display_name(slug) == "~"
+
+
+def test_project_display_name_deeper_home_path_is_not_tilde(
+    monkeypatch, tmp_path
+) -> None:
+    """`/Users/alice/Documents` (more than 3 parts) is NOT the home
+    dir — it's a project under home. Should render as basename
+    (`Documents`), not `~`."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    slug = "-Users-alice-Documents"
+    _write_session_jsonl(
+        tmp_path / ".claude" / "projects" / slug, cwd="/Users/alice/Documents"
+    )
+    assert project_display_name(slug) == "Documents"
+
+
+def test_project_display_name_falls_back_to_friendly_label(
+    monkeypatch, tmp_path
+) -> None:
+    """When `resolve_project_slug` returns None (no JSONL with
+    cwd), fall back to `friendly_project_label` so the column
+    still renders something readable. With the container's home
+    not matching the slug's encoded path, the fallback strips the
+    leading dash but doesn't substitute `~/...`."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     home_slug.cache_clear()
-    # No decoding of this slug exists on disk → fallback engages.
+    # No project directory at all → resolve returns None.
     result = project_display_name(
         "-Users-quintin-johnsmith-baremetal-audit"
     )
-    # Fallback returns the friendly-label form (`~/baremetal-audit`).
-    assert result == "~/baremetal-audit"
+    # Container fallback: leading dash stripped, no `~/` because
+    # tmp_path doesn't match the host's home prefix.
+    assert result == "Users-quintin-johnsmith-baremetal-audit"
 
 
 def test_project_display_name_empty_passthrough() -> None:

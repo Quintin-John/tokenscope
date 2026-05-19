@@ -18,6 +18,7 @@ opt-in via `pytest -m integration`.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -1207,6 +1208,99 @@ def test_daily_table_cost_column_stays_numeric(
             f"({type(value).__name__}); NumberColumn formatting "
             f"requires raw floats"
         )
+
+
+def test_daily_table_project_resolves_via_jsonl_in_docker_context(
+    monkeypatch, mock_ccusage, mock_ccusage_version, tmp_path
+) -> None:
+    """Regression for the Docker bug: the container runs as root
+    with `$HOME/.claude` mounted at `/root/.claude:ro`, so the
+    host paths encoded in ccusage slugs (`/Users/<user>/…`) don't
+    exist in the container's filesystem. The earlier filesystem-
+    walk implementation of `resolve_project_slug` failed in that
+    environment and the Project column rendered the slug minus
+    its leading dash.
+
+    The fix reads the authoritative cwd from the JSONL files
+    Claude Code wrote under `~/.claude/projects/<slug>/` — that
+    directory IS mounted in Docker, even though the host cwd
+    inside it isn't a valid path on the container's filesystem.
+
+    This test simulates the Docker environment by monkeypatching
+    `Path.home()` to a tmp_path that doesn't match the slug's
+    encoded path, planting a JSONL with the right cwd, and
+    asserting the Project column renders the basename (not the
+    slug-stripped form). Trip-wire for any regression that
+    reintroduces filesystem-walk resolution."""
+    from tokenscope.paths import resolve_project_slug
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    resolve_project_slug.cache_clear()
+
+    slug = "-Users-test-Documents-RiderProjects-tokenscope"
+    cwd = "/Users/test/Documents/RiderProjects/tokenscope"
+    project_dir = tmp_path / ".claude" / "projects" / slug
+    project_dir.mkdir(parents=True)
+    (project_dir / "session.jsonl").write_text(
+        json.dumps({"type": "user", "cwd": cwd, "sessionId": "test"})
+        + "\n"
+    )
+
+    synthetic = {
+        "projects": {
+            slug: [
+                {
+                    "date": "2026-05-19",
+                    "inputTokens": 100,
+                    "outputTokens": 200,
+                    "cacheCreationTokens": 300,
+                    "cacheReadTokens": 400,
+                    "totalTokens": 1000,
+                    "totalCost": 12.5,
+                    "modelsUsed": ["claude-opus-4-7"],
+                    "modelBreakdowns": [
+                        {
+                            "modelName": "claude-opus-4-7",
+                            "inputTokens": 100,
+                            "outputTokens": 200,
+                            "cacheCreationTokens": 300,
+                            "cacheReadTokens": 400,
+                            "cost": 12.5,
+                        }
+                    ],
+                }
+            ]
+        },
+        "totals": {
+            "inputTokens": 100,
+            "outputTokens": 200,
+            "cacheCreationTokens": 300,
+            "cacheReadTokens": 400,
+            "totalTokens": 1000,
+            "totalCost": 12.5,
+        },
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=synthetic)
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    rendered_projects = set(at.dataframe[0].value["Project"].tolist())
+    assert "tokenscope" in rendered_projects, (
+        f"Project column doesn't show JSONL-resolved basename: "
+        f"{rendered_projects!r}"
+    )
+    # Inverse contract: the slug-stripped form (the pre-fix bug)
+    # must NOT appear. If it does, the JSONL-based resolution path
+    # broke and the fallback kicked in.
+    assert "Users-test-Documents-RiderProjects-tokenscope" not in rendered_projects, (
+        "Project column carries the slug-stripped form — "
+        "JSONL resolution regression"
+    )
 
 
 def test_daily_table_token_columns_are_compact_strings(
