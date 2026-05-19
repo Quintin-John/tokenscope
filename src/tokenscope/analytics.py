@@ -13,6 +13,7 @@ figures.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date, timedelta
 from statistics import median
 from typing import Iterable, Protocol
@@ -20,6 +21,7 @@ from typing import Iterable, Protocol
 from tokenscope.models import (
     BlockEntry,
     BlocksReport,
+    DailyByProjectReport,
     DailyEntry,
     DailyReport,
     SessionEntry,
@@ -326,6 +328,46 @@ def cost_share_by_model(entry: DailyEntry | SessionEntry) -> list[dict]:
     ]
 
 
+def _filter_entries_by_models(
+    entries: Iterable[DailyEntry], keep: set[str]
+) -> list[DailyEntry]:
+    """Internal: return a list of new DailyEntry objects with breakdowns
+    restricted to `keep`. Per-entry token/cost totals are recomputed from
+    the surviving breakdowns; entries with no surviving breakdowns are
+    dropped. The `project` field is preserved verbatim — relevant when
+    the source `DailyReport` came from `--project=<id>` (`project` set)
+    versus from `daily_by_project` (`project` is None and the project
+    identity lives in the outer dict key). Shared core for the two public
+    filter entry-points so both shapes apply identical filter semantics.
+    """
+    new_entries: list[DailyEntry] = []
+    for entry in entries:
+        kept = [b for b in entry.model_breakdowns if b.model_name in keep]
+        if not kept:
+            continue
+        new_entries.append(
+            DailyEntry(
+                date=entry.date,
+                project=entry.project,
+                inputTokens=sum(b.input_tokens for b in kept),
+                outputTokens=sum(b.output_tokens for b in kept),
+                cacheCreationTokens=sum(b.cache_creation_tokens for b in kept),
+                cacheReadTokens=sum(b.cache_read_tokens for b in kept),
+                totalTokens=sum(
+                    b.input_tokens
+                    + b.output_tokens
+                    + b.cache_creation_tokens
+                    + b.cache_read_tokens
+                    for b in kept
+                ),
+                totalCost=sum(b.cost for b in kept),
+                modelsUsed=[b.model_name for b in kept],
+                modelBreakdowns=kept,
+            )
+        )
+    return new_entries
+
+
 def filter_daily_by_models(
     daily_report: DailyReport, selected: Iterable[str]
 ) -> DailyReport:
@@ -343,33 +385,38 @@ def filter_daily_by_models(
     keep = set(selected) if selected else None
     if not keep:
         return daily_report
-    new_entries: list[DailyEntry] = []
-    for entry in daily_report.daily:
-        kept = [b for b in entry.model_breakdowns if b.model_name in keep]
-        if not kept:
-            continue
-        new_entries.append(
-            DailyEntry(
-                date=entry.date,
-                inputTokens=sum(b.input_tokens for b in kept),
-                outputTokens=sum(b.output_tokens for b in kept),
-                cacheCreationTokens=sum(b.cache_creation_tokens for b in kept),
-                cacheReadTokens=sum(b.cache_read_tokens for b in kept),
-                totalTokens=sum(
-                    b.input_tokens
-                    + b.output_tokens
-                    + b.cache_creation_tokens
-                    + b.cache_read_tokens
-                    for b in kept
-                ),
-                totalCost=sum(b.cost for b in kept),
-                modelsUsed=[b.model_name for b in kept],
-                modelBreakdowns=kept,
-            )
-        )
+    new_entries = _filter_entries_by_models(daily_report.daily, keep)
     return DailyReport(
         daily=new_entries,
         totals=_totals_from_entries(new_entries),
+    )
+
+
+def filter_daily_by_project_models(
+    report: DailyByProjectReport, selected: Iterable[str]
+) -> DailyByProjectReport:
+    """Return a *new* DailyByProjectReport with breakdowns restricted to
+    `selected`. Filter semantics match `filter_daily_by_models` exactly
+    (shared `_filter_entries_by_models` core): entries with no surviving
+    breakdowns are dropped; projects with no surviving entries are dropped;
+    top-level totals are recomputed across all surviving entries.
+
+    `selected` of None or empty is passthrough — the original report is
+    returned unchanged so the caller can rely on `result is report` to
+    detect "no filter applied".
+    """
+    keep = set(selected) if selected else None
+    if not keep:
+        return report
+    new_projects: dict[str, list[DailyEntry]] = {}
+    for project, entries in report.projects.items():
+        filtered = _filter_entries_by_models(entries, keep)
+        if filtered:
+            new_projects[project] = filtered
+    all_entries = [e for entries in new_projects.values() for e in entries]
+    return DailyByProjectReport(
+        projects=new_projects,
+        totals=_totals_from_entries(all_entries),
     )
 
 
@@ -518,6 +565,187 @@ def cost_concentration_summary(rows: list[dict]) -> dict | None:
         "family": top["family"],
         "share": top["share"],
     }
+
+
+@dataclass(frozen=True, slots=True)
+class DailyCell:
+    """One cell of the Daily view's per-`(date, model, project)` grid.
+
+    Stores the four primitive token kinds and cost only. `total_tokens`
+    is a derived `@property` so there is exactly one rule for summing
+    a cell's tokens — re-derived in `DailySummary` and `WindowTotals`
+    the same way. Frozen + slots so cells are immutable and cheap.
+
+    `project` is ccusage's project key (the dash-encoded cwd from
+    `daily --instances`); the UI layer is responsible for rendering it
+    via `friendly_project_label` rather than this dataclass embedding
+    a display-format dependency.
+    """
+
+    date: str
+    model: str
+    project: str
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    cost: float
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DailySummary:
+    """Per-day rollup derived from a list of `DailyCell`. Carries the
+    same four token kinds + cost as a cell plus the distinct
+    model/project counts used by the day-row collapsed header
+    (`N models · N projects`).
+    """
+
+    date: str
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    cost: float
+    distinct_models: int
+    distinct_projects: int
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WindowTotals:
+    """Window-wide rollup derived from a list of `DailyCell`. Same six
+    numeric fields as ccusage's `Totals` shape but as a frozen
+    dataclass — the UI layer's totals card consumes this without
+    pinning itself to the pydantic class.
+    """
+
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    cost: float
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+        )
+
+
+def daily_cells(report: DailyByProjectReport) -> list[DailyCell]:
+    """Flatten `DailyByProjectReport` into one `DailyCell` per
+    `(date, model, project)` combination ccusage actually emitted.
+
+    No sorting: the renderer decides display order. No empty-cell
+    synthesis for `(date, model, project)` combinations ccusage didn't
+    emit — those genuinely had zero activity and a real row with all
+    zeros would be a false positive.
+    """
+    cells: list[DailyCell] = []
+    for project, entries in report.projects.items():
+        for entry in entries:
+            for b in entry.model_breakdowns:
+                cells.append(
+                    DailyCell(
+                        date=entry.date,
+                        model=b.model_name,
+                        project=project,
+                        input_tokens=b.input_tokens,
+                        output_tokens=b.output_tokens,
+                        cache_creation_tokens=b.cache_creation_tokens,
+                        cache_read_tokens=b.cache_read_tokens,
+                        cost=b.cost,
+                    )
+                )
+    return cells
+
+
+def daily_summaries(cells: Iterable[DailyCell]) -> list[DailySummary]:
+    """Per-day rollups from `DailyCell` list. Returned newest-first so the
+    Daily tab can render day-rows in descending date order without a
+    second sort at the call site.
+    """
+    by_date: dict[str, dict] = {}
+    for cell in cells:
+        row = by_date.setdefault(
+            cell.date,
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "cost": 0.0,
+                "models": set(),
+                "projects": set(),
+            },
+        )
+        row["input_tokens"] += cell.input_tokens
+        row["output_tokens"] += cell.output_tokens
+        row["cache_creation_tokens"] += cell.cache_creation_tokens
+        row["cache_read_tokens"] += cell.cache_read_tokens
+        row["cost"] += cell.cost
+        row["models"].add(cell.model)
+        row["projects"].add(cell.project)
+    summaries = [
+        DailySummary(
+            date=d,
+            input_tokens=r["input_tokens"],
+            output_tokens=r["output_tokens"],
+            cache_creation_tokens=r["cache_creation_tokens"],
+            cache_read_tokens=r["cache_read_tokens"],
+            cost=r["cost"],
+            distinct_models=len(r["models"]),
+            distinct_projects=len(r["projects"]),
+        )
+        for d, r in by_date.items()
+    ]
+    summaries.sort(key=lambda s: s.date, reverse=True)
+    return summaries
+
+
+def window_totals(cells: Iterable[DailyCell]) -> WindowTotals:
+    """Window-wide rollup from `DailyCell` list. Empty input yields a
+    zero-totals object rather than `None` so the Daily tab's totals
+    card can always render with the same shape.
+    """
+    input_t = 0
+    output_t = 0
+    cache_c = 0
+    cache_r = 0
+    cost = 0.0
+    for cell in cells:
+        input_t += cell.input_tokens
+        output_t += cell.output_tokens
+        cache_c += cell.cache_creation_tokens
+        cache_r += cell.cache_read_tokens
+        cost += cell.cost
+    return WindowTotals(
+        input_tokens=input_t,
+        output_tokens=output_t,
+        cache_creation_tokens=cache_c,
+        cache_read_tokens=cache_r,
+        cost=cost,
+    )
 
 
 def friendly_project_label(slug: str, home_slug: str | None = None) -> str:

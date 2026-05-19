@@ -14,6 +14,9 @@ from datetime import date
 import pytest
 
 from tokenscope.analytics import (
+    DailyCell,
+    DailySummary,
+    WindowTotals,
     active_block_burn,
     aggregate_cache_hit_ratio,
     available_models,
@@ -27,6 +30,8 @@ from tokenscope.analytics import (
     cost_by_kind,
     cost_concentration_summary,
     daily_cache_savings,
+    daily_cells,
+    daily_summaries,
     per_model_cache_performance,
     cost_share_by_model,
     daily_cache_hit_ratio,
@@ -35,6 +40,7 @@ from tokenscope.analytics import (
     bold_numbers_in_insight,
     collapse_composition_rows,
     filter_daily_by_models,
+    filter_daily_by_project_models,
     find_block,
     find_daily_entry,
     find_session,
@@ -56,6 +62,7 @@ from tokenscope.analytics import (
     typical_burn_rate,
     window_cost,
     window_effective_per_mtok,
+    window_totals,
 )
 from tokenscope.query import Query
 from tokenscope.models import (
@@ -63,6 +70,7 @@ from tokenscope.models import (
     BlocksReport,
     BlockTokenCounts,
     BurnRate,
+    DailyByProjectReport,
     DailyEntry,
     DailyReport,
     ModelBreakdown,
@@ -2309,4 +2317,556 @@ def test_cost_concentration_summary_empty_rows_returns_none() -> None:
     """Empty window → None so the KPI card renders its `—`
     fallback instead of crashing on `max(...)`."""
     assert cost_concentration_summary([]) is None
+
+
+# ---------- Daily-view helpers (Slice 1) ----------
+#
+# `_by_project_report` mirrors `_report` for the `DailyByProjectReport`
+# shape ccusage emits when invoked with `--instances`. Test-only helper —
+# its sole responsibility is to assemble a valid pydantic instance from a
+# dict-of-entries, with `Totals` summed for the caller.
+
+
+def _by_project_report(
+    projects: dict[str, list[DailyEntry]],
+) -> DailyByProjectReport:
+    all_entries = [e for entries in projects.values() for e in entries]
+    return DailyByProjectReport(
+        projects=projects,
+        totals=Totals(
+            inputTokens=sum(e.input_tokens for e in all_entries),
+            outputTokens=sum(e.output_tokens for e in all_entries),
+            cacheCreationTokens=sum(e.cache_creation_tokens for e in all_entries),
+            cacheReadTokens=sum(e.cache_read_tokens for e in all_entries),
+            totalTokens=sum(e.total_tokens for e in all_entries),
+            totalCost=sum(e.total_cost for e in all_entries),
+        ),
+    )
+
+
+# ---------- DailyCell / DailySummary / WindowTotals (dataclasses) ----------
+
+
+def test_daily_cell_total_tokens_sums_four_kinds() -> None:
+    """`total_tokens` is a derived property — there is exactly one
+    rule for summing a cell, mirrored in `DailySummary` / `WindowTotals`."""
+    cell = DailyCell(
+        date="2026-05-16",
+        model="claude-opus-4-7",
+        project="-Users-q-tokenscope",
+        input_tokens=1,
+        output_tokens=2,
+        cache_creation_tokens=4,
+        cache_read_tokens=8,
+        cost=0.5,
+    )
+    assert cell.total_tokens == 15
+
+
+def test_daily_cell_is_frozen() -> None:
+    """`frozen=True` guards against accidental mutation in renderers."""
+    cell = DailyCell(
+        date="2026-05-16",
+        model="claude-opus-4-7",
+        project="-Users-q-tokenscope",
+        input_tokens=1,
+        output_tokens=2,
+        cache_creation_tokens=3,
+        cache_read_tokens=4,
+        cost=1.0,
+    )
+    with pytest.raises(Exception):
+        cell.cost = 999.0  # type: ignore[misc]
+
+
+def test_daily_summary_total_tokens_sums_four_kinds() -> None:
+    summary = DailySummary(
+        date="2026-05-16",
+        input_tokens=1,
+        output_tokens=2,
+        cache_creation_tokens=4,
+        cache_read_tokens=8,
+        cost=0.5,
+        distinct_models=2,
+        distinct_projects=1,
+    )
+    assert summary.total_tokens == 15
+
+
+def test_window_totals_total_tokens_sums_four_kinds() -> None:
+    totals = WindowTotals(
+        input_tokens=1,
+        output_tokens=2,
+        cache_creation_tokens=4,
+        cache_read_tokens=8,
+        cost=0.5,
+    )
+    assert totals.total_tokens == 15
+
+
+# ---------- daily_cells ----------
+
+
+def test_daily_cells_empty_report() -> None:
+    assert daily_cells(_by_project_report({})) == []
+
+
+def test_daily_cells_single_project_single_day_single_model() -> None:
+    bd = _breakdown("claude-opus-4-7", cost=5.0)
+    entry = _entry(
+        "2026-05-16",
+        models=["claude-opus-4-7"],
+        model_breakdowns=[bd],
+        total_cost=5.0,
+    )
+    report = _by_project_report({"-proj-A": [entry]})
+    cells = daily_cells(report)
+    assert len(cells) == 1
+    cell = cells[0]
+    assert cell.date == "2026-05-16"
+    assert cell.model == "claude-opus-4-7"
+    assert cell.project == "-proj-A"
+    assert cell.input_tokens == bd.input_tokens
+    assert cell.output_tokens == bd.output_tokens
+    assert cell.cache_creation_tokens == bd.cache_creation_tokens
+    assert cell.cache_read_tokens == bd.cache_read_tokens
+    assert cell.cost == pytest.approx(5.0)
+
+
+def test_daily_cells_emits_one_per_model_per_day_per_project() -> None:
+    """Two projects × two days × two models = 8 cells.
+    Verifies the cartesian flattening preserves ccusage's emission
+    grain — and only that grain (no synthesized zero-cells)."""
+    b_opus = _breakdown("claude-opus-4-7", cost=3.0)
+    b_haiku = _breakdown("claude-haiku-4-5-20251001", cost=1.0)
+
+    def two_model_entry(d: str) -> DailyEntry:
+        return _entry(
+            d,
+            models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+            model_breakdowns=[b_opus, b_haiku],
+            total_cost=4.0,
+        )
+
+    report = _by_project_report(
+        {
+            "-proj-A": [two_model_entry("2026-05-15"), two_model_entry("2026-05-16")],
+            "-proj-B": [two_model_entry("2026-05-15"), two_model_entry("2026-05-16")],
+        }
+    )
+    cells = daily_cells(report)
+    assert len(cells) == 8
+    triples = {(c.date, c.model, c.project) for c in cells}
+    assert triples == {
+        (d, m, p)
+        for d in ("2026-05-15", "2026-05-16")
+        for m in ("claude-opus-4-7", "claude-haiku-4-5-20251001")
+        for p in ("-proj-A", "-proj-B")
+    }
+
+
+def test_daily_cells_skips_ccusage_unemitted_combinations() -> None:
+    """When ccusage's --instances output has a model in one project
+    but not another on the same date, `daily_cells` must NOT
+    synthesize a zero-row for the missing combination — a row for
+    'happened' must be distinguishable from a row for 'did not happen'."""
+    opus_only = _entry(
+        "2026-05-16",
+        models=["claude-opus-4-7"],
+        model_breakdowns=[_breakdown("claude-opus-4-7", cost=2.0)],
+        total_cost=2.0,
+    )
+    haiku_only = _entry(
+        "2026-05-16",
+        models=["claude-haiku-4-5-20251001"],
+        model_breakdowns=[_breakdown("claude-haiku-4-5-20251001", cost=0.5)],
+        total_cost=0.5,
+    )
+    report = _by_project_report(
+        {"-proj-A": [opus_only], "-proj-B": [haiku_only]}
+    )
+    cells = daily_cells(report)
+    triples = {(c.date, c.model, c.project) for c in cells}
+    assert triples == {
+        ("2026-05-16", "claude-opus-4-7", "-proj-A"),
+        ("2026-05-16", "claude-haiku-4-5-20251001", "-proj-B"),
+    }
+
+
+# ---------- daily_summaries ----------
+
+
+def test_daily_summaries_empty_cells() -> None:
+    assert daily_summaries([]) == []
+
+
+def test_daily_summaries_groups_by_date_descending() -> None:
+    """Days in newest-first order — UI renders day-rows top-down with
+    most-recent at the top, this saves a sort at the call site."""
+    cells = [
+        DailyCell("2026-05-14", "claude-opus-4-7", "-proj-A", 1, 2, 3, 4, 1.0),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-proj-A", 1, 2, 3, 4, 2.0),
+        DailyCell("2026-05-15", "claude-opus-4-7", "-proj-A", 1, 2, 3, 4, 3.0),
+    ]
+    summaries = daily_summaries(cells)
+    assert [s.date for s in summaries] == ["2026-05-16", "2026-05-15", "2026-05-14"]
+
+
+def test_daily_summaries_sums_per_day_and_counts_distinct() -> None:
+    """One day with two models across two projects: per-kind sums are
+    the cell-wise total; `distinct_models` / `distinct_projects` count
+    the unique set, not the cell count."""
+    cells = [
+        DailyCell("2026-05-16", "claude-opus-4-7", "-proj-A", 10, 20, 30, 40, 5.0),
+        DailyCell("2026-05-16", "claude-haiku-4-5", "-proj-A", 1, 2, 3, 4, 0.5),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-proj-B", 100, 200, 300, 400, 50.0),
+    ]
+    summaries = daily_summaries(cells)
+    assert len(summaries) == 1
+    s = summaries[0]
+    assert s.date == "2026-05-16"
+    assert s.input_tokens == 111
+    assert s.output_tokens == 222
+    assert s.cache_creation_tokens == 333
+    assert s.cache_read_tokens == 444
+    assert s.cost == pytest.approx(55.5)
+    # Distinct counts: 2 unique models (opus, haiku), 2 unique projects.
+    assert s.distinct_models == 2
+    assert s.distinct_projects == 2
+
+
+# ---------- window_totals ----------
+
+
+def test_window_totals_empty_cells_is_zero() -> None:
+    """Empty input → zero-totals (NOT None) so the Daily tab's totals
+    card always has a shape to render."""
+    totals = window_totals([])
+    assert totals.input_tokens == 0
+    assert totals.output_tokens == 0
+    assert totals.cache_creation_tokens == 0
+    assert totals.cache_read_tokens == 0
+    assert totals.cost == pytest.approx(0.0)
+    assert totals.total_tokens == 0
+
+
+def test_window_totals_sums_all_cells() -> None:
+    cells = [
+        DailyCell("2026-05-15", "claude-opus-4-7", "-A", 1, 2, 3, 4, 0.5),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-A", 10, 20, 30, 40, 5.0),
+    ]
+    totals = window_totals(cells)
+    assert totals.input_tokens == 11
+    assert totals.output_tokens == 22
+    assert totals.cache_creation_tokens == 33
+    assert totals.cache_read_tokens == 44
+    assert totals.cost == pytest.approx(5.5)
+    assert totals.total_tokens == 110
+
+
+# ---------- totals invariant (daily_cells × window_totals) ----------
+
+
+def _consistent_entry(
+    date: str, breakdowns: list[ModelBreakdown]
+) -> DailyEntry:
+    """Build a `DailyEntry` whose entry-level token / cost sums agree
+    with the sum of its `breakdowns`. The default `_entry` helper takes
+    entry-level numbers and breakdowns independently — convenient for
+    most tests, but it can produce internally-inconsistent fixtures
+    (entry totals != sum of breakdowns) which is unsafe for the
+    cell-vs-report-totals invariant test below. Real ccusage data is
+    always internally consistent; the invariant test must reflect that.
+    """
+    return DailyEntry(
+        date=date,
+        inputTokens=sum(b.input_tokens for b in breakdowns),
+        outputTokens=sum(b.output_tokens for b in breakdowns),
+        cacheCreationTokens=sum(b.cache_creation_tokens for b in breakdowns),
+        cacheReadTokens=sum(b.cache_read_tokens for b in breakdowns),
+        totalTokens=sum(
+            b.input_tokens
+            + b.output_tokens
+            + b.cache_creation_tokens
+            + b.cache_read_tokens
+            for b in breakdowns
+        ),
+        totalCost=sum(b.cost for b in breakdowns),
+        modelsUsed=[b.model_name for b in breakdowns],
+        modelBreakdowns=breakdowns,
+    )
+
+
+def test_window_totals_of_cells_match_report_totals() -> None:
+    """The load-bearing invariant: summing every cell ccusage emitted
+    must equal ccusage's own reported `totals`. If this ever breaks,
+    the Daily tab's totals card would silently disagree with the rest
+    of the dashboard."""
+    b_opus = _breakdown("claude-opus-4-7", cost=3.0)
+    b_haiku = _breakdown("claude-haiku-4-5-20251001", cost=1.0)
+    report = _by_project_report(
+        {
+            "-proj-A": [_consistent_entry("2026-05-15", [b_opus, b_haiku])],
+            "-proj-B": [_consistent_entry("2026-05-16", [b_opus])],
+        }
+    )
+    totals = window_totals(daily_cells(report))
+    assert totals.input_tokens == report.totals.input_tokens
+    assert totals.output_tokens == report.totals.output_tokens
+    assert totals.cache_creation_tokens == report.totals.cache_creation_tokens
+    assert totals.cache_read_tokens == report.totals.cache_read_tokens
+    assert totals.cost == pytest.approx(report.totals.total_cost)
+    assert totals.total_tokens == report.totals.total_tokens
+
+
+def test_daily_summaries_totals_match_window_totals() -> None:
+    """The cell-derived summaries summed up must equal `window_totals`
+    on the same cells — the two helpers must agree about the totals
+    they expose, otherwise the per-day rows and the totals card would
+    disagree."""
+    b_opus = _breakdown("claude-opus-4-7", cost=2.5)
+    b_haiku = _breakdown("claude-haiku-4-5-20251001", cost=0.5)
+    cells = daily_cells(
+        _by_project_report(
+            {
+                "-proj-A": [
+                    _entry(
+                        "2026-05-15",
+                        models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+                        model_breakdowns=[b_opus, b_haiku],
+                        total_cost=3.0,
+                    ),
+                    _entry(
+                        "2026-05-16",
+                        models=["claude-opus-4-7"],
+                        model_breakdowns=[b_opus],
+                        total_cost=2.5,
+                    ),
+                ]
+            }
+        )
+    )
+    summaries = daily_summaries(cells)
+    totals = window_totals(cells)
+    assert sum(s.input_tokens for s in summaries) == totals.input_tokens
+    assert sum(s.output_tokens for s in summaries) == totals.output_tokens
+    assert (
+        sum(s.cache_creation_tokens for s in summaries)
+        == totals.cache_creation_tokens
+    )
+    assert (
+        sum(s.cache_read_tokens for s in summaries) == totals.cache_read_tokens
+    )
+    assert sum(s.cost for s in summaries) == pytest.approx(totals.cost)
+
+
+# ---------- filter_daily_by_project_models ----------
+
+
+def test_filter_daily_by_project_models_passthrough_on_empty_selection() -> None:
+    """Passthrough must return the SAME object (identity), so callers
+    can rely on `result is report` to detect 'no filter applied'."""
+    report = _by_project_report(
+        {"-proj-A": [_entry("2026-05-16", total_cost=1.0)]}
+    )
+    assert filter_daily_by_project_models(report, []) is report
+    assert filter_daily_by_project_models(report, None) is report  # type: ignore[arg-type]
+
+
+def test_filter_daily_by_project_models_keeps_matching_models_recomputes_totals() -> None:
+    """The per-entry totals must be recomputed from the surviving
+    breakdowns — leaving the original entry's `totalCost` intact
+    after dropping a breakdown would create internal inconsistency."""
+    b_opus = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=100, outputTokens=200,
+        cacheCreationTokens=300, cacheReadTokens=400,
+        cost=10.0,
+    )
+    b_haiku = ModelBreakdown(
+        modelName="claude-haiku-4-5-20251001",
+        inputTokens=10, outputTokens=20,
+        cacheCreationTokens=30, cacheReadTokens=40,
+        cost=1.0,
+    )
+    report = _by_project_report(
+        {
+            "-proj-A": [
+                _entry(
+                    "2026-05-16",
+                    total_cost=11.0,
+                    models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+                    model_breakdowns=[b_opus, b_haiku],
+                )
+            ]
+        }
+    )
+    filtered = filter_daily_by_project_models(report, ["claude-opus-4-7"])
+    assert list(filtered.projects.keys()) == ["-proj-A"]
+    only_entry = filtered.projects["-proj-A"][0]
+    assert [b.model_name for b in only_entry.model_breakdowns] == ["claude-opus-4-7"]
+    assert only_entry.total_cost == pytest.approx(10.0)
+    assert filtered.totals.total_cost == pytest.approx(10.0)
+
+
+def test_filter_daily_by_project_models_drops_projects_with_no_match() -> None:
+    """A project whose every entry has zero surviving breakdowns
+    must be dropped from the result, so the Daily tab doesn't render
+    an empty project sub-row."""
+    b_opus = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=1, outputTokens=1, cacheCreationTokens=1, cacheReadTokens=1,
+        cost=1.0,
+    )
+    b_haiku = ModelBreakdown(
+        modelName="claude-haiku-4-5-20251001",
+        inputTokens=1, outputTokens=1, cacheCreationTokens=1, cacheReadTokens=1,
+        cost=1.0,
+    )
+    report = _by_project_report(
+        {
+            "-proj-opus-only": [
+                _entry(
+                    "2026-05-16",
+                    total_cost=1.0,
+                    models=["claude-opus-4-7"],
+                    model_breakdowns=[b_opus],
+                )
+            ],
+            "-proj-haiku-only": [
+                _entry(
+                    "2026-05-16",
+                    total_cost=1.0,
+                    models=["claude-haiku-4-5-20251001"],
+                    model_breakdowns=[b_haiku],
+                )
+            ],
+        }
+    )
+    filtered = filter_daily_by_project_models(report, ["claude-opus-4-7"])
+    assert list(filtered.projects.keys()) == ["-proj-opus-only"]
+
+
+def test_filter_daily_by_project_models_drops_entries_with_no_match() -> None:
+    """Within a project, an entry whose every breakdown is filtered
+    out must be dropped — not retained with zero breakdowns."""
+    b_opus = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=1, outputTokens=1, cacheCreationTokens=1, cacheReadTokens=1,
+        cost=2.0,
+    )
+    b_haiku = ModelBreakdown(
+        modelName="claude-haiku-4-5-20251001",
+        inputTokens=1, outputTokens=1, cacheCreationTokens=1, cacheReadTokens=1,
+        cost=0.5,
+    )
+    e_both = _entry(
+        "2026-05-15",
+        total_cost=2.5,
+        models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+        model_breakdowns=[b_opus, b_haiku],
+    )
+    e_haiku_only = _entry(
+        "2026-05-16",
+        total_cost=0.5,
+        models=["claude-haiku-4-5-20251001"],
+        model_breakdowns=[b_haiku],
+    )
+    report = _by_project_report({"-proj-A": [e_both, e_haiku_only]})
+    filtered = filter_daily_by_project_models(report, ["claude-opus-4-7"])
+    surviving = filtered.projects["-proj-A"]
+    assert [e.date for e in surviving] == ["2026-05-15"]
+
+
+def test_filter_daily_by_project_models_no_match_anywhere_yields_empty() -> None:
+    """When no project survives, `projects` is empty and `totals`
+    is the zero-totals shape — the Daily tab's empty-window branch
+    handles the rendering."""
+    b_opus = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=1, outputTokens=1, cacheCreationTokens=1, cacheReadTokens=1,
+        cost=1.0,
+    )
+    report = _by_project_report(
+        {
+            "-proj-A": [
+                _entry(
+                    "2026-05-16",
+                    total_cost=1.0,
+                    models=["claude-opus-4-7"],
+                    model_breakdowns=[b_opus],
+                )
+            ]
+        }
+    )
+    filtered = filter_daily_by_project_models(report, ["claude-sonnet-4-6"])
+    assert filtered.projects == {}
+    assert filtered.totals.total_cost == pytest.approx(0.0)
+    assert filtered.totals.total_tokens == 0
+
+
+def test_filter_daily_by_project_models_matches_daily_by_models_semantics() -> None:
+    """Both filter paths must apply identical filter rules — they share
+    `_filter_entries_by_models`. This test pins the two paths to the
+    same entry-level result when given the same input entries."""
+    b_opus = ModelBreakdown(
+        modelName="claude-opus-4-7",
+        inputTokens=100, outputTokens=200,
+        cacheCreationTokens=300, cacheReadTokens=400,
+        cost=10.0,
+    )
+    b_haiku = ModelBreakdown(
+        modelName="claude-haiku-4-5-20251001",
+        inputTokens=10, outputTokens=20,
+        cacheCreationTokens=30, cacheReadTokens=40,
+        cost=1.0,
+    )
+    entries = [
+        _entry(
+            "2026-05-16",
+            total_cost=11.0,
+            models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+            model_breakdowns=[b_opus, b_haiku],
+        )
+    ]
+    flat = filter_daily_by_models(_report(entries), ["claude-opus-4-7"])
+    nested = filter_daily_by_project_models(
+        _by_project_report({"-proj-A": entries}),
+        ["claude-opus-4-7"],
+    )
+    flat_only = flat.daily[0]
+    nested_only = nested.projects["-proj-A"][0]
+    # Same surviving breakdown set.
+    assert [b.model_name for b in flat_only.model_breakdowns] == [
+        b.model_name for b in nested_only.model_breakdowns
+    ]
+    # Same recomputed per-entry totals.
+    assert flat_only.total_cost == pytest.approx(nested_only.total_cost)
+    assert flat_only.total_tokens == nested_only.total_tokens
+    assert flat_only.input_tokens == nested_only.input_tokens
+
+
+# ---------- filter_daily_by_models regression: project preservation ----------
+
+
+def test_filter_daily_by_models_preserves_project_field() -> None:
+    """Regression after the `_filter_entries_by_models` extraction:
+    when ccusage was invoked with `--project=<id>`, each entry carries
+    a `project` string. The filter MUST preserve it; losing it would
+    silently break any downstream consumer that keys on it."""
+    bd = _breakdown("claude-opus-4-7", cost=1.0)
+    entry = DailyEntry(
+        date="2026-05-16",
+        project="-proj-specific",
+        inputTokens=10, outputTokens=20,
+        cacheCreationTokens=30, cacheReadTokens=40,
+        totalTokens=100, totalCost=1.0,
+        modelsUsed=["claude-opus-4-7"],
+        modelBreakdowns=[bd],
+    )
+    filtered = filter_daily_by_models(
+        _report([entry]),
+        ["claude-opus-4-7"],
+    )
+    assert filtered.daily[0].project == "-proj-specific"
 

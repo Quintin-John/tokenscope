@@ -162,6 +162,13 @@ def test_analytics_public_surface() -> None:
         "per_model_cache_performance",
         "cache_data_range",
         "cost_concentration_summary",
+        "DailyCell",
+        "DailySummary",
+        "WindowTotals",
+        "daily_cells",
+        "daily_summaries",
+        "window_totals",
+        "filter_daily_by_project_models",
     ):
         assert callable(getattr(analytics, name)), name
 
