@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Literal, Mapping, get_args
 
 ViewName = Literal[
-    "overview", "live", "cache", "models",
+    "overview", "live", "cache", "models", "daily",
     "day", "session", "block",
 ]
 
@@ -47,6 +47,7 @@ _VIEWS: tuple[_ViewMeta, ...] = (
     _ViewMeta("live", "Live"),
     _ViewMeta("cache", "Cache"),
     _ViewMeta("models", "Models"),
+    _ViewMeta("daily", "Daily"),
     _ViewMeta("day", None),
     _ViewMeta("session", None),
     _ViewMeta("block", None),

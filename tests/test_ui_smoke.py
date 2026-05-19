@@ -18,6 +18,7 @@ opt-in via `pytest -m integration`.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -196,6 +197,53 @@ def test_overview_composition_is_inline_not_expander(
     assert not any(
         "Cost composition" in (label or "") for label in expander_labels
     ), f"composition is still inside an expander: {expander_labels!r}"
+
+
+def test_overview_cost_composition_column_set_unchanged_after_render_extraction(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Regression after migrating `_render_cost_composition` to the
+    shared `render_data_table` primitive: Cost composition's column
+    set must still be `Kind / Tokens / Est. cost (USD) / Share`. The
+    extraction wraps `st.dataframe` in a helper; if it accidentally
+    strips or reorders columns, this test trips."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    # Overview renders multiple dataframes (cost composition + others).
+    # The cost composition one carries these four columns; find by
+    # column-set match rather than by index (other tables on Overview
+    # could grow / shrink later).
+    expected = {"Kind", "Tokens", "Est. cost (USD)", "Share"}
+    matching = [df for df in at.dataframe if set(df.value.columns) == expected]
+    assert matching, (
+        f"no Overview dataframe matches the Cost composition column set "
+        f"{expected!r}; dataframes seen: "
+        f"{[list(df.value.columns) for df in at.dataframe]!r}"
+    )
+
+
+def test_overview_cost_composition_total_row_present_after_render_extraction(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Regression: Cost composition appends a synthetic 'total' row
+    summing the kinds. After the `render_data_table` migration the
+    row must still appear as the last row of the composition table.
+    Pins the data-shaping logic that's adjacent to the render call
+    but separate from it."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at()
+    at.run()
+    _assert_clean(at)
+    expected = {"Kind", "Tokens", "Est. cost (USD)", "Share"}
+    matching = [df for df in at.dataframe if set(df.value.columns) == expected]
+    assert matching, "Cost composition dataframe not found"
+    composition_df = matching[0]
+    assert composition_df.value["Kind"].iloc[-1] == "total", (
+        f"last row of Cost composition is not the 'total' row: "
+        f"{composition_df.value['Kind'].tolist()!r}"
+    )
 
 
 def test_overview_does_not_mention_ccusage_in_visible_copy(
@@ -604,6 +652,868 @@ def test_live_renders(mock_ccusage, mock_ccusage_version) -> None:
     at = _at("live")
     at.run()
     _assert_clean(at)
+
+
+# ---------- Daily view (slice 2: header + totals card) ----------
+
+
+def test_daily_renders(mock_ccusage, mock_ccusage_version) -> None:
+    """Daily tab renders cleanly and surfaces the `# Daily` H1 + the
+    four-card KPI strip. Labels come from the module-level
+    `KPI_LABEL_*` constants — tests and renderer reference the same
+    source so a copy edit propagates without dual maintenance.
+    """
+    from tokenscope.ui.daily import (
+        KPI_LABEL_ACTIVE_DAYS,
+        KPI_LABEL_AVG_PER_ACTIVE_DAY,
+        KPI_LABEL_BUSIEST_MODEL,
+        KPI_LABEL_PEAK_DAY,
+    )
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    assert "# Daily" in md, f"expected `# Daily` H1; got: {md!r}"
+
+    metric_labels = {m.label for m in at.metric}
+    for label in (
+        KPI_LABEL_PEAK_DAY,
+        KPI_LABEL_ACTIVE_DAYS,
+        KPI_LABEL_AVG_PER_ACTIVE_DAY,
+        KPI_LABEL_BUSIEST_MODEL,
+    ):
+        assert label in metric_labels, (
+            f"Daily KPI strip missing metric {label!r}; "
+            f"saw labels: {metric_labels!r}"
+        )
+
+
+def _fixture_peak_day() -> tuple[str, float]:
+    """Derive the expected (date, cost) of the fixture's peak day
+    directly from the JSON so the assertion stays tied to the source."""
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    cost_by_date: dict[str, float] = {}
+    for entries in raw["projects"].values():
+        for e in entries:
+            cost_by_date[e["date"]] = cost_by_date.get(e["date"], 0.0) + e["totalCost"]
+    # Tie-break: latest date wins, matching `analytics.peak_day`.
+    date = max(cost_by_date, key=lambda d: (cost_by_date[d], d))
+    return date, cost_by_date[date]
+
+
+def _fixture_active_days() -> int:
+    return len(_fixture_distinct_dates())
+
+
+def _fixture_busiest_model() -> tuple[str, float]:
+    """Derive the expected (model, share) of the fixture's busiest
+    model directly from the JSON."""
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    cost_by_model: dict[str, float] = {}
+    total = 0.0
+    for entries in raw["projects"].values():
+        for e in entries:
+            for b in e["modelBreakdowns"]:
+                cost_by_model[b["modelName"]] = (
+                    cost_by_model.get(b["modelName"], 0.0) + b["cost"]
+                )
+                total += b["cost"]
+    # Tie-break: lexicographically-greater name wins, matching
+    # `analytics.busiest_model`.
+    model = max(cost_by_model, key=lambda m: (cost_by_model[m], m))
+    return model, cost_by_model[model] / total
+
+
+def test_daily_kpi_peak_day_matches_fixture(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Peak-day card surfaces the right (date, cost) for the fixture.
+    Pins the analytics → renderer chain — if `peak_day` or its UI
+    consumer drifts, the displayed values diverge from the source."""
+    from tokenscope.ui.daily import KPI_LABEL_PEAK_DAY
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    expected_date, expected_cost = _fixture_peak_day()
+    metric = next(m for m in at.metric if m.label == KPI_LABEL_PEAK_DAY)
+    assert metric.value == f"${expected_cost:,.2f}"
+    # Caption carries the date so users see which day peaked.
+    caption_text = "\n".join(c.value for c in at.caption)
+    assert f"on {expected_date}" in caption_text
+
+
+def test_daily_kpi_active_days_matches_fixture(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Active-days card shows `N / window_days` where N is the count
+    of distinct dates in the fixture. The denominator comes from
+    the sidebar's query window; the numerator comes from the data."""
+    from tokenscope.ui.daily import KPI_LABEL_ACTIVE_DAYS
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    metric = next(m for m in at.metric if m.label == KPI_LABEL_ACTIVE_DAYS)
+    # `<active>` / `<window_days>` — assert active is right; the
+    # window length depends on the sidebar default and isn't worth
+    # pinning here (covered by sidebar tests).
+    active_str = metric.value.split("/")[0].strip()
+    assert int(active_str) == _fixture_active_days()
+
+
+def test_daily_kpi_avg_per_active_day_uses_active_denominator(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Avg-per-active-day card displays `total_cost / active_days`,
+    NOT `total_cost / window_days`. The distinction from Overview's
+    `Avg daily cost` is the entire point of this KPI — pinning the
+    denominator here prevents accidental regression to the
+    Overview-style calculation."""
+    from tokenscope.ui.daily import KPI_LABEL_AVG_PER_ACTIVE_DAY
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    total = raw["totals"]["totalCost"]
+    expected = total / _fixture_active_days()
+    metric = next(
+        m for m in at.metric if m.label == KPI_LABEL_AVG_PER_ACTIVE_DAY
+    )
+    assert metric.value == f"${expected:,.2f}"
+
+
+def test_daily_kpi_busiest_model_matches_fixture(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Busiest-model card surfaces the model with the largest share
+    of window cost, displayed via `display_model_label` (Slice 6).
+    Caption carries the share as a percentage."""
+    from tokenscope.analytics import display_model_label
+    from tokenscope.ui.daily import KPI_LABEL_BUSIEST_MODEL
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    expected_model, expected_share = _fixture_busiest_model()
+    metric = next(
+        m for m in at.metric if m.label == KPI_LABEL_BUSIEST_MODEL
+    )
+    assert metric.value == display_model_label(expected_model)
+    caption_text = "\n".join(c.value for c in at.caption)
+    assert f"{expected_share:.1%} of window spend" in caption_text
+
+
+def test_daily_skips_zero_cost_days(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Days whose summary cost is exactly $0.00 must NOT appear as
+    expander rows — ccusage doesn't currently emit them, but if it
+    ever does the renderer's zero-cost filter drops them silently.
+    Synthesises a by-project payload with one paid day + one
+    zero-cost day and asserts only the paid day renders.
+
+    Pinning the filter contract here means a regression that loses
+    the `s.cost > 0` filter would render a `$0.00` row that adds
+    no information."""
+    paid_day = "2026-05-16"
+    zero_day = "2026-05-17"
+    synthetic = {
+        "projects": {
+            "-Users-q-tokenscope": [
+                {
+                    "date": paid_day,
+                    "inputTokens": 100,
+                    "outputTokens": 200,
+                    "cacheCreationTokens": 300,
+                    "cacheReadTokens": 400,
+                    "totalTokens": 1000,
+                    "totalCost": 12.5,
+                    "modelsUsed": ["claude-opus-4-7"],
+                    "modelBreakdowns": [
+                        {
+                            "modelName": "claude-opus-4-7",
+                            "inputTokens": 100,
+                            "outputTokens": 200,
+                            "cacheCreationTokens": 300,
+                            "cacheReadTokens": 400,
+                            "cost": 12.5,
+                        }
+                    ],
+                },
+                {
+                    "date": zero_day,
+                    "inputTokens": 1,
+                    "outputTokens": 2,
+                    "cacheCreationTokens": 3,
+                    "cacheReadTokens": 4,
+                    "totalTokens": 10,
+                    "totalCost": 0.0,
+                    "modelsUsed": ["claude-opus-4-7"],
+                    "modelBreakdowns": [
+                        {
+                            "modelName": "claude-opus-4-7",
+                            "inputTokens": 1,
+                            "outputTokens": 2,
+                            "cacheCreationTokens": 3,
+                            "cacheReadTokens": 4,
+                            "cost": 0.0,
+                        }
+                    ],
+                },
+            ]
+        },
+        "totals": {
+            "inputTokens": 101,
+            "outputTokens": 202,
+            "cacheCreationTokens": 303,
+            "cacheReadTokens": 404,
+            "totalTokens": 1010,
+            "totalCost": 12.5,
+        },
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=synthetic)
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    # Daily renders one expander per active day, each with a
+    # per-day dataframe. The zero-day filter must exclude the
+    # zero day's expander entirely, AND the paid day's day-total
+    # row must carry only the paid day's cost (no zero-day
+    # contribution leaked into a window-wide sum).
+    expander_labels = [e.label for e in at.expander]
+    assert any(label.startswith(paid_day) for label in expander_labels), (
+        f"paid day {paid_day!r} missing from expanders: {expander_labels!r}"
+    )
+    assert not any(label.startswith(zero_day) for label in expander_labels), (
+        f"zero-cost day {zero_day!r} should be filtered but appeared: "
+        f"{expander_labels!r}"
+    )
+    # Paid day's per-day dataframe should have the paid cost on its
+    # day-total row.
+    assert len(at.dataframe) == 1, (
+        f"expected one per-day dataframe (paid day only); "
+        f"got {len(at.dataframe)}"
+    )
+    day_total = at.dataframe[0].value.iloc[-1]
+    assert day_total["Cost"] == 12.5, (
+        f"paid day's Total-row cost {day_total['Cost']} != 12.5 — "
+        f"zero-day data leaked"
+    )
+
+
+def test_daily_empty_window_renders_info_message(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Empty `daily --instances` payload (empty range, project filter
+    yielding zero matches) must render the `No usage in the selected
+    window` info — same copy the Overview / Models tabs use, so the
+    user's response (widen range / clear project filter) is one
+    consistent muscle memory across the dashboard."""
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily",
+        "--instances",
+        response=FIXTURES / "daily_empty_bare_array.json",
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    info_text = "\n".join(i.value for i in at.info)
+    assert "No usage in the selected window" in info_text
+
+
+# ---------- Daily view (slice 3: per-day expanders + sub-tables) ----------
+
+
+def _fixture_cells() -> list[tuple[str, str, str, float]]:
+    """Read `(date, model, project, cost)` cells off the fixture
+    directly. Used by smoke assertions to derive expected counts /
+    totals from the source data rather than duplicating literals
+    into the test code."""
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    cells: list[tuple[str, str, str, float]] = []
+    for project, entries in raw["projects"].items():
+        for entry in entries:
+            for b in entry["modelBreakdowns"]:
+                cells.append((entry["date"], b["modelName"], project, b["cost"]))
+    return cells
+
+
+def _fixture_distinct_dates() -> list[str]:
+    return sorted({c[0] for c in _fixture_cells()})
+
+
+def test_daily_agent_constraint_caption_visible(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The page subtitle area carries `AGENT_CONSTRAINT_CAPTION` —
+    the upfront explanation that the dashboard sees Claude Code
+    traffic only. With no per-row chip, this caption is the sole
+    surface where the constraint is stated; if it disappears the
+    constant nature of the (invisible) agent axis becomes a silent
+    bug rather than a documented constraint."""
+    from tokenscope.ui.daily import AGENT_CONSTRAINT_CAPTION
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    caption_text = "\n".join(c.value for c in at.caption)
+    assert AGENT_CONSTRAINT_CAPTION in caption_text
+
+
+def _projects_per_date_from_fixture() -> dict[str, set[str]]:
+    """Read the fixture once and return `date -> {project_key, ...}`
+    so smoke tests can derive expected per-day distinct-project counts
+    without literal-list duplication."""
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    result: dict[str, set[str]] = {}
+    for project, entries in raw["projects"].items():
+        for e in entries:
+            result.setdefault(e["date"], set()).add(project)
+    return result
+
+
+# ---------- Daily per-day expanders + money rounding (Slice 9) ----------
+
+
+def test_daily_renders_one_expander_per_active_day(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The Daily tab renders one `st.expander` per active day in the
+    fixture (descending date order). The expander count is the
+    primary per-day grouping contract."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    projects_per_date = _projects_per_date_from_fixture()
+    assert len(at.expander) == len(projects_per_date), (
+        f"expander count {len(at.expander)} != active days "
+        f"{len(projects_per_date)}: {[e.label for e in at.expander]!r}"
+    )
+
+
+def test_daily_expander_label_carries_day_summary(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Every expander label is built by `_day_expander_label` and
+    carries 5 ` · `-separated segments: date, cost (with `$`),
+    tokens (ending in `tokens`), model count, project count. Pins
+    the label format end-to-end."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    assert at.expander, "no expanders rendered"
+    for exp in at.expander:
+        segments = [s.strip() for s in exp.label.split("·")]
+        assert len(segments) == 5, (
+            f"expander label not 5 segments: {exp.label!r} → {segments!r}"
+        )
+        assert segments[1].startswith("$"), (
+            f"second segment is not cost: {segments[1]!r}"
+        )
+        assert segments[2].endswith("tokens"), (
+            f"third segment is not tokens: {segments[2]!r}"
+        )
+        assert segments[3].endswith("model") or segments[3].endswith("models")
+        assert segments[4].endswith("project") or segments[4].endswith("projects")
+
+
+def test_daily_expanders_default_expanded(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Day expanders open by default so the user lands on the
+    breakdowns without per-row clicking. Streamlit preserves user
+    collapses within a session; this contract is the INITIAL state
+    on fresh renders only."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    for exp in at.expander:
+        # AppTest's Expandable carries `expanded` on its protobuf.
+        assert exp.proto.expanded is True, (
+            f"expander {exp.label!r} not expanded by default"
+        )
+
+
+def test_daily_expanders_appear_in_descending_date_order(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Expander labels start with the date; the labels' leading
+    dates appear in strictly descending order (newest day at top).
+    Pins the dashboard's recent-first convention end-to-end."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    dates = [exp.label.split(" · ", 1)[0] for exp in at.expander]
+    assert dates == sorted(dates, reverse=True), (
+        f"expander dates not descending: {dates!r}"
+    )
+
+
+def test_daily_per_day_dataframe_columns_match_spec(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Every per-day dataframe carries `PER_DAY_COLUMNS` exactly
+    (9 columns, no Date — date is in the expander label). The
+    standalone window-total dataframe is gone; each per-day
+    dataframe carries its own Total row as the last row, so there
+    are no per-day vs total column branches to test against —
+    every dataframe on the surface uses the same shape."""
+    from tokenscope.ui.daily import PER_DAY_COLUMNS
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    expected = list(PER_DAY_COLUMNS)
+    assert at.dataframe, "no dataframes rendered"
+    for df in at.dataframe:
+        assert list(df.value.columns) == expected, (
+            f"column drift: rendered={list(df.value.columns)!r}, "
+            f"expected={expected!r}"
+        )
+
+
+def test_daily_per_day_dataframe_row_count_is_projects_plus_total_row(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Each per-day dataframe carries N project sub-rows + 1
+    Total row. N is the distinct-project count for that date in
+    the fixture; the +1 is the day-total row at the end. The
+    expander label tells us which date the dataframe belongs to
+    (parsed from the first segment of the label)."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    projects_per_date = _projects_per_date_from_fixture()
+    assert len(at.dataframe) == len(at.expander), (
+        f"dataframe count {len(at.dataframe)} != expander count "
+        f"{len(at.expander)} — one per-day dataframe per expander"
+    )
+    for exp, df in zip(at.expander, at.dataframe):
+        date = exp.label.split(" · ", 1)[0]
+        expected = len(projects_per_date[date]) + 1
+        actual = len(df.value)
+        assert actual == expected, (
+            f"per-day dataframe for {date!r} has {actual} rows; "
+            f"fixture has {len(projects_per_date[date])} projects + 1 "
+            f"Total row = {expected}"
+        )
+
+
+def test_daily_per_day_dataframe_project_column_uses_display_name(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Project cells on the project sub-rows come from
+    `project_display_name(slug)` — same helper the sidebar
+    dropdown consumes. The day-total row's Project cell carries
+    `AGGREGATE_PLACEHOLDER` (aggregate spans all projects); we
+    mask the day-total row by Agent so the predicate matches the
+    same constant production uses to mark the row."""
+    from tokenscope.paths import project_display_name
+    from tokenscope.ui.daily import TOTAL_LABEL
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    projects_per_date = _projects_per_date_from_fixture()
+    all_slugs = {
+        slug
+        for date_slugs in projects_per_date.values()
+        for slug in date_slugs
+    }
+    expected_displays = {project_display_name(slug) for slug in all_slugs}
+
+    rendered: set[str] = set()
+    for df in at.dataframe:
+        mask = df.value["Agent"] != TOTAL_LABEL
+        for value in df.value.loc[mask, "Project"].tolist():
+            rendered.add(value)
+    assert rendered, "no project sub-rows rendered"
+    assert rendered <= expected_displays, (
+        f"rendered Project values not produced by project_display_name: "
+        f"unexpected={rendered - expected_displays!r}"
+    )
+    assert "johnsmith" not in rendered, (
+        "rendered Project values include the username — "
+        "project_basename regression?"
+    )
+
+
+def test_daily_each_day_dataframe_ends_with_day_total_row(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Last row of every per-day dataframe has Agent ==
+    `TOTAL_LABEL` — the row aggregates that day's project sub-rows
+    above it. Pins the "totals live inside each day" contract; a
+    regression that drops the Total row or appends it in the wrong
+    place trips this."""
+    from tokenscope.ui.daily import TOTAL_LABEL
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    assert at.dataframe, "no per-day dataframes rendered"
+    for df in at.dataframe:
+        last_row = df.value.iloc[-1]
+        assert last_row["Agent"] == TOTAL_LABEL, (
+            f"last row Agent is not the day-total label: "
+            f"{last_row['Agent']!r}"
+        )
+
+
+def test_daily_day_total_row_matches_day_summary(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The day-total row's Cost equals `round_money(sum of project
+    costs for that date)`. The expander label tells us which date
+    each dataframe belongs to; the fixture tells us the day's
+    per-project costs. Pins the data invariant: the in-dataframe
+    total must agree with the source data the expander label is
+    derived from."""
+    from tokenscope.analytics import round_money
+    from tokenscope.ui.daily import TOTAL_LABEL
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    raw = json.loads((FIXTURES / "daily_by_project.json").read_text())
+    cost_by_date: dict[str, float] = {}
+    for entries in raw["projects"].values():
+        for e in entries:
+            cost_by_date[e["date"]] = (
+                cost_by_date.get(e["date"], 0.0) + e["totalCost"]
+            )
+
+    for exp, df in zip(at.expander, at.dataframe):
+        date = exp.label.split(" · ", 1)[0]
+        last_row = df.value.iloc[-1]
+        assert last_row["Agent"] == TOTAL_LABEL
+        assert last_row["Cost"] == round_money(cost_by_date[date]), (
+            f"day-total cost for {date!r}: row={last_row['Cost']}, "
+            f"fixture={round_money(cost_by_date[date])}"
+        )
+
+
+def test_daily_day_total_row_carries_aggregate_placeholder_for_project_and_models(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The day-total row aggregates across every project and every
+    model for the day. Project and Models cells use
+    `AGGREGATE_PLACEHOLDER` (single space) — NOT empty string.
+
+    Why not empty string: glide-data-grid flags empty-string cells
+    as `isMissingValue` and applies a row-level theme downshift
+    that softens every cell on the row (confirmed empirically;
+    see `AGGREGATE_PLACEHOLDER` docstring in `ui/daily.py`).
+
+    Why not actual content (project name / model list): the
+    aggregate row spans every project and model for the day; a
+    specific value would misrepresent it as project-specific.
+
+    Two regression guards:
+      - Cell value equals `AGGREGATE_PLACEHOLDER` — a future
+        change to `""` re-triggers the soft-row rendering.
+      - Cell content is whitespace-only — a future change to an
+        actual project name or model string leaks specifics into
+        the aggregate row.
+    """
+    from tokenscope.ui.daily import AGGREGATE_PLACEHOLDER, TOTAL_LABEL
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    for df in at.dataframe:
+        last_row = df.value.iloc[-1]
+        assert last_row["Agent"] == TOTAL_LABEL
+        assert last_row["Project"] == AGGREGATE_PLACEHOLDER, (
+            f"day-total row Project={last_row['Project']!r}; "
+            f"expected the aggregate placeholder. Empty string "
+            f"re-triggers the row-level theme downshift bug."
+        )
+        assert last_row["Models"] == AGGREGATE_PLACEHOLDER, (
+            f"day-total row Models={last_row['Models']!r}; "
+            f"expected the aggregate placeholder."
+        )
+        # Content-leak guard: even if the placeholder constant
+        # changes value, the aggregate row must stay whitespace-only.
+        assert last_row["Project"].strip() == "", (
+            "day-total row leaked non-whitespace into Project — "
+            "aggregate cell should not carry a specific project name"
+        )
+        assert last_row["Models"].strip() == "", (
+            "day-total row leaked non-whitespace into Models — "
+            "aggregate cell should not carry specific model names"
+        )
+
+
+def test_aggregate_placeholder_is_non_empty() -> None:
+    """Load-bearing invariant: `AGGREGATE_PLACEHOLDER` MUST be
+    non-empty. Empty string trips glide-data-grid's `isMissingValue`
+    predicate and applies a row-level theme downshift that softens
+    every cell on the row — the bug this constant exists to avoid.
+
+    Pinning the invariant at the constant level catches a future
+    refactor that accidentally sets the placeholder to `""` even if
+    the smoke tests above somehow miss the regression."""
+    from tokenscope.ui.daily import AGGREGATE_PLACEHOLDER
+
+    assert AGGREGATE_PLACEHOLDER != "", (
+        "AGGREGATE_PLACEHOLDER must be non-empty — empty string "
+        "re-triggers the glide-data-grid row-level theme downshift "
+        "that this constant was introduced to fix."
+    )
+
+
+def test_daily_cost_values_rounded_to_two_decimal_places(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Every Cost cell across every per-day dataframe AND the
+    total dataframe carries a 2-dp value (`value == round(value, 2)`).
+    Pins the money-rounding contract end-to-end so copy/sort/export
+    never expose the IEEE-noisy raw floats like `14.178827999999998`.
+    Empty-string Cost cells are allowed but not produced by the
+    current builders."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    for df in at.dataframe:
+        for value in df.value["Cost"].tolist():
+            if value == "":
+                continue
+            assert isinstance(value, (int, float)) and not isinstance(value, bool)
+            assert value == round(value, 2), (
+                f"Cost cell {value!r} not 2-dp rounded — "
+                f"`analytics.round_money` regression?"
+            )
+
+
+def test_daily_token_columns_are_compact_strings(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Token columns (Input / Output / Cache create / Cache read /
+    Total tokens) reach the dataframe as pre-formatted compact
+    strings (`1.37B`, `522.2M`) via `format_compact_int`. Applies
+    to every per-day dataframe AND the total dataframe — same
+    column-type pattern as Overview's Cost composition Tokens
+    column, so glide-data-grid's NumberColumn-vs-TextColumn font-
+    weight asymmetry doesn't surface."""
+    from tokenscope.analytics import format_compact_int
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    token_columns = ["Input", "Output", "Cache create", "Cache read", "Total tokens"]
+    seen_values: set[str] = set()
+    for df in at.dataframe:
+        for col in token_columns:
+            assert col in df.value.columns
+            for value in df.value[col].tolist():
+                assert isinstance(value, str), (
+                    f"column {col!r} carries non-string value {value!r} "
+                    f"({type(value).__name__}); expected compact string"
+                )
+                if value:
+                    seen_values.add(value)
+    raw = json.loads((FIXTURES / "daily_by_project.json").read_text())
+    fixture_values: set[int] = set()
+    for entries in raw["projects"].values():
+        for e in entries:
+            for b in e["modelBreakdowns"]:
+                fixture_values.add(b["inputTokens"])
+                fixture_values.add(b["outputTokens"])
+                fixture_values.add(b["cacheCreationTokens"])
+                fixture_values.add(b["cacheReadTokens"])
+    expected_some = {format_compact_int(v) for v in fixture_values}
+    assert seen_values & expected_some, (
+        f"rendered token values don't include any format_compact_int "
+        f"output: seen={sorted(seen_values)[:5]}, "
+        f"expected_some={sorted(expected_some)[:5]}"
+    )
+
+
+def test_daily_table_project_resolves_via_jsonl_in_docker_context(
+    monkeypatch, mock_ccusage, mock_ccusage_version, tmp_path
+) -> None:
+    """Regression for the Docker bug: the container runs as root
+    with `$HOME/.claude` mounted at `/root/.claude:ro`, so the
+    host paths encoded in ccusage slugs (`/Users/<user>/…`) don't
+    exist in the container's filesystem. The earlier filesystem-
+    walk implementation of `resolve_project_slug` failed in that
+    environment and the Project column rendered the slug minus
+    its leading dash.
+
+    The fix reads the authoritative cwd from the JSONL files
+    Claude Code wrote under `~/.claude/projects/<slug>/` — that
+    directory IS mounted in Docker, even though the host cwd
+    inside it isn't a valid path on the container's filesystem.
+
+    This test simulates the Docker environment by monkeypatching
+    `Path.home()` to a tmp_path that doesn't match the slug's
+    encoded path, planting a JSONL with the right cwd, and
+    asserting the Project column renders the basename (not the
+    slug-stripped form). Trip-wire for any regression that
+    reintroduces filesystem-walk resolution."""
+    from tokenscope.paths import resolve_project_slug
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    resolve_project_slug.cache_clear()
+
+    slug = "-Users-test-Documents-RiderProjects-tokenscope"
+    cwd = "/Users/test/Documents/RiderProjects/tokenscope"
+    project_dir = tmp_path / ".claude" / "projects" / slug
+    project_dir.mkdir(parents=True)
+    (project_dir / "session.jsonl").write_text(
+        json.dumps({"type": "user", "cwd": cwd, "sessionId": "test"})
+        + "\n"
+    )
+
+    synthetic = {
+        "projects": {
+            slug: [
+                {
+                    "date": "2026-05-19",
+                    "inputTokens": 100,
+                    "outputTokens": 200,
+                    "cacheCreationTokens": 300,
+                    "cacheReadTokens": 400,
+                    "totalTokens": 1000,
+                    "totalCost": 12.5,
+                    "modelsUsed": ["claude-opus-4-7"],
+                    "modelBreakdowns": [
+                        {
+                            "modelName": "claude-opus-4-7",
+                            "inputTokens": 100,
+                            "outputTokens": 200,
+                            "cacheCreationTokens": 300,
+                            "cacheReadTokens": 400,
+                            "cost": 12.5,
+                        }
+                    ],
+                }
+            ]
+        },
+        "totals": {
+            "inputTokens": 100,
+            "outputTokens": 200,
+            "cacheCreationTokens": 300,
+            "cacheReadTokens": 400,
+            "totalTokens": 1000,
+            "totalCost": 12.5,
+        },
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=synthetic)
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    # The synthetic fixture has one date with one project — there
+    # will be one per-day expander containing one dataframe with
+    # one project sub-row plus a day-total row.
+    rendered_projects: set[str] = set()
+    for df in at.dataframe:
+        rendered_projects.update(df.value["Project"].tolist())
+    assert "tokenscope" in rendered_projects, (
+        f"Project column doesn't show JSONL-resolved basename: "
+        f"{rendered_projects!r}"
+    )
+    # Inverse contract: the slug-stripped form (the pre-fix bug)
+    # must NOT appear. If it does, the JSONL-based resolution path
+    # broke and the fallback kicked in.
+    assert "Users-test-Documents-RiderProjects-tokenscope" not in rendered_projects, (
+        "Project column carries the slug-stripped form — "
+        "JSONL resolution regression"
+    )
+
+
+def test_daily_table_token_columns_are_compact_strings(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Token columns (Input / Output / Cache create / Cache read /
+    Total tokens) reach the dataframe as pre-formatted compact
+    strings (`1.37B`, `522.2M`) via `format_compact_int`. Same
+    column-type as Overview's Cost-composition Tokens column — both
+    views render tokens through `TextColumn`, so the
+    `NumberColumn`-vs-`TextColumn` font-weight asymmetry in
+    glide-data-grid doesn't show up as a visible inconsistency."""
+    from tokenscope.analytics import format_compact_int
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+
+    token_columns = ["Input", "Output", "Cache create", "Cache read", "Total tokens"]
+    df = at.dataframe[0].value
+    seen_values: set[str] = set()
+    for col in token_columns:
+        assert col in df.columns, f"token column {col!r} missing"
+        for value in df[col].tolist():
+            assert isinstance(value, str), (
+                f"column {col!r} carries non-string value {value!r} "
+                f"({type(value).__name__}); expected compact string"
+            )
+            if value:
+                seen_values.add(value)
+
+    # Sanity: at least one rendered value must round-trip through
+    # format_compact_int — pins the helper, not just "any string".
+    raw = json.loads((FIXTURES / "daily_by_project.json").read_text())
+    fixture_values: set[int] = set()
+    for entries in raw["projects"].values():
+        for e in entries:
+            for b in e["modelBreakdowns"]:
+                fixture_values.add(b["inputTokens"])
+                fixture_values.add(b["outputTokens"])
+                fixture_values.add(b["cacheCreationTokens"])
+                fixture_values.add(b["cacheReadTokens"])
+    expected_some = {format_compact_int(v) for v in fixture_values}
+    assert seen_values & expected_some, (
+        f"rendered token values don't include any format_compact_int "
+        f"output: seen={sorted(seen_values)[:5]}, "
+        f"expected_some={sorted(expected_some)[:5]}"
+    )
 
 
 # ---------- Live view rework ----------
@@ -4390,30 +5300,29 @@ def test_models_renders_per_model_token_kind_chart(
 # ---------- page selector: user-driven radio clicks ----------
 
 
+# Transitions are derived from `TOP_LEVEL_VIEWS` rather than hard-coded
+# so that adding a new top-level view automatically expands the test
+# matrix to cover every directional pair. Hard-coding the pairs (the
+# prior form of this test) silently dropped coverage for new views
+# until the matrix was hand-maintained — that's the kind of drift the
+# `_VIEWS` single-source-of-truth registry was built to eliminate.
+def _top_level_transition_pairs() -> list[tuple[str, str]]:
+    from tokenscope.navigation import TOP_LEVEL_VIEWS
+
+    return [
+        (a, b) for a in TOP_LEVEL_VIEWS for b in TOP_LEVEL_VIEWS if a != b
+    ]
+
+
 @pytest.mark.parametrize(
-    "from_view,to_view",
-    [
-        ("overview", "live"),
-        ("overview", "cache"),
-        ("overview", "models"),
-        ("live", "overview"),
-        ("live", "cache"),
-        ("live", "models"),
-        ("cache", "overview"),
-        ("cache", "live"),
-        ("cache", "models"),
-        ("models", "overview"),
-        ("models", "live"),
-        ("models", "cache"),
-    ],
+    "from_view,to_view", _top_level_transition_pairs()
 )
 def test_top_level_page_selector_click_navigates(
     mock_ccusage, mock_ccusage_version, from_view, to_view
 ) -> None:
-    """User clicks a top-level radio option (Live / Cache / Models /
-    Overview) → the page selector's `chosen_view != nav.view` branch
-    fires `route_to(target)` and the destination view renders on the
-    next rerun.
+    """User clicks a top-level radio option → the page selector's
+    `chosen_view != nav.view` branch fires `route_to(target)` and the
+    destination view renders on the next rerun.
 
     Regression: a prior version of `_render_page_selector` synced
     the radio's session_state from the URL on EVERY render — which
@@ -4422,8 +5331,12 @@ def test_top_level_page_selector_click_navigates(
     the origin view (most visibly: every click went back to
     Overview because that's the URL view at first load).
 
-    Parametrised across every top-level pair so a future regression
-    on any single transition trips the test immediately."""
+    Parametrised across every directional top-level pair derived
+    from `TOP_LEVEL_VIEWS` so a future regression on any single
+    transition trips the test immediately, AND adding a new
+    top-level view doesn't silently lose coverage."""
+    from tokenscope.navigation import TOP_LEVEL_LABELS
+
     _wire_default_fixtures(mock_ccusage)
     at = _at(from_view)
     at.run()
@@ -4439,13 +5352,7 @@ def test_top_level_page_selector_click_navigates(
     selectors = [r for r in at.radio if r.key == "top-page-selector"]
     assert selectors, "top-page-selector radio not rendered"
     selector = selectors[0]
-    label_for = {
-        "overview": "Overview",
-        "live": "Live",
-        "cache": "Cache",
-        "models": "Models",
-    }
-    selector.set_value(label_for[to_view]).run()
+    selector.set_value(TOP_LEVEL_LABELS[to_view]).run()
     _assert_clean(at)
 
     raw = at.query_params.get("view")

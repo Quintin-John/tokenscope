@@ -28,7 +28,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
 _log = logging.getLogger("tokenscope.ui.overview")
@@ -82,10 +81,12 @@ from tokenscope.analytics import (
     cost_by_kind,
     filter_daily_by_models,
     format_compact_int,
+    format_money,
     format_timezone_for_display,
     last_day_cost,
     overview_insight,
     prior_window_query,
+    round_money,
     spike_day,
     window_cost,
 )
@@ -96,6 +97,7 @@ from tokenscope.plans import Plan
 from tokenscope.query import Query
 from tokenscope.ui._data import load_daily
 from tokenscope.ui._nav import handle_chart_drill
+from tokenscope.ui._tables import render_data_table
 from tokenscope.ui.charts import (
     cost_trend_with_rolling,
     token_mix_non_cache_percent_bar,
@@ -245,14 +247,14 @@ def _render_kpis(
 
     with c2, st.container(border=True):
         if last_day is not None:
-            st.metric("Last day", f"${last_day[1]:,.2f}")
+            st.metric("Last day", format_money(last_day[1]))
             st.caption(f"on {last_day[0]}")
         else:
             st.metric("Last day", "—")
             st.caption("no data in window")
 
     with c3, st.container(border=True):
-        st.metric("Avg daily cost", f"${avg_daily:,.2f}")
+        st.metric("Avg daily cost", format_money(avg_daily))
         st.caption(f"over {window_days} days")
 
     with c4, st.container(border=True):
@@ -287,11 +289,12 @@ def _render_window_cost_kpi(
         st.metric(
             f"Plan cost ({plan.name})",
             f"${plan.flat_rate_usd_per_month:,.0f}/mo",
-            delta=f"would cost ${api_window_cost:,.2f} at API rates",
+            delta=f"would cost {format_money(api_window_cost)} at API rates",
             delta_color="off",
         )
         st.caption(
-            f"${abs(savings):,.2f} {'saved' if savings >= 0 else 'over'} "
+            f"{format_money(abs(savings))} "
+            f"{'saved' if savings >= 0 else 'over'} "
             f"vs API rates this window"
         )
         return
@@ -307,7 +310,7 @@ def _render_window_cost_kpi(
         # for cost metrics specifically; the default `normal` mode
         # would paint "+91% more spend" in green, which is misleading.
         delta_kwargs["delta_color"] = "inverse"
-    st.metric("Window cost", f"${api_window_cost:,.2f}", **delta_kwargs)
+    st.metric("Window cost", format_money(api_window_cost), **delta_kwargs)
     st.caption(f"over the last {window_days} days")
 
 
@@ -378,7 +381,12 @@ def _render_cost_composition(daily_report: DailyReport) -> None:
         {
             "Kind": r["kind"],
             "Tokens": format_compact_int(r["tokens"]),
-            "Est. cost (USD)": r["est_cost"],
+            # `round_money` at the row-builder boundary so the
+            # underlying cell carries a clean 2-dp value for copy /
+            # sort / export. `NumberColumn(format="$%.2f")` still
+            # applies the currency formatter on top. Same pattern
+            # the Daily view's Cost column uses.
+            "Est. cost (USD)": round_money(r["est_cost"]),
             "Share": r["share"] * 100,
         }
         for r in collapsed
@@ -387,16 +395,13 @@ def _render_cost_composition(daily_report: DailyReport) -> None:
         {
             "Kind": "total",
             "Tokens": format_compact_int(total_tokens),
-            "Est. cost (USD)": est_total,
+            "Est. cost (USD)": round_money(est_total),
             "Share": 100.0,
         }
     )
 
-    df = pd.DataFrame(table_rows)
-    st.dataframe(
-        df,
-        width="stretch",
-        hide_index=True,
+    render_data_table(
+        table_rows,
         column_config={
             "Kind": st.column_config.TextColumn(width="small"),
             "Tokens": st.column_config.TextColumn(width="small"),

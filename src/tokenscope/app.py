@@ -29,6 +29,7 @@ from tokenscope.navigation import (
 )
 from tokenscope.ui import block as block_view
 from tokenscope.ui import cache as cache_view
+from tokenscope.ui import daily as daily_view
 from tokenscope.ui import day as day_view
 from tokenscope.ui import live as live_view
 from tokenscope.ui import models as models_view
@@ -58,6 +59,7 @@ _RENDERERS: dict[ViewName, Callable[[SidebarState, Navigation], None]] = {
     "live": live_view.render,
     "cache": cache_view.render,
     "models": models_view.render,
+    "daily": daily_view.render,
     "day": day_view.render,
     "session": session_view.render,
     "block": block_view.render,

@@ -13,6 +13,7 @@ figures.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date, timedelta
 from statistics import median
 from typing import Iterable, Protocol
@@ -20,6 +21,7 @@ from typing import Iterable, Protocol
 from tokenscope.models import (
     BlockEntry,
     BlocksReport,
+    DailyByProjectReport,
     DailyEntry,
     DailyReport,
     SessionEntry,
@@ -326,6 +328,46 @@ def cost_share_by_model(entry: DailyEntry | SessionEntry) -> list[dict]:
     ]
 
 
+def _filter_entries_by_models(
+    entries: Iterable[DailyEntry], keep: set[str]
+) -> list[DailyEntry]:
+    """Internal: return a list of new DailyEntry objects with breakdowns
+    restricted to `keep`. Per-entry token/cost totals are recomputed from
+    the surviving breakdowns; entries with no surviving breakdowns are
+    dropped. The `project` field is preserved verbatim — relevant when
+    the source `DailyReport` came from `--project=<id>` (`project` set)
+    versus from `daily_by_project` (`project` is None and the project
+    identity lives in the outer dict key). Shared core for the two public
+    filter entry-points so both shapes apply identical filter semantics.
+    """
+    new_entries: list[DailyEntry] = []
+    for entry in entries:
+        kept = [b for b in entry.model_breakdowns if b.model_name in keep]
+        if not kept:
+            continue
+        new_entries.append(
+            DailyEntry(
+                date=entry.date,
+                project=entry.project,
+                inputTokens=sum(b.input_tokens for b in kept),
+                outputTokens=sum(b.output_tokens for b in kept),
+                cacheCreationTokens=sum(b.cache_creation_tokens for b in kept),
+                cacheReadTokens=sum(b.cache_read_tokens for b in kept),
+                totalTokens=sum(
+                    b.input_tokens
+                    + b.output_tokens
+                    + b.cache_creation_tokens
+                    + b.cache_read_tokens
+                    for b in kept
+                ),
+                totalCost=sum(b.cost for b in kept),
+                modelsUsed=[b.model_name for b in kept],
+                modelBreakdowns=kept,
+            )
+        )
+    return new_entries
+
+
 def filter_daily_by_models(
     daily_report: DailyReport, selected: Iterable[str]
 ) -> DailyReport:
@@ -343,42 +385,66 @@ def filter_daily_by_models(
     keep = set(selected) if selected else None
     if not keep:
         return daily_report
-    new_entries: list[DailyEntry] = []
-    for entry in daily_report.daily:
-        kept = [b for b in entry.model_breakdowns if b.model_name in keep]
-        if not kept:
-            continue
-        new_entries.append(
-            DailyEntry(
-                date=entry.date,
-                inputTokens=sum(b.input_tokens for b in kept),
-                outputTokens=sum(b.output_tokens for b in kept),
-                cacheCreationTokens=sum(b.cache_creation_tokens for b in kept),
-                cacheReadTokens=sum(b.cache_read_tokens for b in kept),
-                totalTokens=sum(
-                    b.input_tokens
-                    + b.output_tokens
-                    + b.cache_creation_tokens
-                    + b.cache_read_tokens
-                    for b in kept
-                ),
-                totalCost=sum(b.cost for b in kept),
-                modelsUsed=[b.model_name for b in kept],
-                modelBreakdowns=kept,
-            )
-        )
+    new_entries = _filter_entries_by_models(daily_report.daily, keep)
     return DailyReport(
         daily=new_entries,
         totals=_totals_from_entries(new_entries),
     )
 
 
-def available_models(daily_report: DailyReport) -> list[str]:
-    """Sorted unique model names that appear anywhere in the report."""
+def filter_daily_by_project_models(
+    report: DailyByProjectReport, selected: Iterable[str]
+) -> DailyByProjectReport:
+    """Return a *new* DailyByProjectReport with breakdowns restricted to
+    `selected`. Filter semantics match `filter_daily_by_models` exactly
+    (shared `_filter_entries_by_models` core): entries with no surviving
+    breakdowns are dropped; projects with no surviving entries are dropped;
+    top-level totals are recomputed across all surviving entries.
+
+    `selected` of None or empty is passthrough — the original report is
+    returned unchanged so the caller can rely on `result is report` to
+    detect "no filter applied".
+    """
+    keep = set(selected) if selected else None
+    if not keep:
+        return report
+    new_projects: dict[str, list[DailyEntry]] = {}
+    for project, entries in report.projects.items():
+        filtered = _filter_entries_by_models(entries, keep)
+        if filtered:
+            new_projects[project] = filtered
+    all_entries = [e for entries in new_projects.values() for e in entries]
+    return DailyByProjectReport(
+        projects=new_projects,
+        totals=_totals_from_entries(all_entries),
+    )
+
+
+def _available_models_from(entries: Iterable[DailyEntry]) -> list[str]:
+    """Shared core for `available_models` / `available_models_by_project`.
+    One model-discovery rule, two thin shape adapters above it — the two
+    public entry-points cannot drift on what counts as a "seen" model."""
     seen: set[str] = set()
-    for entry in daily_report.daily:
+    for entry in entries:
         seen.update(entry.models_used)
     return sorted(seen)
+
+
+def available_models(daily_report: DailyReport) -> list[str]:
+    """Sorted unique model names that appear anywhere in the report."""
+    return _available_models_from(daily_report.daily)
+
+
+def available_models_by_project(report: DailyByProjectReport) -> list[str]:
+    """Sorted unique model names across every project's entries in the
+    by-project report. Used by the Daily view's `load_daily_by_project`
+    to decide whether the sidebar model-multiselect narrows the data;
+    sibling of `available_models` so both data paths apply identical
+    "what models are in this window" semantics.
+    """
+    return _available_models_from(
+        e for entries in report.projects.values() for e in entries
+    )
 
 
 def _totals_from_entries(entries: list[DailyEntry]):
@@ -520,45 +586,384 @@ def cost_concentration_summary(rows: list[dict]) -> dict | None:
     }
 
 
-def friendly_project_label(slug: str, home_slug: str | None = None) -> str:
-    """Make a ccusage project slug scannable.
+@dataclass(frozen=True, slots=True)
+class DailyCell:
+    """One cell of the Daily view's per-`(date, model, project)` grid.
 
-    ccusage encodes a project's absolute path as a slugified string with
-    `-` separators (e.g. `-Users-q-johnsmith-Documents-RiderProjects-WorldForge`).
-    The encoding is *lossy* — hyphens inside directory names collide
-    with the separator. `mini-ollama-ui` looks identical to `mini/ollama/ui`
-    in slug form, so any "split on `-` and label the last bit" heuristic
-    invents wrong leaves the moment a project name contains a hyphen.
+    Stores the four primitive token kinds and cost only. `total_tokens`
+    is a derived `@property` so there is exactly one rule for summing
+    a cell's tokens — re-derived in `DailySummary` and `WindowTotals`
+    the same way. Frozen + slots so cells are immutable and cheap.
 
-    We deliberately do **not** try to recover directory structure. Instead:
-
-    1. If the slug matches the user's home-directory slug (passed in as
-       `home_slug` — sidebar.py computes it from `pathlib.Path.home()`),
-       substitute the home prefix with `~`. That's where 90% of the
-       sidebar noise lives.
-    2. Otherwise, strip the leading `-` and leave the rest verbatim.
-       The user reads "Volumes-SSK-Drive--Foo" and instantly recognises
-       it as their external drive without us mangling it further.
-
-    Examples (with `home_slug="-Users-q-johnsmith"`):
-        "-Users-q-johnsmith"                              → "~"
-        "-Users-q-johnsmith-Documents-RiderProjects-tok"  → "~/Documents-RiderProjects-tok"
-        "-Users-q-johnsmith-baremetal-audit"              → "~/baremetal-audit"
-        "-Volumes-SSK-Drive--ManageLiterature"            → "Volumes-SSK-Drive--ManageLiterature"
-        "Unknown Project"                                  → "Unknown Project"   (pass-through)
-        ""                                                 → ""                  (pass-through)
+    `project` is ccusage's project key (the dash-encoded cwd from
+    `daily --instances`); the UI layer is responsible for rendering it
+    via `friendly_project_label` rather than this dataclass embedding
+    a display-format dependency.
     """
-    if not slug:
-        return slug
-    if home_slug:
-        if slug == home_slug:
-            return "~"
-        prefix = home_slug + "-"
-        if slug.startswith(prefix):
-            return "~/" + slug[len(prefix):]
-    if slug.startswith("-"):
-        return slug[1:]
-    return slug
+
+    date: str
+    model: str
+    project: str
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    cost: float
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DailySummary:
+    """Per-day rollup derived from a list of `DailyCell`. Carries the
+    same four token kinds + cost as a cell plus the distinct
+    model/project counts used by the day-row collapsed header
+    (`N models · N projects`).
+    """
+
+    date: str
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    cost: float
+    distinct_models: int
+    distinct_projects: int
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WindowTotals:
+    """Window-wide rollup derived from a list of `DailyCell`. Same six
+    numeric fields as ccusage's `Totals` shape but as a frozen
+    dataclass — the UI layer's totals card consumes this without
+    pinning itself to the pydantic class.
+    """
+
+    input_tokens: int
+    output_tokens: int
+    cache_creation_tokens: int
+    cache_read_tokens: int
+    cost: float
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+        )
+
+
+def daily_cells(report: DailyByProjectReport) -> list[DailyCell]:
+    """Flatten `DailyByProjectReport` into one `DailyCell` per
+    `(date, model, project)` combination ccusage actually emitted.
+
+    No sorting: the renderer decides display order. No empty-cell
+    synthesis for `(date, model, project)` combinations ccusage didn't
+    emit — those genuinely had zero activity and a real row with all
+    zeros would be a false positive.
+    """
+    cells: list[DailyCell] = []
+    for project, entries in report.projects.items():
+        for entry in entries:
+            for b in entry.model_breakdowns:
+                cells.append(
+                    DailyCell(
+                        date=entry.date,
+                        model=b.model_name,
+                        project=project,
+                        input_tokens=b.input_tokens,
+                        output_tokens=b.output_tokens,
+                        cache_creation_tokens=b.cache_creation_tokens,
+                        cache_read_tokens=b.cache_read_tokens,
+                        cost=b.cost,
+                    )
+                )
+    return cells
+
+
+def daily_summaries(cells: Iterable[DailyCell]) -> list[DailySummary]:
+    """Per-day rollups from `DailyCell` list. Returned newest-first so the
+    Daily tab can render day-rows in descending date order without a
+    second sort at the call site.
+    """
+    by_date: dict[str, dict] = {}
+    for cell in cells:
+        row = by_date.setdefault(
+            cell.date,
+            {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "cost": 0.0,
+                "models": set(),
+                "projects": set(),
+            },
+        )
+        row["input_tokens"] += cell.input_tokens
+        row["output_tokens"] += cell.output_tokens
+        row["cache_creation_tokens"] += cell.cache_creation_tokens
+        row["cache_read_tokens"] += cell.cache_read_tokens
+        row["cost"] += cell.cost
+        row["models"].add(cell.model)
+        row["projects"].add(cell.project)
+    summaries = [
+        DailySummary(
+            date=d,
+            input_tokens=r["input_tokens"],
+            output_tokens=r["output_tokens"],
+            cache_creation_tokens=r["cache_creation_tokens"],
+            cache_read_tokens=r["cache_read_tokens"],
+            cost=r["cost"],
+            distinct_models=len(r["models"]),
+            distinct_projects=len(r["projects"]),
+        )
+        for d, r in by_date.items()
+    ]
+    summaries.sort(key=lambda s: s.date, reverse=True)
+    return summaries
+
+
+def peak_day(summaries: Iterable[DailySummary]) -> tuple[str, float] | None:
+    """`(date, cost)` of the highest-cost day in `summaries`, or
+    `None` when the input is empty. Ties broken by latest date
+    (more recent peak wins) — a deterministic rule a user can
+    reason about when two days happen to cost the same.
+    """
+    materialised = list(summaries)
+    if not materialised:
+        return None
+    top = max(materialised, key=lambda s: (s.cost, s.date))
+    return top.date, top.cost
+
+
+def active_days_count(summaries: Iterable[DailySummary]) -> int:
+    """Number of days with at least one ccusage cell in the window.
+    Equivalent to `len(summaries)` since `daily_summaries` only emits
+    a row for dates that produced cells — the wrapper exists so the
+    KPI card's denominator has a semantic name and the rule is
+    testable in isolation.
+    """
+    return sum(1 for _ in summaries)
+
+
+def avg_cost_per_active_day(summaries: Iterable[DailySummary]) -> float:
+    """Total window cost divided by `active_days_count`. Zero on
+    empty input (avoids ZeroDivisionError; the Daily renderer's
+    empty-window branch short-circuits before this is shown).
+
+    Distinct from `window_cost / window_days` (which the Overview
+    KPI card surfaces): this metric weights only days that actually
+    spent. A 30-day window with 5 active days at $20 each yields
+    $20 here vs $3.33 on Overview.
+    """
+    materialised = list(summaries)
+    if not materialised:
+        return 0.0
+    return sum(s.cost for s in materialised) / len(materialised)
+
+
+def busiest_model(cells: Iterable[DailyCell]) -> tuple[str, float] | None:
+    """`(model_name, share)` of the highest-cost model in the cell
+    set, where `share` is the model's fraction of total cost
+    (0.0 — 1.0). `None` when there are no cells.
+
+    Aggregates cost per `model` (ignoring date and project) so the
+    answer is window-wide, not per-day. Ties broken by model name
+    descending — deterministic so two models with identical cost
+    don't flicker between renders.
+    """
+    materialised = list(cells)
+    if not materialised:
+        return None
+    cost_by_model: dict[str, float] = {}
+    total = 0.0
+    for c in materialised:
+        cost_by_model[c.model] = cost_by_model.get(c.model, 0.0) + c.cost
+        total += c.cost
+    if total <= 0:
+        return None
+    top_name = max(cost_by_model, key=lambda m: (cost_by_model[m], m))
+    return top_name, cost_by_model[top_name] / total
+
+
+def daily_project_aggregates(cells: Iterable[DailyCell]) -> list[dict]:
+    """Rollup `DailyCell`s per `(date, project)` for the Daily view's
+    unified table. Each row carries:
+
+        date:                     str (YYYY-MM-DD)
+        project:                  str — raw ccusage slug, unformatted
+                                   (renderer applies `project_display_name`)
+        models:                   list[str] — raw model names that ran
+                                   in this (date, project) bucket,
+                                   sorted by descending per-model cost
+                                   (ties broken by name descending)
+        input_tokens:             int
+        output_tokens:            int
+        cache_creation_tokens:    int
+        cache_read_tokens:        int
+        total_tokens:             int
+        cost:                     float
+
+    Rows sorted by `date` descending (newest first); within a date,
+    rows sorted by `cost` descending. Empty input → `[]`. Pure
+    function — no I/O, no display formatting. Renderer is responsible
+    for `display_model_label`, `project_display_name`, etc.
+    """
+    bucket: dict[tuple[str, str], dict] = {}
+    for c in cells:
+        key = (c.date, c.project)
+        row = bucket.setdefault(
+            key,
+            {
+                "date": c.date,
+                "project": c.project,
+                # Private: per-model cost map; collapsed into a sorted
+                # `models` list at the end. Keeps the rollup loop
+                # O(N) — we'd otherwise re-walk cells to compute model
+                # ordering.
+                "_models_cost": {},
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "total_tokens": 0,
+                "cost": 0.0,
+            },
+        )
+        row["_models_cost"][c.model] = (
+            row["_models_cost"].get(c.model, 0.0) + c.cost
+        )
+        row["input_tokens"] += c.input_tokens
+        row["output_tokens"] += c.output_tokens
+        row["cache_creation_tokens"] += c.cache_creation_tokens
+        row["cache_read_tokens"] += c.cache_read_tokens
+        row["total_tokens"] += c.total_tokens
+        row["cost"] += c.cost
+    rows: list[dict] = []
+    for row in bucket.values():
+        models_cost = row.pop("_models_cost")
+        # Tie-break: lex-greater model name wins on equal cost — same
+        # deterministic rule used by `busiest_model`, so two models
+        # with identical cost never flicker between renders.
+        row["models"] = sorted(
+            models_cost, key=lambda m: (models_cost[m], m), reverse=True
+        )
+        rows.append(row)
+    rows.sort(key=lambda r: (r["date"], r["cost"]), reverse=True)
+    return rows
+
+
+def cells_for_date(cells: Iterable[DailyCell], date_str: str) -> list[DailyCell]:
+    """Return the subset of `cells` whose `date == date_str`, sorted by
+    cost descending so the renderer iterates "where the money went"
+    top-down — matches the Models breakdown table's sort rule.
+    Stable secondary sort isn't required; ccusage emits at most one
+    cell per `(date, model, project)` tuple so cost ties are rare
+    and visually indistinguishable.
+    """
+    return sorted(
+        (c for c in cells if c.date == date_str),
+        key=lambda c: c.cost,
+        reverse=True,
+    )
+
+
+def pluralize(count: int, singular: str) -> str:
+    """English count + noun, with naive `-s` plural suffix. Used by the
+    Daily view's day-row header (`2 models · 1 project`) so the
+    pluralization rule lives in one place rather than being inlined
+    everywhere a count needs a noun.
+
+    Intentionally trivial: no exceptions for irregular plurals
+    (`series`, `data`) because the dashboard's vocabulary is all
+    regular nouns. Add a special-case table here if that ever
+    changes — don't reinvent the rule at the call site.
+    """
+    return f"{count} {singular}" if count == 1 else f"{count} {singular}s"
+
+
+def window_totals(cells: Iterable[DailyCell]) -> WindowTotals:
+    """Window-wide rollup from `DailyCell` list. Empty input yields a
+    zero-totals object rather than `None` so the Daily tab's totals
+    card can always render with the same shape.
+    """
+    input_t = 0
+    output_t = 0
+    cache_c = 0
+    cache_r = 0
+    cost = 0.0
+    for cell in cells:
+        input_t += cell.input_tokens
+        output_t += cell.output_tokens
+        cache_c += cell.cache_creation_tokens
+        cache_r += cell.cache_read_tokens
+        cost += cell.cost
+    return WindowTotals(
+        input_tokens=input_t,
+        output_tokens=output_t,
+        cache_creation_tokens=cache_c,
+        cache_read_tokens=cache_r,
+        cost=cost,
+    )
+
+
+def display_model_label(model_name: str) -> str:
+    """Human-readable model name for the Daily view: family
+    capitalised, version digits joined with `.`, `claude-` prefix
+    and the trailing YYYYMMDD date suffix both stripped.
+
+    Examples:
+        claude-opus-4-7            -> Opus 4.7
+        claude-haiku-4-5-20251001  -> Haiku 4.5
+        claude-sonnet-4-6          -> Sonnet 4.6
+        claude-3-5-sonnet-20240620 -> Sonnet 3.5   (legacy ordering)
+        claude-3-opus-20240229     -> Opus 3       (legacy ordering)
+        gpt-4o                     -> gpt-4o       (no claude- prefix; passthrough)
+        ""                         -> ""           (defensive)
+
+    Delegates the date-suffix strip to `short_model_label` so the
+    8-digit-YYYYMMDD rule lives in exactly one place. The
+    family-detection logic (first all-alpha segment) handles both
+    the modern `claude-<family>-<v>-<v>` ordering and the legacy
+    `claude-<v>-<v>-<family>` ordering without a special-case table.
+    """
+    if not model_name or not model_name.startswith("claude-"):
+        return model_name
+    stripped = short_model_label(model_name)
+    body = stripped[len("claude-"):]
+    parts = body.split("-")
+    family_idx = next(
+        (i for i, p in enumerate(parts) if p.isalpha()),
+        None,
+    )
+    if family_idx is None:
+        # No alpha token to capitalise as the family. Pass the
+        # date-stripped form through rather than mangling further.
+        return stripped
+    family = parts[family_idx].capitalize()
+    version_segments = parts[:family_idx] + parts[family_idx + 1:]
+    if not version_segments:
+        return family
+    return f"{family} {'.'.join(version_segments)}"
 
 
 def short_model_label(model_name: str) -> str:
@@ -1144,6 +1549,48 @@ def format_compact_int(n: int) -> str:
     if n < _COMPACT_BILLION:
         return f"{n / _COMPACT_MILLION:.1f}M"
     return f"{n / _COMPACT_BILLION:.2f}B"
+
+
+def round_money(amount: float) -> float:
+    """Round a USD cost value to 2 decimal places (cents).
+
+    Apply at the row-builder boundary so dataframe Cost cells carry
+    clean 2-dp values for copy / sort / export. Streamlit's
+    `NumberColumn(format="$%.2f")` rounds the *display*, but the
+    underlying cell carries whatever value the row dict held — a raw
+    IEEE float like `14.178827999999998` renders as `$14.18` while
+    the clipboard still copies the noisy raw value. Rounding here
+    fixes that without changing the rendered string.
+
+    Python's `round()` uses banker's rounding (half-to-even). For
+    money values arising from float arithmetic over upstream cents,
+    the rounding direction at the half-cent boundary is functionally
+    irrelevant: the input is float noise around a true value, not
+    actual half-cents.
+
+    Sibling of `format_compact_int` (compact tokens) and
+    `format_money` (formatted USD string) — the three formatters
+    live next to each other so the display rules for every numeric
+    type the dashboard renders are findable in one place.
+    """
+    return round(amount, 2)
+
+
+def format_money(amount: float) -> str:
+    """Format a USD cost as ``$X,XXX.XX``.
+
+    Combines `round_money` (clean 2-dp underlying value, so the
+    output never carries IEEE noise from upstream arithmetic) with
+    the ``$``-prefix + thousands-separator display rule. Use for any
+    user-facing cost string that does NOT flow through Streamlit's
+    `NumberColumn` formatter — `st.metric` values, captions,
+    expander labels, embedded delta strings, etc.
+
+    Inside a `NumberColumn` use `round_money` on the row value and
+    let `NumberColumn(format="$%.2f")` apply the formatter — that
+    keeps sorting / copy-paste numeric and avoids double-formatting.
+    """
+    return f"${round_money(amount):,.2f}"
 
 
 # --- Overview-page summary primitives ------------------------------------
