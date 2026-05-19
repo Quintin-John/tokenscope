@@ -16,11 +16,12 @@ Surface (top-to-bottom):
     the window-total row (Date="Total"). Not inside an expander —
     the total is always visible.
 
-Per-day dataframes AND the total dataframe share
-`_TABLE_COLUMN_CONFIG` (10 columns). Per-day rows leave Date blank
-(date is in the expander label); the Total row carries `"Total"` in
-Date. Same column widths + types across every dataframe on the
-page by construction.
+Two column configs: `_PER_DAY_COLUMN_CONFIG` (9 columns — no Date,
+since the date is in the expander label) and `_TOTAL_COLUMN_CONFIG`
+(10 columns = Date + the same 9). The 9 shared columns are defined
+once and spread into the total config via `**` — single source of
+truth for width / type on every shared column. The Total row's
+Date cell carries `"Total"` to identify the row type.
 
 DRY / SOLID anchors:
 
@@ -120,14 +121,21 @@ _TOTAL_LABEL = "Total"
 # with `AGENT_CONSTRAINT_CAPTION` above.
 _AGENT_BREAKDOWN_LABEL = "- Claude Code"
 
-# Column-config for the unified table. Same column-type pattern as
-# Overview's Cost-composition table (TextColumn for label/token
-# columns carrying pre-formatted strings, NumberColumn for cost,
-# explicit width on every column). The visual language is shared by
-# construction — Streamlit's render path for these column types is
-# identical between the two consumers.
-_TABLE_COLUMN_CONFIG: dict = {
-    "Date":         st.column_config.TextColumn(width="small"),
+# Column-configs for the two dataframes the Daily view renders.
+# Same column-type pattern as Overview's Cost-composition table —
+# TextColumn for label/token columns carrying pre-formatted strings,
+# NumberColumn for cost, explicit `width` on every column.
+#
+# Per-day dataframes don't carry a Date column: the date lives in
+# the expander label, so a Date column on every row would be blank
+# and waste a column's worth of screen width. The total dataframe
+# DOES carry a Date column — that's where the "Total" label sits.
+#
+# The 9 shared columns are defined once; `_TOTAL_COLUMN_CONFIG`
+# extends them with a Date entry via `**`. One source for the
+# shared shape, no parallel literal lists, no risk of the two
+# configs drifting on width / type for a shared column.
+_PER_DAY_COLUMN_CONFIG: dict = {
     "Agent":        st.column_config.TextColumn(width="small"),
     "Project":      st.column_config.TextColumn(width="medium"),
     "Models":       st.column_config.TextColumn(width="medium"),
@@ -139,8 +147,14 @@ _TABLE_COLUMN_CONFIG: dict = {
     "Cost":         st.column_config.NumberColumn(format="$%.2f", width="medium"),
 }
 
-# Public for tests — the column-order contract that smoke tests pin.
-TABLE_COLUMNS: tuple[str, ...] = tuple(_TABLE_COLUMN_CONFIG.keys())
+_TOTAL_COLUMN_CONFIG: dict = {
+    "Date": st.column_config.TextColumn(width="small"),
+    **_PER_DAY_COLUMN_CONFIG,
+}
+
+# Public for tests — column-order contracts the smoke tests pin.
+PER_DAY_COLUMNS: tuple[str, ...] = tuple(_PER_DAY_COLUMN_CONFIG.keys())
+TOTAL_COLUMNS:   tuple[str, ...] = tuple(_TOTAL_COLUMN_CONFIG.keys())
 
 
 def render(state: SidebarState, nav: Navigation) -> None:
@@ -305,9 +319,9 @@ def _render_unified_table(
             _project_sub_row(r) for r in project_rows_by_date.get(date, [])
         ]
         with st.expander(_day_expander_label(summary), expanded=True):
-            render_data_table(day_rows, _TABLE_COLUMN_CONFIG)
+            render_data_table(day_rows, _PER_DAY_COLUMN_CONFIG)
 
-    render_data_table([_total_row(totals)], _TABLE_COLUMN_CONFIG)
+    render_data_table([_total_row(totals)], _TOTAL_COLUMN_CONFIG)
 
 
 def _day_expander_label(summary: DailySummary) -> str:
@@ -330,14 +344,13 @@ def _day_expander_label(summary: DailySummary) -> str:
 
 
 def _project_sub_row(project_row: dict) -> dict:
-    """Per-project breakdown row inside a day's expander. Date blank
-    (date is the expander label); Agent has the leading-dash indent
-    marker; Project is the resolved display name; Models is the
-    `, `-joined model labels for this (date, project) bucket in
+    """Per-project breakdown row inside a day's expander. No Date
+    column (date is the expander label). Agent has the leading-dash
+    indent marker; Project is the resolved display name; Models is
+    the `, `-joined model labels for this (date, project) bucket in
     per-model cost-desc order; Cost is money-rounded for clean
     underlying cell values."""
     return {
-        "Date": "",
         "Agent": _AGENT_BREAKDOWN_LABEL,
         "Project": project_display_name(project_row["project"]),
         "Models": ", ".join(

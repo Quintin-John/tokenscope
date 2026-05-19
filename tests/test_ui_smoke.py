@@ -1000,24 +1000,24 @@ def _daily_dataframes(at: AppTest) -> tuple[list, "object"]:
     """Split AppTest's `at.dataframe` list into (per-day, total) for
     the Daily tab. The Daily render emits N per-day dataframes (one
     per expander) plus one final standalone total dataframe at the
-    bottom. The total dataframe is the only one carrying a non-empty
-    Date column ("Total" label), so we find it by that contract
-    rather than by index — robust against a renderer regression
-    that reorders the renders."""
+    bottom. The total dataframe is the only one that carries a
+    `Date` column (per-day dataframes drop it because the date is
+    in the expander label); we find it by that contract rather
+    than by index — robust against a renderer regression that
+    reorders the renders."""
     per_day: list = []
     total = None
     for df in at.dataframe:
-        dates = df.value["Date"].tolist() if "Date" in df.value.columns else []
-        if dates and dates[0] != "":
+        if "Date" in df.value.columns:
             assert total is None, (
-                f"more than one non-blank-Date dataframe: {dates!r}"
+                f"more than one dataframe carries a Date column: "
+                f"{list(df.value.columns)!r}"
             )
             total = df
         else:
             per_day.append(df)
     assert total is not None, (
-        "no total dataframe found (a dataframe with a non-blank Date "
-        "cell on its first row)"
+        "no total dataframe found (a dataframe carrying a Date column)"
     )
     return per_day, total
 
@@ -1103,22 +1103,30 @@ def test_daily_expanders_appear_in_descending_date_order(
 def test_daily_per_day_dataframe_columns_match_spec(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Every per-day dataframe AND the total dataframe carry the
-    full `TABLE_COLUMNS` set, in order. Same column shape across
-    every dataframe on the page — that's the contract that makes
-    the shared `_TABLE_COLUMN_CONFIG` work for all of them."""
-    from tokenscope.ui.daily import TABLE_COLUMNS
+    """Per-day dataframes carry `PER_DAY_COLUMNS` exactly (9 columns,
+    no Date — date is in the expander label). The total dataframe
+    carries `TOTAL_COLUMNS` (10 columns = Date + the same 9). The
+    two column tuples are derived from the same source config in
+    `daily.py`, so a rename / reorder of any shared column
+    propagates to both without test maintenance."""
+    from tokenscope.ui.daily import PER_DAY_COLUMNS, TOTAL_COLUMNS
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-    expected = list(TABLE_COLUMNS)
-    for df in at.dataframe:
-        assert list(df.value.columns) == expected, (
-            f"column drift: rendered={list(df.value.columns)!r}, "
-            f"expected={expected!r}"
+    per_day, total = _daily_dataframes(at)
+    expected_per_day = list(PER_DAY_COLUMNS)
+    expected_total = list(TOTAL_COLUMNS)
+    for df in per_day:
+        assert list(df.value.columns) == expected_per_day, (
+            f"per-day column drift: rendered={list(df.value.columns)!r}, "
+            f"expected={expected_per_day!r}"
         )
+    assert list(total.value.columns) == expected_total, (
+        f"total column drift: rendered={list(total.value.columns)!r}, "
+        f"expected={expected_total!r}"
+    )
 
 
 def test_daily_per_day_dataframe_row_count_matches_projects(
