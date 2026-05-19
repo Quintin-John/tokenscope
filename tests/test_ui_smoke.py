@@ -789,6 +789,91 @@ def test_daily_day_expanders_open_by_default(
         )
 
 
+def test_daily_skips_zero_cost_days(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Days whose summary cost is exactly $0.00 must NOT appear as
+    expander rows — ccusage doesn't currently emit them, but if it
+    ever does the renderer's zero-cost filter drops them silently.
+    Synthesises a by-project payload with one paid day + one
+    zero-cost day and asserts only the paid day renders.
+
+    Pinning the filter contract here means a regression that loses
+    the `s.cost > 0` filter would render a `$0.00` row that adds
+    no information."""
+    paid_day = "2026-05-16"
+    zero_day = "2026-05-17"
+    synthetic = {
+        "projects": {
+            "-Users-q-tokenscope": [
+                {
+                    "date": paid_day,
+                    "inputTokens": 100,
+                    "outputTokens": 200,
+                    "cacheCreationTokens": 300,
+                    "cacheReadTokens": 400,
+                    "totalTokens": 1000,
+                    "totalCost": 12.5,
+                    "modelsUsed": ["claude-opus-4-7"],
+                    "modelBreakdowns": [
+                        {
+                            "modelName": "claude-opus-4-7",
+                            "inputTokens": 100,
+                            "outputTokens": 200,
+                            "cacheCreationTokens": 300,
+                            "cacheReadTokens": 400,
+                            "cost": 12.5,
+                        }
+                    ],
+                },
+                {
+                    "date": zero_day,
+                    "inputTokens": 1,
+                    "outputTokens": 2,
+                    "cacheCreationTokens": 3,
+                    "cacheReadTokens": 4,
+                    "totalTokens": 10,
+                    "totalCost": 0.0,
+                    "modelsUsed": ["claude-opus-4-7"],
+                    "modelBreakdowns": [
+                        {
+                            "modelName": "claude-opus-4-7",
+                            "inputTokens": 1,
+                            "outputTokens": 2,
+                            "cacheCreationTokens": 3,
+                            "cacheReadTokens": 4,
+                            "cost": 0.0,
+                        }
+                    ],
+                },
+            ]
+        },
+        "totals": {
+            "inputTokens": 101,
+            "outputTokens": 202,
+            "cacheCreationTokens": 303,
+            "cacheReadTokens": 404,
+            "totalTokens": 1010,
+            "totalCost": 12.5,
+        },
+    }
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage("daily", "--instances", response=synthetic)
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    labels = [exp.label for exp in at.expander]
+    assert any(label.startswith(paid_day) for label in labels), (
+        f"paid day {paid_day!r} not rendered: {labels!r}"
+    )
+    assert not any(label.startswith(zero_day) for label in labels), (
+        f"zero-cost day {zero_day!r} should be skipped but appeared: {labels!r}"
+    )
+
+
 def test_daily_empty_window_renders_info_message(
     mock_ccusage, mock_ccusage_version
 ) -> None:
@@ -871,10 +956,9 @@ def test_daily_expanders_are_newest_first_with_summary_header(
 ) -> None:
     """Day expanders appear in descending date order — the most
     recent day at the top — and each label carries the day's date,
-    cost, tokens, model/project counts, and the agent chip so the
-    user can scan without expanding."""
-    from tokenscope.ui.daily import AGENT_LABEL
-
+    cost, tokens, and model/project counts. The "what client" axis
+    is covered by `AGENT_CONSTRAINT_CAPTION` at the page top, not
+    repeated per row."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
@@ -884,42 +968,39 @@ def test_daily_expanders_are_newest_first_with_summary_header(
     assert labels[0].startswith(expected_first), (
         f"newest day not first: {labels[0]!r} (expected to start with {expected_first!r})"
     )
-    # Header carries all five summary fragments + the agent chip.
-    # Exact wording lives in `ui.daily._day_header`; assertions
-    # here catch accidental copy drift.
+    # Header carries five summary fragments. Exact wording lives in
+    # `ui.daily._day_header`; assertions here catch copy drift.
     head = labels[0]
     assert "$" in head
     assert "tokens" in head
     assert "model" in head
     assert "project" in head
-    assert AGENT_LABEL in head
 
 
-def test_daily_day_header_order_is_date_cost_tokens_counts_agent(
+def test_daily_day_header_order_is_date_cost_tokens_models_projects(
     mock_ccusage, mock_ccusage_version
 ) -> None:
     """Day-row header segments appear in this exact order so the
-    scan-hot field (cost) is second after the date, and the constant
-    agent chip lands last. The order is asserted positionally — any
-    regression on `_day_header`'s f-string order trips this test."""
-    from tokenscope.ui.daily import AGENT_LABEL
-
+    scan-hot field (cost) is second after the date. Five segments
+    only — the v1 `· Claude Code` chip was removed because it was
+    redundant with the page-top constraint caption and created a
+    perceived pluralization inconsistency between 1-project and
+    N-project days."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
     head = at.expander[0].label
     segments = [s.strip() for s in head.split("·")]
-    # Date · Cost · Tokens · Models · Projects · Agent
-    assert len(segments) == 6, (
-        f"expected 6 ·-separated segments in day header; got {segments!r}"
+    # Date · Cost · Tokens · Models · Projects
+    assert len(segments) == 5, (
+        f"expected 5 ·-separated segments in day header; got {segments!r}"
     )
     assert segments[0] == max(_fixture_distinct_dates())
     assert segments[1].startswith("$")
     assert segments[2].endswith("tokens")
     assert segments[3].endswith("model") or segments[3].endswith("models")
     assert segments[4].endswith("project") or segments[4].endswith("projects")
-    assert segments[5] == AGENT_LABEL
 
 
 def test_daily_agent_constraint_caption_visible(
@@ -927,8 +1008,10 @@ def test_daily_agent_constraint_caption_visible(
 ) -> None:
     """The page subtitle area carries `AGENT_CONSTRAINT_CAPTION` —
     the upfront explanation that the dashboard sees Claude Code
-    traffic only. Surfacing this on the page (not just in the chip)
-    prevents users misreading the constant chip as a detection bug."""
+    traffic only. With no per-row chip, this caption is the sole
+    surface where the constraint is stated; if it disappears the
+    constant nature of the (invisible) agent axis becomes a silent
+    bug rather than a documented constraint."""
     from tokenscope.ui.daily import AGENT_CONSTRAINT_CAPTION
 
     _wire_default_fixtures(mock_ccusage)
@@ -937,24 +1020,6 @@ def test_daily_agent_constraint_caption_visible(
     _assert_clean(at)
     caption_text = "\n".join(c.value for c in at.caption)
     assert AGENT_CONSTRAINT_CAPTION in caption_text
-
-
-def test_daily_every_day_header_carries_agent_chip(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """Every day-row header carries the agent chip — not just the
-    first. The chip is constant per design (single ingestion source,
-    single label) so its presence on every row is the contract."""
-    from tokenscope.ui.daily import AGENT_LABEL
-
-    _wire_default_fixtures(mock_ccusage)
-    at = _at("daily")
-    at.run()
-    _assert_clean(at)
-    for exp in at.expander:
-        assert exp.label.endswith(f"· {AGENT_LABEL}"), (
-            f"expander missing agent chip: {exp.label!r}"
-        )
 
 
 def test_daily_newest_day_subtable_cost_matches_fixture_day_total(
@@ -1001,92 +1066,29 @@ def _projects_per_date_from_fixture() -> dict[str, set[str]]:
     return result
 
 
-def test_daily_subtable_columns_match_day_summary(
+def test_daily_subtable_columns_constant_across_all_days(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Per-day column set is `_columns_for_day(distinct_projects)`:
-    single-project days drop the Project column (redundant — every
-    row would read the same value); multi-project days keep it. The
-    expected column list is derived from the fixture data, so a
-    rename or reorder in `_DAY_SUBTABLE_COLUMNS` propagates without
-    test-side maintenance."""
-    from tokenscope.ui.daily import _columns_for_day
+    """Every day's sub-table renders the FULL `_DAY_SUBTABLE_COLUMNS`
+    set — no per-day column hiding. Project column is present whether
+    a day had 1 project or N. Column-layout consistency from one
+    day-row to the next was the v1 review's load-bearing complaint;
+    pinning the invariant here catches a regression that re-introduces
+    per-day column-set branching."""
+    from tokenscope.ui.daily import _DAY_SUBTABLE_COLUMNS
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
 
-    projects_per_date = _projects_per_date_from_fixture()
-    # Newest first — same order the renderer iterates summaries.
-    dates_newest_first = sorted(projects_per_date, reverse=True)
-    assert len(at.dataframe) == len(dates_newest_first), (
-        f"dataframe count mismatch: {len(at.dataframe)} dataframes "
-        f"vs {len(dates_newest_first)} distinct dates"
-    )
-    for df, date in zip(at.dataframe, dates_newest_first):
-        distinct_projects = len(projects_per_date[date])
-        expected = [c.label for c in _columns_for_day(distinct_projects)]
+    expected = [c.label for c in _DAY_SUBTABLE_COLUMNS]
+    assert at.dataframe, "no day sub-tables rendered"
+    for df in at.dataframe:
         assert list(df.value.columns) == expected, (
-            f"date {date} ({distinct_projects} projects) columns: "
+            f"sub-table columns drift from _DAY_SUBTABLE_COLUMNS: "
             f"got {list(df.value.columns)!r}, expected {expected!r}"
         )
-
-
-def test_daily_single_project_day_drops_project_column(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """At least one day in the fixture has only one project — its
-    sub-table must NOT carry a Project column. Explicit assertion
-    on the column-hiding behaviour beyond the general-case test
-    above, so a future regression that re-introduces the always-show
-    behaviour is caught with a clear failure message."""
-    _wire_default_fixtures(mock_ccusage)
-    at = _at("daily")
-    at.run()
-    _assert_clean(at)
-
-    projects_per_date = _projects_per_date_from_fixture()
-    single_project_dates = {
-        d for d, ps in projects_per_date.items() if len(ps) == 1
-    }
-    assert single_project_dates, (
-        "fixture has no single-project days — test premise invalid"
-    )
-    dates_newest_first = sorted(projects_per_date, reverse=True)
-    for df, date in zip(at.dataframe, dates_newest_first):
-        if date in single_project_dates:
-            assert "Project" not in df.value.columns, (
-                f"date {date} has one project but Project column "
-                f"is still rendered: {list(df.value.columns)!r}"
-            )
-
-
-def test_daily_multi_project_day_keeps_project_column(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """Days with 2+ projects must keep the Project column visible —
-    the column carries real signal there. Skipped if the fixture
-    has no multi-project days (some test runs may use a stripped
-    fixture)."""
-    _wire_default_fixtures(mock_ccusage)
-    at = _at("daily")
-    at.run()
-    _assert_clean(at)
-
-    projects_per_date = _projects_per_date_from_fixture()
-    multi_project_dates = {
-        d for d, ps in projects_per_date.items() if len(ps) > 1
-    }
-    if not multi_project_dates:
-        pytest.skip("fixture has no multi-project days")
-    dates_newest_first = sorted(projects_per_date, reverse=True)
-    for df, date in zip(at.dataframe, dates_newest_first):
-        if date in multi_project_dates:
-            assert "Project" in df.value.columns, (
-                f"date {date} has multiple projects but Project "
-                f"column is missing: {list(df.value.columns)!r}"
-            )
 
 
 def test_daily_sub_table_model_column_uses_display_label(
@@ -1133,40 +1135,56 @@ def test_daily_sub_table_model_column_uses_display_label(
     )
 
 
-def test_daily_sub_table_project_column_uses_basename(
+def test_daily_sub_table_project_column_uses_friendly_label(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Sub-table Project column values come from `project_basename`
-    (last `-` segment), not the full slug. Only meaningful on days
-    that have the Project column at all (multi-project days)."""
-    from tokenscope.analytics import project_basename
+    """Sub-table Project column values come from
+    `friendly_project_label(slug, home_slug=home_slug())` — same
+    helper the sidebar Project dropdown consumes. Paths under home
+    render as `~/…`; other paths keep their dash-stripped form.
+
+    Replaced the Slice-6 `project_basename` heuristic after the v1
+    review: that returned the username ("johnsmith") for the home-
+    directory slug and silently mangled multi-segment repo names
+    (`baremetal-audit` → `audit`). The friendly label is longer
+    but unambiguous, and reuses the sidebar's display rule — one
+    project-display path across the dashboard."""
+    from tokenscope.analytics import friendly_project_label
+    from tokenscope.paths import home_slug
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
     projects_per_date = _projects_per_date_from_fixture()
-    multi = {d for d, ps in projects_per_date.items() if len(ps) > 1}
-    if not multi:
-        pytest.skip("fixture has no multi-project days")
     raw_slugs = {
         slug
         for date_slugs in projects_per_date.values()
         for slug in date_slugs
     }
-    expected_basenames = {project_basename(s) for s in raw_slugs}
-    # Collect rendered project values across all days.
+    expected_labels = {
+        friendly_project_label(s, home_slug=home_slug()) for s in raw_slugs
+    }
     rendered: set[str] = set()
-    dates_newest_first = sorted(projects_per_date, reverse=True)
-    for df, date in zip(at.dataframe, dates_newest_first):
-        if "Project" in df.value.columns:
-            rendered.update(df.value["Project"].tolist())
-    assert rendered, "no Project column rendered on any multi-project day"
-    # Every rendered value must be a basename from the slug set.
-    assert rendered <= expected_basenames
-    # Inverse contract: no rendered cell carries a leading dash
-    # (the encoded-slug marker).
-    assert not any(v.startswith("-") for v in rendered)
+    for df in at.dataframe:
+        assert "Project" in df.value.columns, (
+            f"Project column missing on a day sub-table: "
+            f"{list(df.value.columns)!r}"
+        )
+        rendered.update(df.value["Project"].tolist())
+    assert rendered, "no rendered Project values"
+    # Every rendered value must be the friendly-label form of a slug.
+    assert rendered <= expected_labels, (
+        f"rendered Project values not in friendly_project_label output: "
+        f"unexpected={rendered - expected_labels!r}"
+    )
+    # Inverse contract: the username segment ("johnsmith") that the
+    # old `project_basename` heuristic produced for the home-dir slug
+    # must NOT appear standalone — would mean the regression is back.
+    assert "johnsmith" not in rendered, (
+        "rendered Project values include the username — "
+        "project_basename regression?"
+    )
 
 
 def test_daily_sub_table_token_columns_are_compact_strings(

@@ -57,7 +57,6 @@ from tokenscope.analytics import (
     last_day_cost,
     overview_insight,
     peak_day,
-    project_basename,
     spike_day,
     model_breakdown,
     model_family,
@@ -3172,45 +3171,6 @@ def test_filter_daily_by_models_preserves_project_field() -> None:
         ["claude-opus-4-7"],
     )
     assert filtered.daily[0].project == "-proj-specific"
-
-
-# ---------- project_basename (Slice 6) ----------
-
-
-def test_project_basename_simple_path() -> None:
-    """ccusage-encoded path: take everything after the last `-`."""
-    assert project_basename(
-        "-Users-quintin-johnsmith-Documents-RiderProjects-tokenscope"
-    ) == "tokenscope"
-
-
-def test_project_basename_lossy_on_hyphenated_repo() -> None:
-    """Documented limitation: ccusage's encoding can't distinguish a
-    path separator from a hyphen in a directory name. A repo
-    literally called `BareMetal-LLMV2` returns `LLMV2`, not the full
-    repo name. This is the trade-off the helper accepts in exchange
-    for column compactness — the sidebar's Project dropdown carries
-    the full slug for users who need disambiguation."""
-    assert project_basename("-Users-q-BareMetal-LLMV2") == "LLMV2"
-
-
-def test_project_basename_empty_passthrough() -> None:
-    """Empty string returns empty (no traceback, no synthetic
-    placeholder). Defensive behaviour for malformed ccusage rows."""
-    assert project_basename("") == ""
-
-
-def test_project_basename_no_dash_passthrough() -> None:
-    """A bare name without dashes returns unchanged — `rsplit('-', 1)`
-    on a no-dash string yields a single-element list."""
-    assert project_basename("plain") == "plain"
-
-
-def test_project_basename_trailing_dash_falls_back() -> None:
-    """A slug ending in `-` would otherwise return an empty string.
-    The `or slug` fallback returns the original input so the column
-    never renders an empty cell from a malformed slug."""
-    assert project_basename("-Users-foo-") == "-Users-foo-"
 
 
 # ---------- display_model_label (Slice 6) ----------

@@ -900,28 +900,6 @@ def friendly_project_label(slug: str, home_slug: str | None = None) -> str:
     return slug
 
 
-def project_basename(slug: str) -> str:
-    """Last `-`-delimited segment of a ccusage project slug.
-
-    Example: `-Users-q-Documents-RiderProjects-tokenscope` → `tokenscope`.
-
-    LOSSY: ccusage encodes paths by replacing `/` with `-`, so a repo
-    literally named `BareMetal-LLMV2` slugs to a string indistinguishable
-    from path-encoded `BareMetal/LLMV2`. This helper takes the last
-    `-`-delimited token verbatim and will return `LLMV2` for that input.
-    Same lossiness caveat as `friendly_project_label`. Acceptable for
-    the Daily view's column compactness — the sidebar's Project
-    dropdown carries the full slug for disambiguation.
-
-    Empty or `-`-only inputs return the input unchanged so the caller
-    can render *something* rather than a blank cell.
-    """
-    if not slug:
-        return slug
-    leaf = slug.rsplit("-", 1)[-1]
-    return leaf or slug
-
-
 def display_model_label(model_name: str) -> str:
     """Human-readable model name for the Daily view: family
     capitalised, version digits joined with `.`, `claude-` prefix

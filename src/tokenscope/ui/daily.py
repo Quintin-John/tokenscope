@@ -47,29 +47,28 @@ from tokenscope.analytics import (
     display_model_label,
     format_compact_int,
     format_timezone_for_display,
+    friendly_project_label,
     peak_day,
     pluralize,
-    project_basename,
 )
 from tokenscope.navigation import Navigation
+from tokenscope.paths import home_slug
 from tokenscope.ui._data import load_daily_by_project
 from tokenscope.ui.sidebar import SidebarState
 
 
-# Agent label and constraint caption — single source of truth for the
-# "what client made these requests" surface. Every row in the dataset
-# is Claude Code by construction (ccusage reads `~/.claude/projects/`
-# JSONL only; SDK / console / third-party API traffic doesn't write
-# there). The chip in the day-row header surfaces this so the
-# constant value is explained, not silently omitted. The caption
-# under the page subtitle frames the constraint upfront so users
-# don't mistake the uniformity for a detection bug.
+# Agent constraint caption — every row in the dataset is Claude Code
+# by construction (ccusage reads `~/.claude/projects/` JSONL only;
+# SDK / console / third-party API traffic doesn't write there). The
+# page-subtitle caption frames the constraint upfront so users don't
+# mistake the uniformity for a detection bug. No per-row chip on the
+# day-row header — the caption alone covers the contract; repeating
+# "Claude Code" on every header is noise that creates the perceived
+# 1-project-vs-3-projects pluralization inconsistency v1 surfaced.
 #
 # Admin API ingestion (the real "differentiate Claude Code vs SDK
 # vs console vs third-party" path) is intentionally not in scope —
 # see BACKLOG.md "Slice 28 — Anthropic Admin API ingestion".
-AGENT_LABEL = "Claude Code"
-
 AGENT_CONSTRAINT_CAPTION = (
     "All traffic is Claude Code — ccusage reads Claude Code "
     "transcripts only. SDK / console / third-party traffic is not "
@@ -179,17 +178,35 @@ def render(state: SidebarState, nav: Navigation) -> None:
 
     cells = daily_cells(report)
     if not cells:
-        st.info(
-            "No usage in the selected window. Try widening the **Date "
-            "range** in the sidebar, or clearing the **Project** filter "
-            "if one is set."
-        )
+        st.info(_EMPTY_WINDOW_MESSAGE)
         return
 
-    summaries = daily_summaries(cells)
+    # Zero-cost days are silently dropped — ccusage doesn't currently
+    # emit them, but if it ever does they'd render as a `$0.00` row
+    # carrying no useful signal. The cells list is narrowed to the
+    # surviving dates so `cells_for_date` and `busiest_model` stay
+    # consistent with `summaries`.
+    summaries = [s for s in daily_summaries(cells) if s.cost > 0]
+    active_dates = {s.date for s in summaries}
+    cells = [c for c in cells if c.date in active_dates]
+    if not cells:
+        st.info(_EMPTY_WINDOW_MESSAGE)
+        return
+
     window_days = state.query.window_days() or config.DEFAULT_RANGE_DAYS
     _render_kpi_strip(summaries, cells, window_days)
     _render_day_rows(cells, summaries)
+
+
+# Empty-window info copy — shared by the two short-circuit paths in
+# `render()` (no cells at all from ccusage / every cell filtered out
+# by the zero-cost rule). Single source so the user reads the same
+# guidance regardless of which branch fired.
+_EMPTY_WINDOW_MESSAGE = (
+    "No usage in the selected window. Try widening the **Date "
+    "range** in the sidebar, or clearing the **Project** filter "
+    "if one is set."
+)
 
 
 def _render_page_header(state: SidebarState) -> None:
@@ -287,64 +304,49 @@ def _render_day_rows(
     """
     for summary in summaries:
         with st.expander(_day_header(summary), expanded=True):
-            _render_day_subtable(summary, cells_for_date(cells, summary.date))
+            _render_day_subtable(cells_for_date(cells, summary.date))
 
 
 def _day_header(summary: DailySummary) -> str:
     """Collapsed-state expander header. Format:
-    `<date> · <cost> · <tokens> tokens · <N models> · <N projects> · <agent>`.
+    `<date> · <cost> · <tokens> tokens · <N models> · <N projects>`.
 
     Order is scan-optimised: cost second (the field users come here
-    to compare), tokens third, model/project counts fourth/fifth,
-    agent chip last (constant — every row reads `Claude Code` so
-    placing it last keeps the variable fields scannable on the left).
+    to compare), tokens third, model/project counts fourth/fifth.
+    The "what client made these requests" axis is covered by the
+    page-subtitle `AGENT_CONSTRAINT_CAPTION`; repeating "Claude Code"
+    on every header was noise per the v1 review.
 
-    Uses the same `_fmt_tokens` / `_fmt_cost` helpers as the totals
-    card and the same `AGENT_LABEL` constant as `_render_page_header`'s
-    caption — header text, totals strip, and constraint caption all
-    share single sources of truth.
+    Uses the same `_fmt_tokens` / `_fmt_cost` helpers as the KPI
+    strip so header text and KPI values cannot drift on formatting.
     """
     return (
         f"{summary.date} · "
         f"{_fmt_cost(summary.cost)} · "
         f"{_fmt_tokens(summary.total_tokens)} tokens · "
         f"{pluralize(summary.distinct_models, 'model')} · "
-        f"{pluralize(summary.distinct_projects, 'project')} · "
-        f"{AGENT_LABEL}"
+        f"{pluralize(summary.distinct_projects, 'project')}"
     )
 
 
-def _columns_for_day(distinct_projects: int) -> tuple[_ColumnSpec, ...]:
-    """Per-day subset of `_DAY_SUBTABLE_COLUMNS`. Drops the Project
-    column when only one project ran that day — the expander header
-    already reads `1 project`, so the column would repeat the same
-    string in every row. Kept when 2+ projects are present so the
-    user can see which project drove which cost.
-    """
-    if distinct_projects > 1:
-        return _DAY_SUBTABLE_COLUMNS
-    return tuple(c for c in _DAY_SUBTABLE_COLUMNS if c.kind != "project")
-
-
-def _render_day_subtable(
-    summary: DailySummary, day_cells: list[DailyCell]
-) -> None:
+def _render_day_subtable(day_cells: list[DailyCell]) -> None:
     """`(model, project)` rows for one day. Sorted by cost desc by
     `cells_for_date`. Token columns reach the dataframe as
     pre-formatted compact strings (`1.37B`); cost reaches as a raw
     float that Streamlit formats via `NumberColumn`. Every column
     carries an explicit width and column type — see
-    `_subtable_column_config` for the per-kind rule. The Project
-    column is dropped on single-project days (see
-    `_columns_for_day`).
+    `_subtable_column_config` for the per-kind rule. Every day's
+    sub-table renders the full `_DAY_SUBTABLE_COLUMNS` set including
+    the Project column (no per-day column hiding) so column layout
+    stays consistent from one day-row to the next.
     """
-    columns = _columns_for_day(summary.distinct_projects)
     rows = [
-        {spec.label: _subtable_value(spec, cell) for spec in columns}
+        {spec.label: _subtable_value(spec, cell) for spec in _DAY_SUBTABLE_COLUMNS}
         for cell in day_cells
     ]
     column_config = {
-        spec.label: _subtable_column_config(spec) for spec in columns
+        spec.label: _subtable_column_config(spec)
+        for spec in _DAY_SUBTABLE_COLUMNS
     }
     st.dataframe(
         rows,
@@ -365,21 +367,19 @@ def _subtable_value(
     stays as a raw `float` so its `NumberColumn(format="$%.2f")`
     entry can do the currency formatting Streamlit-side.
 
-    Why tokens are TextColumn and not NumberColumn: glide-data-grid
-    renders NumberColumn cells at a heavier font weight than
-    TextColumn cells and headers. Overview's Cost-composition table
-    runs into the same asymmetry but only one column (Est. cost)
-    triggers it; on Daily with five numeric token columns it
-    dominated every row. Matching Overview's pattern (TextColumn
-    for compact tokens, NumberColumn only for currency) makes the
-    two tables render with the same column-type ratio and the
-    weight asymmetry stops being visible. Trade-off accepted: lose
-    right-aligned token columns, gain cross-table consistency.
+    Label kinds use the same helpers the sidebar uses, so the
+    Daily view never carries a parallel display rule:
 
-    Label kinds (`model`, `project`) return pre-formatted strings
-    via `display_model_label` / `project_basename` — both helpers
-    live in `analytics.py` so the Daily view never carries a
-    parallel display rule.
+      * `model`   → `display_model_label`  (`Opus 4.7`)
+      * `project` → `friendly_project_label(slug, home_slug=...)`
+                    — same encoding as the sidebar Project dropdown;
+                    `~/` for paths under home, raw slug elsewhere.
+
+    Replaced the slice-6 basename heuristic (`project_basename`)
+    after the v1 review surfaced that it returned the user's
+    username ("johnsmith") for the home-directory slug and
+    silently mangled multi-segment repo names. The home-relative
+    form is longer but never wrong.
     """
     value = getattr(cell, spec.attr)
     if spec.kind == "tokens":
@@ -389,15 +389,16 @@ def _subtable_value(
     if spec.kind == "model":
         return display_model_label(value)
     if spec.kind == "project":
-        return project_basename(value)
+        return friendly_project_label(value, home_slug=home_slug())
     raise ValueError(f"_subtable_value: unknown kind {spec.kind!r}")
 
 
 _PROJECT_COLUMN_HELP = (
-    "Last path segment of the project directory. Lossy when a repo "
-    "name contains hyphens (ccusage encodes path separators as `-`) "
-    "— the sidebar's Project dropdown carries the full slug for "
-    "disambiguation."
+    "Project = ccusage's project key (the cwd Claude Code ran in). "
+    "Paths under your home directory render as `~/…`; other paths "
+    "(external drives etc.) keep their full encoded form. ccusage "
+    "encodes path separators as `-`, so directory names that "
+    "contain a hyphen are indistinguishable from nested paths."
 )
 
 
