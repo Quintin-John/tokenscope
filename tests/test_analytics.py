@@ -20,6 +20,7 @@ from tokenscope.analytics import (
     active_block_burn,
     aggregate_cache_hit_ratio,
     available_models,
+    available_models_by_project,
     block_cache_hit_ratio,
     block_cost_by_kind,
     blocks_for_session,
@@ -2844,6 +2845,73 @@ def test_filter_daily_by_project_models_matches_daily_by_models_semantics() -> N
     assert flat_only.total_cost == pytest.approx(nested_only.total_cost)
     assert flat_only.total_tokens == nested_only.total_tokens
     assert flat_only.input_tokens == nested_only.input_tokens
+
+
+# ---------- filter_daily_by_models regression: project preservation ----------
+
+
+# ---------- available_models_by_project ----------
+
+
+def test_available_models_by_project_empty_report() -> None:
+    assert available_models_by_project(_by_project_report({})) == []
+
+
+def test_available_models_by_project_dedupes_across_projects_sorted() -> None:
+    """Two projects sharing one model + each owning another →
+    returns the unique set, sorted. Same dedupe semantics as the
+    flat `available_models` so the sidebar's discovery options stay
+    consistent regardless of which fetch the dashboard used."""
+    b_opus = _breakdown("claude-opus-4-7", cost=1.0)
+    b_haiku = _breakdown("claude-haiku-4-5-20251001", cost=1.0)
+    b_sonnet = _breakdown("claude-sonnet-4-6", cost=1.0)
+    report = _by_project_report(
+        {
+            "-proj-A": [
+                _entry(
+                    "2026-05-16",
+                    total_cost=2.0,
+                    models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+                    model_breakdowns=[b_opus, b_haiku],
+                )
+            ],
+            "-proj-B": [
+                _entry(
+                    "2026-05-16",
+                    total_cost=2.0,
+                    models=["claude-opus-4-7", "claude-sonnet-4-6"],
+                    model_breakdowns=[b_opus, b_sonnet],
+                )
+            ],
+        }
+    )
+    assert available_models_by_project(report) == [
+        "claude-haiku-4-5-20251001",
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+    ]
+
+
+def test_available_models_by_project_matches_available_models_on_flat_data() -> None:
+    """The shared core means: when the same entries are wrapped as a
+    flat `DailyReport` vs a single-project `DailyByProjectReport`, both
+    public entry-points return identical model lists. Pins the
+    'two thin adapters over one core' contract."""
+    b_opus = _breakdown("claude-opus-4-7", cost=1.0)
+    b_haiku = _breakdown("claude-haiku-4-5-20251001", cost=1.0)
+    entries = [
+        _entry(
+            "2026-05-16",
+            total_cost=2.0,
+            models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+            model_breakdowns=[b_opus, b_haiku],
+        )
+    ]
+    flat = available_models(_report(entries))
+    nested = available_models_by_project(
+        _by_project_report({"-proj-A": entries})
+    )
+    assert flat == nested
 
 
 # ---------- filter_daily_by_models regression: project preservation ----------

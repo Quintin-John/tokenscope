@@ -173,7 +173,30 @@ def test_cache_view_trail_is_root_only() -> None:
 def test_top_level_views_constant() -> None:
     from tokenscope.navigation import TOP_LEVEL_VIEWS
 
-    assert TOP_LEVEL_VIEWS == ("overview", "live", "cache", "models")
+    assert TOP_LEVEL_VIEWS == ("overview", "live", "cache", "models", "daily")
+
+
+def test_navigation_daily_view_round_trips() -> None:
+    """`?view=daily` URL-state round-trips through
+    `Navigation.from_params` / `to_params` cleanly. The Daily view
+    carries no drill-only fields (day / session / block / session_project)
+    so the round-tripped params dict is exactly `{"view": "daily"}`."""
+    nav = Navigation.from_params({"view": "daily"})
+    assert nav.view == "daily"
+    assert nav.day is None
+    assert nav.session is None
+    assert nav.session_project is None
+    assert nav.block is None
+    assert nav.to_params() == {"view": "daily"}
+
+
+def test_navigation_daily_view_trail_is_overview_only() -> None:
+    """Daily is a top-level view (no drill state), so its breadcrumb
+    trail is just `Overview` — the trailing `Daily` crumb itself is
+    not appended (the `# Daily` H1 is the page identity, and the page
+    selector already shows where the user is)."""
+    trail = Navigation(view="daily").trail()
+    assert trail == [("Overview", Navigation(view="overview"))]
 
 
 # ---------- StreamlitDuplicateElementKey Slice 2: session_project disambiguator ----------
@@ -401,6 +424,7 @@ def test_app_renderer_map_dispatches_each_view_to_its_module() -> None:
     from tokenscope.ui import (
         block as block_view,
         cache as cache_view,
+        daily as daily_view,
         day as day_view,
         live as live_view,
         models as models_view,
@@ -413,6 +437,7 @@ def test_app_renderer_map_dispatches_each_view_to_its_module() -> None:
         "live": live_view.render,
         "cache": cache_view.render,
         "models": models_view.render,
+        "daily": daily_view.render,
         "day": day_view.render,
         "session": session_view.render,
         "block": block_view.render,

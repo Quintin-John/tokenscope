@@ -169,6 +169,7 @@ def test_analytics_public_surface() -> None:
         "daily_summaries",
         "window_totals",
         "filter_daily_by_project_models",
+        "available_models_by_project",
     ):
         assert callable(getattr(analytics, name)), name
 

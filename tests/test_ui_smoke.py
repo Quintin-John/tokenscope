@@ -606,6 +606,97 @@ def test_live_renders(mock_ccusage, mock_ccusage_version) -> None:
     _assert_clean(at)
 
 
+# ---------- Daily view (slice 2: header + totals card) ----------
+
+
+def _daily_totals_from_fixture() -> dict[str, int | float]:
+    """Read the expected window totals straight off the fixture JSON
+    so the smoke assertions stay tied to the source data, not
+    duplicated literals. If ccusage's report shape ever drifts, this
+    helper trips at JSON-decode time rather than masking a regression
+    behind a wrong magic number."""
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    return raw["totals"]
+
+
+def test_daily_renders(mock_ccusage, mock_ccusage_version) -> None:
+    """Daily tab renders cleanly and surfaces the `# Daily` H1 + the
+    window-totals metric strip. The totals strip carries one metric
+    per column in `ui.daily._COLUMNS` — same tuple that drives
+    slice 3's per-day sub-table — so the column count and labels
+    are derived from the single source of truth, not hard-coded here.
+    """
+    from tokenscope.ui.daily import _COLUMNS
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    md = "\n".join(m.value for m in at.markdown)
+    assert "# Daily" in md, f"expected `# Daily` H1; got: {md!r}"
+
+    # Every column in `_COLUMNS` produces an st.metric with the spec's
+    # label. AppTest exposes metrics as `at.metric` — labels (not
+    # values) are pinned because the value formatting belongs to the
+    # `_ColumnSpec.formatter` and is checked independently in the
+    # totals-value test below.
+    metric_labels = {m.label for m in at.metric}
+    for spec in _COLUMNS:
+        assert spec.label in metric_labels, (
+            f"Daily totals card missing metric for column {spec.label!r}; "
+            f"saw labels: {metric_labels!r}"
+        )
+
+
+def test_daily_totals_card_values_match_fixture_totals(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The totals card's `Cost` metric must equal the fixture's
+    `totals.totalCost` (formatted as `$x,xxx.xx`). Pins the
+    load-bearing invariant from slice 1
+    (`window_totals(daily_cells(report)) == report.totals`) all the
+    way through to the rendered metric — if any layer breaks the
+    invariant, the rendered value would diverge from the fixture's
+    own totals."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+
+    expected = _daily_totals_from_fixture()
+    cost_metric = next(
+        (m for m in at.metric if m.label == "Cost"), None
+    )
+    assert cost_metric is not None, "Daily totals card has no Cost metric"
+    assert cost_metric.value == f"${expected['totalCost']:,.2f}"
+
+
+def test_daily_empty_window_renders_info_message(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Empty `daily --instances` payload (empty range, project filter
+    yielding zero matches) must render the `No usage in the selected
+    window` info — same copy the Overview / Models tabs use, so the
+    user's response (widen range / clear project filter) is one
+    consistent muscle memory across the dashboard."""
+    mock_ccusage("daily", response=FIXTURES / "daily.json")
+    mock_ccusage(
+        "daily",
+        "--instances",
+        response=FIXTURES / "daily_empty_bare_array.json",
+    )
+    mock_ccusage("session", response=FIXTURES / "session.json")
+    mock_ccusage("blocks", response=FIXTURES / "blocks.json")
+    mock_ccusage("blocks", "--active", response=FIXTURES / "blocks.json")
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    info_text = "\n".join(i.value for i in at.info)
+    assert "No usage in the selected window" in info_text
+
+
 # ---------- Live view rework ----------
 
 
@@ -4390,30 +4481,29 @@ def test_models_renders_per_model_token_kind_chart(
 # ---------- page selector: user-driven radio clicks ----------
 
 
+# Transitions are derived from `TOP_LEVEL_VIEWS` rather than hard-coded
+# so that adding a new top-level view automatically expands the test
+# matrix to cover every directional pair. Hard-coding the pairs (the
+# prior form of this test) silently dropped coverage for new views
+# until the matrix was hand-maintained — that's the kind of drift the
+# `_VIEWS` single-source-of-truth registry was built to eliminate.
+def _top_level_transition_pairs() -> list[tuple[str, str]]:
+    from tokenscope.navigation import TOP_LEVEL_VIEWS
+
+    return [
+        (a, b) for a in TOP_LEVEL_VIEWS for b in TOP_LEVEL_VIEWS if a != b
+    ]
+
+
 @pytest.mark.parametrize(
-    "from_view,to_view",
-    [
-        ("overview", "live"),
-        ("overview", "cache"),
-        ("overview", "models"),
-        ("live", "overview"),
-        ("live", "cache"),
-        ("live", "models"),
-        ("cache", "overview"),
-        ("cache", "live"),
-        ("cache", "models"),
-        ("models", "overview"),
-        ("models", "live"),
-        ("models", "cache"),
-    ],
+    "from_view,to_view", _top_level_transition_pairs()
 )
 def test_top_level_page_selector_click_navigates(
     mock_ccusage, mock_ccusage_version, from_view, to_view
 ) -> None:
-    """User clicks a top-level radio option (Live / Cache / Models /
-    Overview) → the page selector's `chosen_view != nav.view` branch
-    fires `route_to(target)` and the destination view renders on the
-    next rerun.
+    """User clicks a top-level radio option → the page selector's
+    `chosen_view != nav.view` branch fires `route_to(target)` and the
+    destination view renders on the next rerun.
 
     Regression: a prior version of `_render_page_selector` synced
     the radio's session_state from the URL on EVERY render — which
@@ -4422,8 +4512,12 @@ def test_top_level_page_selector_click_navigates(
     the origin view (most visibly: every click went back to
     Overview because that's the URL view at first load).
 
-    Parametrised across every top-level pair so a future regression
-    on any single transition trips the test immediately."""
+    Parametrised across every directional top-level pair derived
+    from `TOP_LEVEL_VIEWS` so a future regression on any single
+    transition trips the test immediately, AND adding a new
+    top-level view doesn't silently lose coverage."""
+    from tokenscope.navigation import TOP_LEVEL_LABELS
+
     _wire_default_fixtures(mock_ccusage)
     at = _at(from_view)
     at.run()
@@ -4439,13 +4533,7 @@ def test_top_level_page_selector_click_navigates(
     selectors = [r for r in at.radio if r.key == "top-page-selector"]
     assert selectors, "top-page-selector radio not rendered"
     selector = selectors[0]
-    label_for = {
-        "overview": "Overview",
-        "live": "Live",
-        "cache": "Cache",
-        "models": "Models",
-    }
-    selector.set_value(label_for[to_view]).run()
+    selector.set_value(TOP_LEVEL_LABELS[to_view]).run()
     _assert_clean(at)
 
     raw = at.query_params.get("view")

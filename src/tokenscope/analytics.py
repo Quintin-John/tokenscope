@@ -420,12 +420,31 @@ def filter_daily_by_project_models(
     )
 
 
-def available_models(daily_report: DailyReport) -> list[str]:
-    """Sorted unique model names that appear anywhere in the report."""
+def _available_models_from(entries: Iterable[DailyEntry]) -> list[str]:
+    """Shared core for `available_models` / `available_models_by_project`.
+    One model-discovery rule, two thin shape adapters above it — the two
+    public entry-points cannot drift on what counts as a "seen" model."""
     seen: set[str] = set()
-    for entry in daily_report.daily:
+    for entry in entries:
         seen.update(entry.models_used)
     return sorted(seen)
+
+
+def available_models(daily_report: DailyReport) -> list[str]:
+    """Sorted unique model names that appear anywhere in the report."""
+    return _available_models_from(daily_report.daily)
+
+
+def available_models_by_project(report: DailyByProjectReport) -> list[str]:
+    """Sorted unique model names across every project's entries in the
+    by-project report. Used by the Daily view's `load_daily_by_project`
+    to decide whether the sidebar model-multiselect narrows the data;
+    sibling of `available_models` so both data paths apply identical
+    "what models are in this window" semantics.
+    """
+    return _available_models_from(
+        e for entries in report.projects.values() for e in entries
+    )
 
 
 def _totals_from_entries(entries: list[DailyEntry]):
