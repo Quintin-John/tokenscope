@@ -697,6 +697,133 @@ def test_daily_empty_window_renders_info_message(
     assert "No usage in the selected window" in info_text
 
 
+# ---------- Daily view (slice 3: per-day expanders + sub-tables) ----------
+
+
+def _fixture_cells() -> list[tuple[str, str, str, float]]:
+    """Read `(date, model, project, cost)` cells off the fixture
+    directly. Used by smoke assertions to derive expected counts /
+    totals from the source data rather than duplicating literals
+    into the test code."""
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    cells: list[tuple[str, str, str, float]] = []
+    for project, entries in raw["projects"].items():
+        for entry in entries:
+            for b in entry["modelBreakdowns"]:
+                cells.append((entry["date"], b["modelName"], project, b["cost"]))
+    return cells
+
+
+def _fixture_distinct_dates() -> list[str]:
+    return sorted({c[0] for c in _fixture_cells()})
+
+
+def test_daily_renders_one_expander_per_day(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Number of `st.expander` elements on the Daily tab equals the
+    number of distinct dates in the by-project fixture. Adding /
+    removing dates in the fixture must propagate without manual
+    test maintenance."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    assert len(at.expander) == len(_fixture_distinct_dates())
+
+
+def test_daily_expander_total_subtable_rows_match_cell_count(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Total `(model, project)` rows across every expanded day equals
+    the total number of `model_breakdowns` entries ccusage emitted.
+    This is the structural counterpart of the cost invariant: each
+    cell ccusage produced must render as exactly one sub-table row
+    — no duplicated cells, no synthesised zero-cells."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    total_rows = sum(len(df.value) for df in at.dataframe)
+    assert total_rows == len(_fixture_cells())
+
+
+def test_daily_expanders_are_newest_first_with_summary_header(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Day expanders appear in descending date order — the most
+    recent day at the top — and each label carries the day's date,
+    tokens, cost ($), and the `N models · N projects` summary so
+    the user can scan without expanding."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    labels = [exp.label for exp in at.expander]
+    expected_first = max(_fixture_distinct_dates())
+    assert labels[0].startswith(expected_first), (
+        f"newest day not first: {labels[0]!r} (expected to start with {expected_first!r})"
+    )
+    # Header carries all four summary fragments. The exact words /
+    # punctuation come from `ui.daily._day_header` — pinning them
+    # here catches accidental copy drift.
+    head = labels[0]
+    assert " tokens · $" in head
+    assert "model" in head
+    assert "project" in head
+
+
+def test_daily_newest_day_subtable_cost_matches_fixture_day_total(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The cost column in a day's sub-table sums to that day's
+    `totalCost` in the fixture. This pins the load-bearing invariant
+    end-to-end: cells from `daily_cells` rendered into the sub-table
+    must agree with the source data's per-entry totals. If the
+    rendering ever drops or duplicates a cell, the sum diverges."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    newest = max(_fixture_distinct_dates())
+    expected_cost = sum(
+        e["totalCost"]
+        for proj, entries in raw["projects"].items()
+        for e in entries
+        if e["date"] == newest
+    )
+    newest_df = at.dataframe[0].value
+    # The `Cost` column carries raw floats (NumberColumn formats
+    # them for display). Sum the raw values.
+    rendered_cost = sum(newest_df["Cost"])
+    assert rendered_cost == pytest.approx(expected_cost)
+
+
+def test_daily_subtable_has_model_and_project_columns(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Every day's sub-table carries the Model + Project label columns
+    in addition to the numeric columns. Derived from
+    `_DAY_SUBTABLE_COLUMNS` so the test follows the single source
+    of truth — a reorder or rename in `daily.py` won't silently
+    drop coverage."""
+    from tokenscope.ui.daily import _DAY_SUBTABLE_COLUMNS
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    expected_columns = [spec.label for spec in _DAY_SUBTABLE_COLUMNS]
+    for df_element in at.dataframe:
+        assert list(df_element.value.columns) == expected_columns
+
+
 # ---------- Live view rework ----------
 
 

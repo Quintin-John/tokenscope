@@ -33,6 +33,7 @@ from tokenscope.analytics import (
 )
 from tokenscope.ccusage import CcusageError
 from tokenscope.log import get_logger
+from tokenscope.paths import home_slug
 from tokenscope.plans import Plan, get_plan, plan_names
 from tokenscope.query import Query
 from tokenscope.tz import detect_local_iana
@@ -65,17 +66,6 @@ _HELP_PLAN = (
     "usage would have cost at API rates as the delta — useful for "
     "seeing the savings vs pay-per-token."
 )
-
-
-def _home_slug() -> str:
-    """Slugify the user's home directory the way ccusage encodes paths.
-
-    `/Users/quintin-johnsmith` → `-Users-quintin-johnsmith`. We pass this
-    into `friendly_project_label` so it can substitute the prefix with
-    `~`. Done at render time (not import time) so test runs with custom
-    `HOME` environments behave correctly.
-    """
-    return "-" + str(Path.home()).lstrip("/").replace("/", "-")
 
 
 # Widget keys — used by the Reset button to clear state deterministically.
@@ -350,7 +340,7 @@ def _render_project_selectbox(project_options: list[str]) -> str | None:
     project_kwargs: dict = {"key": _KEY_PROJECT}
     if _KEY_PROJECT not in st.session_state:
         project_kwargs["index"] = 0
-    home = _home_slug()
+    home = home_slug()
     project_choice = st.selectbox(
         "Project",
         options=[ALL_PROJECTS, *project_options],

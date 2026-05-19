@@ -1,51 +1,75 @@
 """Daily view — per-day breakdown matching ccusage's daily report layout.
 
-Slice 2 ships the window-totals card only (header + bordered metric
-strip). Slice 3 adds the per-day expanders below this card, each
-containing a `(model, project)` sub-table that iterates the same
-`_COLUMNS` tuple defined here — single source of truth for column
-order, display label, attribute name, and formatting rule.
+Surface (top-to-bottom):
 
-The Daily tab does not introduce charts; ccusage parity is the goal,
-and ccusage's daily report is a table. Visual language is matched to
-Overview / Models / Cache: `# Daily` H1, window subtitle caption,
-plan banner when set, empty-window info message, then bordered
-`st.metric` cards in `st.columns(len(_COLUMNS))`.
+  * `# Daily` H1 + window / timezone caption.
+  * Plan banner (when the active plan supplies one).
+  * Window-totals card (slice 2) — bordered `st.metric` strip with
+    one column per kind, derived from `_COLUMNS`.
+  * Per-day expanders (slice 3) — one expander per date in the
+    window, descending order. The collapsed header carries the
+    day's totals so the user can scan without expanding. Expanded,
+    each shows a `(model, project)` sub-table sorted by cost desc.
+
+Single source of truth for the column grid: `_COLUMNS` for the
+totals card, `_DAY_SUBTABLE_COLUMNS = (model, project, *_COLUMNS)`
+for the sub-table. Both are tuples of `_ColumnSpec(label, attr,
+kind)`; the `kind` discriminator drives formatting and (for the
+sub-table) the `st.column_config` rule. One column-grid definition,
+two render contexts, no parallel literal lists.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Literal
 
 import streamlit as st
 
 from tokenscope import config
 from tokenscope.analytics import (
+    DailyCell,
+    DailySummary,
     WindowTotals,
+    cells_for_date,
     daily_cells,
+    daily_summaries,
     format_compact_int,
     format_timezone_for_display,
+    friendly_project_label,
+    pluralize,
+    short_model_label,
     window_totals,
 )
 from tokenscope.navigation import Navigation
+from tokenscope.paths import home_slug
 from tokenscope.ui._data import load_daily_by_project
 from tokenscope.ui.sidebar import SidebarState
+
+
+# `kind` discriminates how the renderer pulls a value out of the
+# source object (`WindowTotals` / `DailyCell`) and how it presents
+# it. "tokens" / "cost" / "model" / "project" are the only kinds
+# the Daily view needs; introducing a new kind requires extending
+# both `_metric_value` and `_subtable_value` (and the test surface).
+_ColumnKind = Literal["tokens", "cost", "model", "project"]
 
 
 @dataclass(frozen=True, slots=True)
 class _ColumnSpec:
     """One column of the Daily view's row grid.
 
-    `attr` is the field name read off `WindowTotals` (this slice) and
-    off `DailySummary` / per-`(model, project)` rows in slice 3. The
-    same tuple `_COLUMNS` drives every render path so column order,
-    labels, and formats live in exactly one place.
+    `attr` names the field on the source object (`WindowTotals` for
+    the totals card; `DailyCell` for the sub-table). `kind` selects
+    the formatting rule — see `_metric_value` and `_subtable_value`.
+    No format callbacks live on the spec itself: a single dispatch
+    function per render context owns the kind→format mapping, so
+    the rule cannot drift between the totals card and the sub-table.
     """
 
     label: str
     attr: str
-    formatter: Callable[[int | float], str]
+    kind: _ColumnKind
 
 
 def _fmt_tokens(value: int | float) -> str:
@@ -58,18 +82,24 @@ def _fmt_cost(value: int | float) -> str:
     return f"${value:,.2f}"
 
 
-# Single source of truth for the Daily view's column grid. The totals
-# card here iterates this tuple; slice 3's per-day sub-table iterates
-# the same tuple against `DailySummary` / per-`(model, project)` row
-# objects. Adding or reordering a column requires one change here —
-# no parallel literal lists in two render paths to drift.
+# Numeric-only columns — shared by the totals card and the sub-table.
 _COLUMNS: tuple[_ColumnSpec, ...] = (
-    _ColumnSpec("Input", "input_tokens", _fmt_tokens),
-    _ColumnSpec("Output", "output_tokens", _fmt_tokens),
-    _ColumnSpec("Cache create", "cache_creation_tokens", _fmt_tokens),
-    _ColumnSpec("Cache read", "cache_read_tokens", _fmt_tokens),
-    _ColumnSpec("Total tokens", "total_tokens", _fmt_tokens),
-    _ColumnSpec("Cost", "cost", _fmt_cost),
+    _ColumnSpec("Input", "input_tokens", "tokens"),
+    _ColumnSpec("Output", "output_tokens", "tokens"),
+    _ColumnSpec("Cache create", "cache_creation_tokens", "tokens"),
+    _ColumnSpec("Cache read", "cache_read_tokens", "tokens"),
+    _ColumnSpec("Total tokens", "total_tokens", "tokens"),
+    _ColumnSpec("Cost", "cost", "cost"),
+)
+
+
+# Sub-table columns — the numeric columns above prefixed with Model
+# and Project labels. The prefix order is fixed (label columns first)
+# so the table reads "what · where · how much" left-to-right.
+_DAY_SUBTABLE_COLUMNS: tuple[_ColumnSpec, ...] = (
+    _ColumnSpec("Model", "model", "model"),
+    _ColumnSpec("Project", "project", "project"),
+    *_COLUMNS,
 )
 
 
@@ -97,6 +127,7 @@ def render(state: SidebarState, nav: Navigation) -> None:
         return
 
     _render_totals_card(window_totals(cells))
+    _render_day_rows(cells, daily_summaries(cells))
 
 
 def _render_page_header(state: SidebarState) -> None:
@@ -116,4 +147,104 @@ def _render_totals_card(totals: WindowTotals) -> None:
     cols = st.columns(len(_COLUMNS))
     for col, spec in zip(cols, _COLUMNS):
         with col, st.container(border=True):
-            st.metric(spec.label, spec.formatter(getattr(totals, spec.attr)))
+            st.metric(spec.label, _metric_value(spec, totals))
+
+
+def _render_day_rows(
+    cells: list[DailyCell], summaries: list[DailySummary]
+) -> None:
+    """One `st.expander` per day in descending date order. Collapsed
+    header surfaces the day's totals so a user scanning the list can
+    spot the high-cost day without expanding every row. Expanded,
+    each shows the `(model, project)` sub-table for that date.
+    """
+    home = home_slug()
+    for summary in summaries:
+        with st.expander(_day_header(summary)):
+            _render_day_subtable(cells_for_date(cells, summary.date), home)
+
+
+def _day_header(summary: DailySummary) -> str:
+    """Collapsed-state expander header. The format
+    `<date> · <tokens> tokens · <cost> · <N models> · <N projects>`
+    uses the same `_fmt_tokens` / `_fmt_cost` helpers as the totals
+    card so the header values and the totals strip can never drift
+    on formatting."""
+    return (
+        f"{summary.date} · "
+        f"{_fmt_tokens(summary.total_tokens)} tokens · "
+        f"{_fmt_cost(summary.cost)} · "
+        f"{pluralize(summary.distinct_models, 'model')} · "
+        f"{pluralize(summary.distinct_projects, 'project')}"
+    )
+
+
+def _render_day_subtable(day_cells: list[DailyCell], home: str) -> None:
+    """`(model, project)` rows for one day. Sorted by cost desc by
+    `cells_for_date`; pre-formatted token strings and raw cost floats
+    go into the dataframe; `column_config` formats cost as USD."""
+    rows = [
+        {spec.label: _subtable_value(spec, cell, home) for spec in _DAY_SUBTABLE_COLUMNS}
+        for cell in day_cells
+    ]
+    column_config = {
+        spec.label: cc
+        for spec in _DAY_SUBTABLE_COLUMNS
+        if (cc := _subtable_column_config(spec)) is not None
+    }
+    st.dataframe(
+        rows,
+        width="stretch",
+        hide_index=True,
+        column_config=column_config,
+    )
+
+
+def _metric_value(spec: _ColumnSpec, source: WindowTotals) -> str:
+    """Format a `WindowTotals` field for the totals-card `st.metric`.
+    The totals card only carries numeric kinds — "model" / "project"
+    have no meaning at window scope and would indicate a bug if a
+    label-kind column reached this dispatch."""
+    value = getattr(source, spec.attr)
+    if spec.kind == "tokens":
+        return _fmt_tokens(value)
+    if spec.kind == "cost":
+        return _fmt_cost(value)
+    raise ValueError(
+        f"_metric_value: kind {spec.kind!r} is not valid for the totals card"
+    )
+
+
+def _subtable_value(
+    spec: _ColumnSpec, cell: DailyCell, home: str
+) -> str | int | float:
+    """Format a `DailyCell` field for the per-day sub-table.
+
+    Tokens are pre-formatted as compact strings (1.37B style). Cost
+    is returned raw (float) — `_subtable_column_config` supplies a
+    `NumberColumn(format="$%.2f")` so Streamlit handles the formatting
+    AND right-aligns the column. Model / Project are pre-formatted
+    via the existing `short_model_label` / `friendly_project_label`
+    helpers so the Daily view never introduces a parallel display
+    rule for those fields.
+    """
+    value = getattr(cell, spec.attr)
+    if spec.kind == "tokens":
+        return _fmt_tokens(value)
+    if spec.kind == "cost":
+        return value
+    if spec.kind == "model":
+        return short_model_label(value)
+    if spec.kind == "project":
+        return friendly_project_label(value, home_slug=home)
+    raise ValueError(f"_subtable_value: unknown kind {spec.kind!r}")
+
+
+def _subtable_column_config(spec: _ColumnSpec):
+    """Per-column `st.column_config` entry — only the cost column
+    needs one (NumberColumn for right-aligned $%.2f). Token / model /
+    project columns fall through to Streamlit's default TextColumn
+    treatment since their values reach the dataframe pre-formatted."""
+    if spec.kind == "cost":
+        return st.column_config.NumberColumn(format="$%.2f")
+    return None

@@ -7,9 +7,14 @@ rendering `st.error`, then apply the sidebar's model multi-select via
 
 Consolidating here:
 
-  * `load_daily(state)` — fetch + filter + error-handling in one call.
-    Returns the filtered `DailyReport` or `None` (caller should
-    short-circuit on None — `st.error` is already rendered).
+  * `load_daily(state)` / `load_daily_by_project(state)` — fetch +
+    filter + error-handling in one call. Returns the filtered report
+    or `None` (caller should short-circuit on None — `st.error` is
+    already rendered).
+
+Path helpers (`home_slug`) live in `tokenscope.paths` to avoid a
+circular import with `ui.sidebar` (which defines `SidebarState`
+consumed by the loaders below).
 
 Tests live where the callers do; this is glue.
 """

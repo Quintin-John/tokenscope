@@ -742,6 +742,35 @@ def daily_summaries(cells: Iterable[DailyCell]) -> list[DailySummary]:
     return summaries
 
 
+def cells_for_date(cells: Iterable[DailyCell], date_str: str) -> list[DailyCell]:
+    """Return the subset of `cells` whose `date == date_str`, sorted by
+    cost descending so the renderer iterates "where the money went"
+    top-down — matches the Models breakdown table's sort rule.
+    Stable secondary sort isn't required; ccusage emits at most one
+    cell per `(date, model, project)` tuple so cost ties are rare
+    and visually indistinguishable.
+    """
+    return sorted(
+        (c for c in cells if c.date == date_str),
+        key=lambda c: c.cost,
+        reverse=True,
+    )
+
+
+def pluralize(count: int, singular: str) -> str:
+    """English count + noun, with naive `-s` plural suffix. Used by the
+    Daily view's day-row header (`2 models · 1 project`) so the
+    pluralization rule lives in one place rather than being inlined
+    everywhere a count needs a noun.
+
+    Intentionally trivial: no exceptions for irregular plurals
+    (`series`, `data`) because the dashboard's vocabulary is all
+    regular nouns. Add a special-case table here if that ever
+    changes — don't reinvent the rule at the call site.
+    """
+    return f"{count} {singular}" if count == 1 else f"{count} {singular}s"
+
+
 def window_totals(cells: Iterable[DailyCell]) -> WindowTotals:
     """Window-wide rollup from `DailyCell` list. Empty input yields a
     zero-totals object rather than `None` so the Daily tab's totals

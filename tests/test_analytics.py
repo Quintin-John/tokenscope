@@ -30,9 +30,11 @@ from tokenscope.analytics import (
     cache_savings,
     cost_by_kind,
     cost_concentration_summary,
+    cells_for_date,
     daily_cache_savings,
     daily_cells,
     daily_summaries,
+    pluralize,
     per_model_cache_performance,
     cost_share_by_model,
     daily_cache_hit_ratio,
@@ -2848,6 +2850,73 @@ def test_filter_daily_by_project_models_matches_daily_by_models_semantics() -> N
 
 
 # ---------- filter_daily_by_models regression: project preservation ----------
+
+
+# ---------- cells_for_date ----------
+
+
+def test_cells_for_date_empty_list() -> None:
+    assert cells_for_date([], "2026-05-16") == []
+
+
+def test_cells_for_date_filters_to_matching_date_only() -> None:
+    """Cells on other dates are excluded. The Daily view expands one
+    day at a time; spilling cells from adjacent days into a day's
+    sub-table would mis-report the day's cost."""
+    cells = [
+        DailyCell("2026-05-15", "claude-opus-4-7", "-A", 1, 2, 3, 4, 1.0),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-A", 1, 2, 3, 4, 2.0),
+        DailyCell("2026-05-17", "claude-opus-4-7", "-A", 1, 2, 3, 4, 3.0),
+    ]
+    result = cells_for_date(cells, "2026-05-16")
+    assert [c.date for c in result] == ["2026-05-16"]
+
+
+def test_cells_for_date_sorted_by_cost_descending() -> None:
+    """Highest-cost (model, project) row appears first — matches the
+    Models breakdown table's `where the money goes` sort."""
+    cells = [
+        DailyCell("2026-05-16", "claude-haiku-4-5", "-A", 1, 2, 3, 4, 0.5),
+        DailyCell("2026-05-16", "claude-opus-4-7", "-A", 1, 2, 3, 4, 10.0),
+        DailyCell("2026-05-16", "claude-sonnet-4-6", "-A", 1, 2, 3, 4, 3.0),
+    ]
+    result = cells_for_date(cells, "2026-05-16")
+    assert [c.cost for c in result] == [10.0, 3.0, 0.5]
+
+
+def test_cells_for_date_sum_matches_summary_for_same_date() -> None:
+    """The cell-subset sum for a given date must equal the
+    `DailySummary` for that date — both derive from the same cells,
+    so the per-day sub-table and the day-row header can never
+    disagree on the day's total cost."""
+    cells = [
+        DailyCell("2026-05-16", "claude-opus-4-7", "-A", 10, 20, 30, 40, 5.0),
+        DailyCell("2026-05-16", "claude-haiku-4-5", "-B", 1, 2, 3, 4, 0.5),
+        DailyCell("2026-05-15", "claude-opus-4-7", "-A", 100, 200, 300, 400, 50.0),
+    ]
+    day = cells_for_date(cells, "2026-05-16")
+    summary = next(s for s in daily_summaries(cells) if s.date == "2026-05-16")
+    assert sum(c.cost for c in day) == pytest.approx(summary.cost)
+    assert sum(c.input_tokens for c in day) == summary.input_tokens
+    assert sum(c.total_tokens for c in day) == summary.total_tokens
+
+
+# ---------- pluralize ----------
+
+
+def test_pluralize_singular() -> None:
+    assert pluralize(1, "model") == "1 model"
+
+
+def test_pluralize_zero_uses_plural() -> None:
+    """Zero is plural in English (`0 models`, not `0 model`). The day
+    header reads `0 projects` when a filter drops every project on
+    that date — pluralization stays grammatical."""
+    assert pluralize(0, "project") == "0 projects"
+
+
+def test_pluralize_many() -> None:
+    assert pluralize(5, "project") == "5 projects"
 
 
 # ---------- available_models_by_project ----------
