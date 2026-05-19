@@ -31,9 +31,13 @@ DRY / SOLID anchors:
     sidebar and Daily both consume it.
   - `analytics.daily_project_aggregates` — single per-(date,
     project) rollup. Pure function; renderer is a thin caller.
-  - `_round_money` (private) — single money-rounding rule,
-    applied at the row-builder boundary so dataframe Cost cells
-    carry clean 2-dp values (NumberColumn formats `$X.XX` on top).
+  - `analytics.round_money` / `analytics.format_money` — single
+    money-rounding rule (applied at the row-builder boundary so
+    dataframe Cost cells carry clean 2-dp values; NumberColumn
+    formats `$X.XX` on top) and single `$X,XXX.XX` string
+    formatter (used for `st.metric` values, captions, expander
+    labels — anywhere the value is rendered outside a
+    NumberColumn). Same pair Overview consumes.
   - `_row` (private) — single per-day-dataframe row builder.
     Project sub-rows AND the day-total row delegate to it so the
     9-column shape and the numeric-formatting rule live in one
@@ -67,9 +71,11 @@ from tokenscope.analytics import (
     daily_summaries,
     display_model_label,
     format_compact_int,
+    format_money,
     format_timezone_for_display,
     peak_day,
     pluralize,
+    round_money,
 )
 from tokenscope.navigation import Navigation
 from tokenscope.paths import project_display_name
@@ -247,7 +253,7 @@ def _render_kpi_strip(
             st.caption("no activity in window")
         else:
             date, cost = peak
-            st.metric(KPI_LABEL_PEAK_DAY, f"${cost:,.2f}")
+            st.metric(KPI_LABEL_PEAK_DAY, format_money(cost))
             st.caption(f"on {date}")
 
     with c2, st.container(border=True):
@@ -257,7 +263,7 @@ def _render_kpi_strip(
     with c3, st.container(border=True):
         st.metric(
             KPI_LABEL_AVG_PER_ACTIVE_DAY,
-            f"${avg_active:,.2f}",
+            format_money(avg_active),
             help=KPI_HELP_AVG_PER_ACTIVE_DAY,
         )
         st.caption(f"across {pluralize(active, 'active day')}")
@@ -270,28 +276,6 @@ def _render_kpi_strip(
             model, share = busiest
             st.metric(KPI_LABEL_BUSIEST_MODEL, display_model_label(model))
             st.caption(f"{share:.1%} of window spend")
-
-
-def _round_money(amount: float) -> float:
-    """Round a cost value to 2 decimal places (USD cents convention).
-
-    Used at the row-builder boundary so dataframe Cost cells carry
-    clean 2-dp values for copy / sort / export, while Streamlit's
-    `NumberColumn(format="$%.2f")` still applies the currency
-    formatter on top.
-
-    Without this, a raw IEEE float like `14.178827999999998` renders
-    as `$14.18` (NumberColumn rounds the display) but the underlying
-    cell carries the noisy raw value — copying a column to the
-    clipboard or sorting numerically exposes the noise.
-
-    Python's `round()` uses banker's rounding (half-to-even). For
-    money values arising from float arithmetic over upstream cents,
-    the rounding direction at the half-cent boundary is functionally
-    irrelevant: the input is float noise around a true value, not
-    actual half-cents.
-    """
-    return round(amount, 2)
 
 
 def _render_unified_table(
@@ -339,7 +323,7 @@ def _day_expander_label(summary: DailySummary) -> str:
     """
     return (
         f"{summary.date} · "
-        f"${_round_money(summary.cost):,.2f} · "
+        f"{format_money(summary.cost)} · "
         f"{format_compact_int(summary.total_tokens)} tokens · "
         f"{pluralize(summary.distinct_models, 'model')} · "
         f"{pluralize(summary.distinct_projects, 'project')}"
@@ -401,7 +385,7 @@ def _row(
         "Cache create": format_compact_int(numerics["cache_creation_tokens"]),
         "Cache read": format_compact_int(numerics["cache_read_tokens"]),
         "Total tokens": format_compact_int(numerics["total_tokens"]),
-        "Cost": _round_money(numerics["cost"]),
+        "Cost": round_money(numerics["cost"]),
     }
 
 

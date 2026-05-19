@@ -1204,7 +1204,8 @@ def test_daily_day_total_row_matches_day_summary(
     per-project costs. Pins the data invariant: the in-dataframe
     total must agree with the source data the expander label is
     derived from."""
-    from tokenscope.ui.daily import TOTAL_LABEL, _round_money
+    from tokenscope.analytics import round_money
+    from tokenscope.ui.daily import TOTAL_LABEL
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
@@ -1222,9 +1223,9 @@ def test_daily_day_total_row_matches_day_summary(
         date = exp.label.split(" · ", 1)[0]
         last_row = df.value.iloc[-1]
         assert last_row["Agent"] == TOTAL_LABEL
-        assert last_row["Cost"] == _round_money(cost_by_date[date]), (
+        assert last_row["Cost"] == round_money(cost_by_date[date]), (
             f"day-total cost for {date!r}: row={last_row['Cost']}, "
-            f"fixture={_round_money(cost_by_date[date])}"
+            f"fixture={round_money(cost_by_date[date])}"
         )
 
 
@@ -1319,7 +1320,7 @@ def test_daily_cost_values_rounded_to_two_decimal_places(
             assert isinstance(value, (int, float)) and not isinstance(value, bool)
             assert value == round(value, 2), (
                 f"Cost cell {value!r} not 2-dp rounded — "
-                f"`_round_money` regression?"
+                f"`analytics.round_money` regression?"
             )
 
 
@@ -1366,53 +1367,6 @@ def test_daily_token_columns_are_compact_strings(
         f"output: seen={sorted(seen_values)[:5]}, "
         f"expected_some={sorted(expected_some)[:5]}"
     )
-
-
-# ---------- _round_money unit tests ----------
-#
-# The contract is "round to 2 decimal places" (USD cents) so
-# dataframe Cost cells carry clean values for copy / sort / export.
-# The half-cent-boundary rounding direction is intentionally NOT
-# pinned — money values arising from float arithmetic over upstream
-# cents are IEEE noise around true values, not actual half-cents,
-# and the IEEE representation of `0.005` isn't exactly 0.005 anyway
-# (Python's `round(0.005, 2)` returns `0.01`, not `0.0`, because of
-# the float's actual stored value). The tests below pin the
-# load-bearing contract (2-dp output, noise collapsed, float type)
-# without nailing down the corner-case semantics.
-
-
-def test_round_money_collapses_ieee_float_noise() -> None:
-    """The specific bug: raw floats like `14.178827999999998` (IEEE
-    noise around 14.18) get cleaned to 14.18."""
-    from tokenscope.ui.daily import _round_money
-
-    assert _round_money(14.178827999999998) == 14.18
-
-
-def test_round_money_passthrough_for_already_clean_values() -> None:
-    """A value already at 2dp passes through unchanged."""
-    from tokenscope.ui.daily import _round_money
-
-    assert _round_money(25.31) == 25.31
-    assert _round_money(0.0) == 0.0
-
-
-def test_round_money_handles_negative_values() -> None:
-    """Defensive: a refund / credit cost would be negative;
-    rounding direction is symmetric."""
-    from tokenscope.ui.daily import _round_money
-
-    assert _round_money(-1.234) == -1.23
-
-
-def test_round_money_returns_float_type() -> None:
-    """Streamlit's `NumberColumn` requires a numeric type (float or
-    int). The helper must NOT return `Decimal` or similar — that
-    would break the currency formatter."""
-    from tokenscope.ui.daily import _round_money
-
-    assert isinstance(_round_money(1.0), float)
 
 
 def test_daily_table_project_resolves_via_jsonl_in_docker_context(

@@ -53,6 +53,7 @@ from tokenscope.analytics import (
     find_daily_entry,
     find_session,
     format_compact_int,
+    format_money,
     format_timezone_for_display,
     last_day_cost,
     overview_insight,
@@ -63,6 +64,7 @@ from tokenscope.analytics import (
     mtd_cost,
     prior_window_query,
     rolling_cost_average,
+    round_money,
     sessions_on_day,
     short_model_label,
     today_cost,
@@ -3258,4 +3260,79 @@ def test_display_model_label_no_version_segments() -> None:
     """`claude-<family>` with no version digits → just the
     capitalised family name."""
     assert display_model_label("claude-opus") == "Opus"
+
+
+# ---------- round_money ----------
+#
+# Contract: round a USD cost to 2 decimal places (cents) so
+# dataframe Cost cells carry clean values for copy / sort / export.
+# The half-cent-boundary rounding direction is intentionally NOT
+# pinned — money values arising from float arithmetic over upstream
+# cents are IEEE noise around true values, not actual half-cents,
+# and the IEEE representation of `0.005` isn't exactly 0.005 anyway
+# (Python's `round(0.005, 2)` returns `0.01`, not `0.0`, because of
+# the float's actual stored value). The tests below pin the
+# load-bearing contract (2-dp output, noise collapsed, float type)
+# without nailing down the corner-case semantics.
+
+
+def test_round_money_collapses_ieee_float_noise() -> None:
+    """The specific bug: raw floats like `14.178827999999998` (IEEE
+    noise around 14.18) get cleaned to 14.18."""
+    assert round_money(14.178827999999998) == 14.18
+
+
+def test_round_money_passthrough_for_already_clean_values() -> None:
+    """A value already at 2dp passes through unchanged."""
+    assert round_money(25.31) == 25.31
+    assert round_money(0.0) == 0.0
+
+
+def test_round_money_handles_negative_values() -> None:
+    """Defensive: a refund / credit cost would be negative;
+    rounding direction is symmetric."""
+    assert round_money(-1.234) == -1.23
+
+
+def test_round_money_returns_float_type() -> None:
+    """Streamlit's `NumberColumn` requires a numeric type (float or
+    int). The helper must NOT return `Decimal` or similar — that
+    would break the currency formatter."""
+    assert isinstance(round_money(1.0), float)
+
+
+# ---------- format_money ----------
+#
+# Contract: `$X,XXX.XX` display for any user-facing cost string
+# that does NOT flow through Streamlit's `NumberColumn` formatter.
+# Composition: applies `round_money` first so IEEE noise can't leak
+# into the rendered string.
+
+
+def test_format_money_basic_two_decimal_places() -> None:
+    """Whole and fractional dollars render with the `$` prefix and
+    exactly 2 decimal places."""
+    assert format_money(0.0) == "$0.00"
+    assert format_money(1.5) == "$1.50"
+    assert format_money(25.31) == "$25.31"
+
+
+def test_format_money_thousands_separator() -> None:
+    """Values >= 1,000 carry the thousands separator (`$X,XXX.XX`)
+    so the dashboard headline cost strings stay scannable."""
+    assert format_money(1_234.5) == "$1,234.50"
+    assert format_money(1_000_000.0) == "$1,000,000.00"
+
+
+def test_format_money_collapses_ieee_float_noise() -> None:
+    """The composition guarantee: noisy floats like
+    `14.178827999999998` render as `$14.18`, not `$14.179...`,
+    because the helper rounds before formatting."""
+    assert format_money(14.178827999999998) == "$14.18"
+
+
+def test_format_money_handles_negative_values() -> None:
+    """Negative costs (refund / credit) render with the `-` sign
+    in front of the `$` so the sign isn't lost in the prefix."""
+    assert format_money(-12.5) == "$-12.50"
 

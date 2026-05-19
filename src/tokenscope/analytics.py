@@ -1551,6 +1551,48 @@ def format_compact_int(n: int) -> str:
     return f"{n / _COMPACT_BILLION:.2f}B"
 
 
+def round_money(amount: float) -> float:
+    """Round a USD cost value to 2 decimal places (cents).
+
+    Apply at the row-builder boundary so dataframe Cost cells carry
+    clean 2-dp values for copy / sort / export. Streamlit's
+    `NumberColumn(format="$%.2f")` rounds the *display*, but the
+    underlying cell carries whatever value the row dict held — a raw
+    IEEE float like `14.178827999999998` renders as `$14.18` while
+    the clipboard still copies the noisy raw value. Rounding here
+    fixes that without changing the rendered string.
+
+    Python's `round()` uses banker's rounding (half-to-even). For
+    money values arising from float arithmetic over upstream cents,
+    the rounding direction at the half-cent boundary is functionally
+    irrelevant: the input is float noise around a true value, not
+    actual half-cents.
+
+    Sibling of `format_compact_int` (compact tokens) and
+    `format_money` (formatted USD string) — the three formatters
+    live next to each other so the display rules for every numeric
+    type the dashboard renders are findable in one place.
+    """
+    return round(amount, 2)
+
+
+def format_money(amount: float) -> str:
+    """Format a USD cost as ``$X,XXX.XX``.
+
+    Combines `round_money` (clean 2-dp underlying value, so the
+    output never carries IEEE noise from upstream arithmetic) with
+    the ``$``-prefix + thousands-separator display rule. Use for any
+    user-facing cost string that does NOT flow through Streamlit's
+    `NumberColumn` formatter — `st.metric` values, captions,
+    expander labels, embedded delta strings, etc.
+
+    Inside a `NumberColumn` use `round_money` on the row value and
+    let `NumberColumn(format="$%.2f")` apply the formatter — that
+    keeps sorting / copy-paste numeric and avoids double-formatting.
+    """
+    return f"${round_money(amount):,.2f}"
+
+
 # --- Overview-page summary primitives ------------------------------------
 
 
