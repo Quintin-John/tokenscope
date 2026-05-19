@@ -2688,7 +2688,7 @@ def test_cache_renders_savings_hero(mock_ccusage, mock_ccusage_version) -> None:
     assert "tokenscope-cache-hero" in md, (
         f"expected savings hero markup; got md: {md!r}"
     )
-    assert "Estimated savings from caching" in md
+    assert "Estimated savings at Anthropic API rates" in md
     # The hero card carries either a real `$X.XX` figure or the
     # explicit "—" fallback. Either way it lands on the page.
     assert "tokenscope-cache-hero-value" in md
@@ -3140,7 +3140,7 @@ def test_cache_renders(mock_ccusage, mock_ccusage_version) -> None:
     # The Cache view's H1 + headline (savings hero) + supporting KPI row.
     md = "\n".join(m.value for m in at.markdown)
     assert "# Cache" in md
-    assert "Estimated savings from caching" in md
+    assert "Estimated savings at Anthropic API rates" in md
     assert "Cache hit ratio" in md
     labels = {m.label for m in at.metric}
     assert "Effective $ / 1M tokens" in labels
@@ -3217,19 +3217,22 @@ def test_cache_page_subtitle_explains_api_equivalent_on_flat_rate(
     )
 
 
-def test_cache_savings_hero_label_unchanged_on_enterprise(
+def test_cache_savings_hero_label_names_anthropic_rates_on_enterprise(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Default Enterprise plan keeps the `Estimated savings from
-    caching` hero label — the savings are real money saved."""
+    """Default Enterprise plan uses the `Estimated savings at
+    Anthropic API rates` hero label — names the rate source
+    explicitly instead of leaving `from caching` ambiguous about
+    which rate scenario the savings are measured against."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("cache")
     at.run()
     _assert_clean(at)
 
     md = "\n".join(m.value for m in at.markdown)
-    assert "Estimated savings from caching" in md, (
-        f"Enterprise hero missing `Estimated savings from caching` label"
+    assert "Estimated savings at Anthropic API rates" in md, (
+        f"Enterprise hero missing `Estimated savings at Anthropic "
+        f"API rates` label"
     )
     assert "API-equivalent savings" not in md, (
         f"flat-rate `API-equivalent savings` framing leaked on "
@@ -3261,29 +3264,31 @@ def test_cache_savings_hero_label_says_api_equivalent_on_flat_rate(
         f"flat-rate hero on {flat_rate_plan} missing "
         f"`API-equivalent savings from caching` label"
     )
-    # Enterprise label is `Estimated savings from caching`. That
-    # exact phrase is NOT a substring of `API-equivalent savings
-    # from caching`, so this assertion catches an accidental
-    # double-render or leak.
-    assert "Estimated savings from caching" not in md, (
+    # Enterprise label is `Estimated savings at Anthropic API rates`.
+    # That exact phrase is NOT a substring of `API-equivalent savings
+    # from caching`, so this assertion catches an accidental double-
+    # render or leak.
+    assert "Estimated savings at Anthropic API rates" not in md, (
         f"Enterprise label leaked on {flat_rate_plan} hero"
     )
 
 
-def test_cache_savings_hero_context_explains_actual_billing_on_enterprise(
+def test_cache_savings_hero_context_names_anthropic_rates_on_enterprise(
     mock_ccusage, mock_ccusage_version
 ) -> None:
     """When LiteLLM rates ARE available, Enterprise hero context
-    explains real billing semantics — "you actually paid $X" — and
-    must not pick up the flat-rate plan-fee framing."""
+    names the rate scenario explicitly with `Estimated bill at
+    Anthropic API rates` rather than claiming literal-billing
+    knowledge. Must not pick up the flat-rate plan-fee framing."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("cache")
     at.run()
     _assert_clean(at)
 
     md = "\n".join(m.value for m in at.markdown)
-    assert "you actually paid" in md, (
-        f"Enterprise hero context missing `you actually paid`"
+    assert "Estimated bill at Anthropic API rates" in md, (
+        f"Enterprise hero context missing `Estimated bill at "
+        f"Anthropic API rates`"
     )
     assert "monthly fee is fixed" not in md, (
         f"flat-rate `monthly fee is fixed` leaked on Enterprise hero"
@@ -3319,8 +3324,9 @@ def test_cache_savings_hero_context_explains_plan_decoupling_on_flat_rate(
         f"decoupling note"
     )
     # Enterprise framing must NOT leak.
-    assert "you actually paid" not in md, (
-        f"Enterprise `you actually paid` framing leaked on flat-rate"
+    assert "Estimated bill at Anthropic API rates" not in md, (
+        f"Enterprise `Estimated bill at Anthropic API rates` "
+        f"framing leaked on flat-rate"
     )
 
 
