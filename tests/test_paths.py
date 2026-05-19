@@ -97,7 +97,7 @@ def test_friendly_project_label_home_dir_itself() -> None:
     """Regression for the johnsmith bug: the home directory slug must
     NOT be rendered as 'johnsmith — Users/quintin'."""
     assert (
-        friendly_project_label(_HOME_SLUG_FOR_LABEL, home_slug=_HOME_SLUG_FOR_LABEL)
+        friendly_project_label(_HOME_SLUG_FOR_LABEL, home_slug_value=_HOME_SLUG_FOR_LABEL)
         == "~"
     )
 
@@ -106,7 +106,7 @@ def test_friendly_project_label_under_home() -> None:
     assert (
         friendly_project_label(
             "-Users-quintin-johnsmith-Documents-RiderProjects-WorldForge",
-            home_slug=_HOME_SLUG_FOR_LABEL,
+            home_slug_value=_HOME_SLUG_FOR_LABEL,
         )
         == "~/Documents-RiderProjects-WorldForge"
     )
@@ -119,7 +119,7 @@ def test_friendly_project_label_under_home_hyphenated_dir() -> None:
     assert (
         friendly_project_label(
             "-Users-quintin-johnsmith-Downloads-mini-ollama-ui",
-            home_slug=_HOME_SLUG_FOR_LABEL,
+            home_slug_value=_HOME_SLUG_FOR_LABEL,
         )
         == "~/Downloads-mini-ollama-ui"
     )
@@ -129,7 +129,7 @@ def test_friendly_project_label_outside_home() -> None:
     """Path not under home → strip leading dash, leave the rest verbatim."""
     assert (
         friendly_project_label(
-            "-Volumes-SSK-Drive--ManageLiterature", home_slug=_HOME_SLUG_FOR_LABEL
+            "-Volumes-SSK-Drive--ManageLiterature", home_slug_value=_HOME_SLUG_FOR_LABEL
         )
         == "Volumes-SSK-Drive--ManageLiterature"
     )
@@ -151,7 +151,7 @@ def test_friendly_project_label_passthrough() -> None:
 def test_friendly_project_label_home_lookalike() -> None:
     """A different user's home should not match — we require exact prefix."""
     result = friendly_project_label(
-        "-Users-jane-Documents-Hack", home_slug=_HOME_SLUG_FOR_LABEL
+        "-Users-jane-Documents-Hack", home_slug_value=_HOME_SLUG_FOR_LABEL
     )
     # No home match → fall back to leading-dash strip.
     assert result == "Users-jane-Documents-Hack"
@@ -414,3 +414,73 @@ def test_project_display_name_empty_passthrough() -> None:
     """Empty slug passes through unchanged — no traceback, no
     synthetic placeholder."""
     assert project_display_name("") == ""
+
+
+# ---------- CLAUDE_CONFIG_DIR override ----------
+#
+# `resolve_project_slug` looks for JSONL transcripts under the
+# Claude Code config dir. By default that's `~/.claude`, but Claude
+# Code itself honours `$CLAUDE_CONFIG_DIR` for users who relocate
+# their config (multi-host setups, alternate profiles, custom
+# mounts). tokenscope reads the same data, so the override must
+# route there too — otherwise project resolution silently fails
+# for every user who's moved their config.
+
+
+def test_resolve_project_slug_honours_claude_config_dir_env(
+    monkeypatch, tmp_path
+) -> None:
+    """With `$CLAUDE_CONFIG_DIR` set, the JSONL lookup roots at
+    `$CLAUDE_CONFIG_DIR/projects/<slug>/` instead of
+    `~/.claude/projects/<slug>/`. Same slug, different config root —
+    must resolve from the override."""
+    # Home points somewhere that has NO `.claude/projects/<slug>` —
+    # if the override is ignored, resolution will return None and
+    # the test fails.
+    home_dir = tmp_path / "fake-home"
+    home_dir.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home_dir)
+
+    override_dir = tmp_path / "elsewhere"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(override_dir))
+
+    slug = "-Users-test-proj"
+    cwd = "/Users/test/proj"
+    _write_session_jsonl(override_dir / "projects" / slug, cwd=cwd)
+
+    assert resolve_project_slug(slug) == Path(cwd)
+
+
+def test_resolve_project_slug_falls_back_to_home_when_env_unset(
+    monkeypatch, tmp_path
+) -> None:
+    """Without `$CLAUDE_CONFIG_DIR`, JSONL lookup roots at
+    `~/.claude/projects/<slug>/`. Confirms the override is opt-in;
+    the default behaviour stays unchanged when the env var is
+    absent."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    slug = "-Users-test-proj"
+    cwd = "/Users/test/proj"
+    _write_session_jsonl(tmp_path / ".claude" / "projects" / slug, cwd=cwd)
+
+    assert resolve_project_slug(slug) == Path(cwd)
+
+
+def test_resolve_project_slug_empty_env_uses_home(
+    monkeypatch, tmp_path
+) -> None:
+    """An *empty* `$CLAUDE_CONFIG_DIR` (set to `""`) is treated as
+    unset — falling back to `~/.claude`. Empty-string is a common
+    shell-misconfig footgun (`export CLAUDE_CONFIG_DIR=`); the
+    helper rejects it instead of resolving to `/projects/<slug>`
+    at the filesystem root."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    slug = "-Users-test-proj"
+    cwd = "/Users/test/proj"
+    _write_session_jsonl(tmp_path / ".claude" / "projects" / slug, cwd=cwd)
+
+    assert resolve_project_slug(slug) == Path(cwd)

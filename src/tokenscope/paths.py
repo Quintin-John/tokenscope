@@ -31,8 +31,38 @@ Public API:
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
+
+
+# Parent-dir names that mark a `/<parent>/<single-segment>` path as
+# "the user's home directory" on a POSIX host. `_is_home_dir` matches
+# against this tuple; tests for `project_display_name` exercise both
+# variants. Single source for the macOS-vs-Linux home-parent rule.
+_HOME_DIR_PARENT_NAMES = ("Users", "home")
+
+# Env var ccusage and Claude Code itself honour for redirecting the
+# `~/.claude` config directory. tokenscope reads it for the same
+# reason: a user who's moved their Claude config (multi-host setup,
+# alternate profile, custom mount) expects every tool that touches
+# that data to follow the redirection. Honoured in `_claude_config_dir`.
+_CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
+
+
+def _claude_config_dir() -> Path:
+    """Resolve Claude Code's config directory.
+
+    Returns `$CLAUDE_CONFIG_DIR` when set (matching ccusage / Claude
+    Code's own override convention), else `~/.claude`. Single source
+    for the config-dir lookup so any future ingestion path that
+    needs to read JSONL transcripts, settings, or other Claude Code
+    state honours the same redirection.
+    """
+    override = os.environ.get(_CLAUDE_CONFIG_DIR_ENV)
+    if override:
+        return Path(override)
+    return Path.home() / ".claude"
 
 
 @lru_cache(maxsize=1)
@@ -40,7 +70,7 @@ def home_slug() -> str:
     """Slug the current user's home dir the way ccusage encodes paths.
 
     `/Users/quintin-johnsmith` → `-Users-quintin-johnsmith`. Plumbed
-    into `friendly_project_label(slug, home_slug=...)` so the
+    into `friendly_project_label(slug, home_slug_value=...)` so the
     rendered Project value substitutes the prefix with `~`.
 
     Cached because `Path.home()` is a system property that doesn't
@@ -52,7 +82,7 @@ def home_slug() -> str:
     return "-" + str(Path.home()).lstrip("/").replace("/", "-")
 
 
-def friendly_project_label(slug: str, home_slug: str | None = None) -> str:
+def friendly_project_label(slug: str, home_slug_value: str | None = None) -> str:
     """Make a ccusage project slug scannable.
 
     ccusage encodes a project's absolute path as a slugified string with
@@ -65,19 +95,19 @@ def friendly_project_label(slug: str, home_slug: str | None = None) -> str:
     We deliberately do **not** try to recover directory structure. Instead:
 
     1. If the slug matches the user's home-directory slug (passed in as
-       `home_slug` — sidebar.py computes it from `pathlib.Path.home()`),
-       substitute the home prefix with `~`. That's where 90% of the
-       sidebar noise lives.
+       `home_slug_value` — `project_display_name` computes it from
+       `home_slug()`), substitute the home prefix with `~`. That's
+       where 90% of the sidebar noise lives.
     2. Otherwise, strip the leading `-` and leave the rest verbatim.
        The user reads "Volumes-SSK-Drive--Foo" and instantly recognises
        it as their external drive without us mangling it further.
 
-    The parameter name `home_slug` deliberately shadows the module-level
-    `home_slug()` function inside this scope — harmless because the
-    function body never calls `home_slug()`; every caller passes the
-    already-evaluated string in.
+    The parameter is the already-evaluated slug string, not the
+    module-level `home_slug` function — `_value` suffix marks the
+    distinction so the function body never collides with the
+    module-level callable.
 
-    Examples (with `home_slug="-Users-q-johnsmith"`):
+    Examples (with `home_slug_value="-Users-q-johnsmith"`):
         "-Users-q-johnsmith"                              → "~"
         "-Users-q-johnsmith-Documents-RiderProjects-tok"  → "~/Documents-RiderProjects-tok"
         "-Users-q-johnsmith-baremetal-audit"              → "~/baremetal-audit"
@@ -87,10 +117,10 @@ def friendly_project_label(slug: str, home_slug: str | None = None) -> str:
     """
     if not slug:
         return slug
-    if home_slug:
-        if slug == home_slug:
+    if home_slug_value:
+        if slug == home_slug_value:
             return "~"
-        prefix = home_slug + "-"
+        prefix = home_slug_value + "-"
         if slug.startswith(prefix):
             return "~/" + slug[len(prefix):]
     if slug.startswith("-"):
@@ -126,12 +156,17 @@ def resolve_project_slug(slug: str) -> Path | None:
     from, served by a file that IS available in the container.
     One source of truth, works in both environments.
 
-    Cached per slug. Tests that monkeypatch the filesystem must
-    call `resolve_project_slug.cache_clear()` between scenarios.
+    Config dir resolution goes through `_claude_config_dir()` so
+    a `$CLAUDE_CONFIG_DIR` override (Claude Code's own convention
+    for an alternate config root) routes to the right place.
+
+    Cached per slug. Tests that monkeypatch the filesystem or set
+    `$CLAUDE_CONFIG_DIR` must call `resolve_project_slug.cache_clear()`
+    between scenarios.
     """
     if not slug:
         return None
-    project_dir = Path.home() / ".claude" / "projects" / slug
+    project_dir = _claude_config_dir() / "projects" / slug
     if not project_dir.is_dir():
         return None
     for jsonl in sorted(project_dir.glob("*.jsonl")):
@@ -155,8 +190,9 @@ def resolve_project_slug(slug: str) -> Path | None:
 
 def _is_home_dir(path: Path) -> bool:
     """Heuristic: a path is "the user's home directory" iff it has
-    exactly three parts (`/`, `<users-dir>`, `<single-segment>`)
-    and the `<users-dir>` is `Users` (macOS) or `home` (Linux).
+    exactly three parts (`/`, `<parent>`, `<single-segment>`) and
+    `<parent>` appears in `_HOME_DIR_PARENT_NAMES` (`Users` on
+    macOS, `home` on Linux).
 
     Used to render `~` instead of the username basename when a
     project ran directly from the user's home dir. Container HOME
@@ -171,7 +207,7 @@ def _is_home_dir(path: Path) -> bool:
     return (
         len(parts) == 3
         and parts[0] == "/"
-        and parts[1] in ("Users", "home")
+        and parts[1] in _HOME_DIR_PARENT_NAMES
     )
 
 
@@ -183,7 +219,7 @@ def project_display_name(slug: str) -> str:
          for the user's home dir (per `_is_home_dir`), else the
          path's basename.
       2. JSONL doesn't yield a cwd → fall back to
-         `friendly_project_label(slug, home_slug=home_slug())`.
+         `friendly_project_label(slug, home_slug_value=home_slug())`.
          The slug appeared in ccusage's data but the transcripts
          are unavailable (mount missing, files trimmed, etc.); we
          still render *something* readable.
@@ -203,4 +239,4 @@ def project_display_name(slug: str) -> str:
         if _is_home_dir(resolved):
             return "~"
         return resolved.name
-    return friendly_project_label(slug, home_slug=home_slug())
+    return friendly_project_label(slug, home_slug_value=home_slug())
