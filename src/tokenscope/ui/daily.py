@@ -34,10 +34,21 @@ DRY / SOLID anchors:
   - `_round_money` (private) — single money-rounding rule,
     applied at the row-builder boundary so dataframe Cost cells
     carry clean 2-dp values (NumberColumn formats `$X.XX` on top).
-  - Module constants `_DAY_TOTAL_LABEL`, `_AGENT_BREAKDOWN_LABEL`,
-    `AGENT_CONSTRAINT_CAPTION`, `_EMPTY_WINDOW_MESSAGE`,
+  - `_row` (private) — single per-day-dataframe row builder.
+    Project sub-rows AND the day-total row delegate to it so the
+    9-column shape and the numeric-formatting rule live in one
+    place; adding / renaming a column requires one edit.
+  - `_format_model_list` (private) — single rule for rendering a
+    model-name list as a comma-joined string of display labels.
+  - `_summary_as_numerics` (private) — thin adapter that exposes
+    `DailySummary`'s six numeric fields as the dict shape `_row`
+    consumes, matching the shape `daily_project_aggregates`
+    already emits for project sub-rows. One row-builder
+    interface, two source types reach it through small adapters.
+  - Module constants `TOTAL_LABEL`, `AGENT_BREAKDOWN_LABEL`,
+    `AGGREGATE_PLACEHOLDER`, `AGENT_CONSTRAINT_CAPTION`,
     `KPI_LABEL_*` — every user-facing string lives in exactly
-    one place.
+    one place. Tests reference them by import.
 """
 
 from __future__ import annotations
@@ -108,18 +119,23 @@ KPI_HELP_AVG_PER_ACTIVE_DAY = (
 # Row-label constants. Every user-facing string in the table that
 # isn't a function-call result lives in one of these — tests
 # reference them by name, copy edits propagate from one place.
-#
-# (`_ALL_LABEL` from slice 8 was deleted along with `_all_row`:
-# the day-aggregate row moved into the per-day expander's label.
-# `_TOTAL_LABEL` was renamed to `_DAY_TOTAL_LABEL` after the
-# standalone window-total dataframe was replaced by per-day Total
-# rows; same string value, narrower scope.)
-_DAY_TOTAL_LABEL = "Total"
+# Public (no underscore) because the smoke tests import them.
+TOTAL_LABEL = "Total"
 # Leading dash mirrors ccusage's sub-row indent convention. The
 # "Claude Code" suffix keeps the agent label consistent with our
 # app's terminology (vs ccusage's bare "Claude" abbreviation) AND
 # with `AGENT_CONSTRAINT_CAPTION` above.
-_AGENT_BREAKDOWN_LABEL = "- Claude Code"
+AGENT_BREAKDOWN_LABEL = "- Claude Code"
+
+# Aggregate-row cell placeholder for Project and Models columns on
+# the day-total row. Non-empty (any cell value with `value === ""`
+# trips glide-data-grid's `isMissingValue` predicate and applies a
+# row-level `textDark → textLight` theme downshift that softens
+# every cell on the row). Visually reads as blank to the user.
+# Public (no underscore) because tests import it.
+#
+# Load-bearing invariant: must stay non-empty. Tests pin it.
+AGGREGATE_PLACEHOLDER = " "
 
 # Column-config for the Daily view's per-day dataframes. Same
 # column-type pattern as Overview's Cost-composition table —
@@ -330,50 +346,92 @@ def _day_expander_label(summary: DailySummary) -> str:
     )
 
 
-def _project_sub_row(project_row: dict) -> dict:
-    """Per-project breakdown row inside a day's expander. No Date
-    column (date is the expander label). Agent has the leading-dash
-    indent marker; Project is the resolved display name; Models is
-    the `, `-joined model labels for this (date, project) bucket in
-    per-model cost-desc order; Cost is money-rounded for clean
-    underlying cell values."""
+def _format_model_list(models: list[str]) -> str:
+    """Render a model-name list as a comma-joined string of display
+    labels. The one place the `", "` separator and the
+    `display_model_label` mapping live for the Daily view — if we
+    ever need to render a model list elsewhere, this is the helper
+    to consume (or to promote to `analytics.py` for cross-view
+    reuse)."""
+    return ", ".join(display_model_label(m) for m in models)
+
+
+def _summary_as_numerics(summary: DailySummary) -> dict:
+    """Adapter — exposes `DailySummary`'s six numeric fields as the
+    dict shape `_row` consumes (the same shape
+    `analytics.daily_project_aggregates` already emits for project
+    sub-rows). Bridges the two source types into one row-builder
+    interface; `total_tokens` is a `@property` on `DailySummary`,
+    not a stored field, so `dataclasses.asdict` would skip it —
+    enumerate explicitly."""
     return {
-        "Agent": _AGENT_BREAKDOWN_LABEL,
-        "Project": project_display_name(project_row["project"]),
-        "Models": ", ".join(
-            display_model_label(m) for m in project_row["models"]
-        ),
-        "Input": format_compact_int(project_row["input_tokens"]),
-        "Output": format_compact_int(project_row["output_tokens"]),
-        "Cache create": format_compact_int(project_row["cache_creation_tokens"]),
-        "Cache read": format_compact_int(project_row["cache_read_tokens"]),
-        "Total tokens": format_compact_int(project_row["total_tokens"]),
-        "Cost": _round_money(project_row["cost"]),
+        "input_tokens": summary.input_tokens,
+        "output_tokens": summary.output_tokens,
+        "cache_creation_tokens": summary.cache_creation_tokens,
+        "cache_read_tokens": summary.cache_read_tokens,
+        "total_tokens": summary.total_tokens,
+        "cost": summary.cost,
     }
+
+
+def _row(
+    *,
+    agent: str,
+    project: str,
+    models: str,
+    numerics: dict,
+) -> dict:
+    """The single per-day-dataframe row builder. Owns the 9-column
+    dict shape and every numeric-formatting call — adding a column
+    or changing a formatter requires editing this one function.
+
+    Callers supply the three label cells (`agent`, `project`,
+    `models`) and a `numerics` dict carrying the six numeric fields
+    (`input_tokens`, `output_tokens`, `cache_creation_tokens`,
+    `cache_read_tokens`, `total_tokens`, `cost`). Project sub-rows
+    pass `analytics.daily_project_aggregates`'s dict shape directly;
+    the day-total row passes `_summary_as_numerics(summary)`.
+    """
+    return {
+        "Agent": agent,
+        "Project": project,
+        "Models": models,
+        "Input": format_compact_int(numerics["input_tokens"]),
+        "Output": format_compact_int(numerics["output_tokens"]),
+        "Cache create": format_compact_int(numerics["cache_creation_tokens"]),
+        "Cache read": format_compact_int(numerics["cache_read_tokens"]),
+        "Total tokens": format_compact_int(numerics["total_tokens"]),
+        "Cost": _round_money(numerics["cost"]),
+    }
+
+
+def _project_sub_row(project_row: dict) -> dict:
+    """Per-project breakdown row inside a day's expander. Delegates
+    to `_row` so the column shape and numeric-formatting live in
+    one place; this function owns only the project-sub-row's
+    *label* trio (Agent indent marker + resolved project display
+    name + comma-joined model list)."""
+    return _row(
+        agent=AGENT_BREAKDOWN_LABEL,
+        project=project_display_name(project_row["project"]),
+        models=_format_model_list(project_row["models"]),
+        numerics=project_row,
+    )
 
 
 def _day_total_row(summary: DailySummary) -> dict:
     """Final row inside a day's per-day dataframe. Aggregates the
     project sub-rows above it — same `DailySummary` data the
     expander label carries, surfaced inside the dataframe so the
-    user reads the day total in-context with the breakdown rows
-    rather than scrolling to a page-level total.
+    user reads the day total in-context with the breakdown rows.
 
-    Agent = `_DAY_TOTAL_LABEL` ("Total"); Project / Models blank
-    (the aggregate spans all projects and all models for the day);
-    numerics from `DailySummary` via the same `format_compact_int`
-    / `_round_money` helpers the project sub-rows use, so header
-    cost, project-row numerics, and day-total numerics can't drift
-    on formatting.
-    """
-    return {
-        "Agent": _DAY_TOTAL_LABEL,
-        "Project": "",
-        "Models": "",
-        "Input": format_compact_int(summary.input_tokens),
-        "Output": format_compact_int(summary.output_tokens),
-        "Cache create": format_compact_int(summary.cache_creation_tokens),
-        "Cache read": format_compact_int(summary.cache_read_tokens),
-        "Total tokens": format_compact_int(summary.total_tokens),
-        "Cost": _round_money(summary.cost),
-    }
+    Delegates to `_row`; owns only the aggregate-row label trio
+    (`TOTAL_LABEL` + two `AGGREGATE_PLACEHOLDER` cells). The
+    placeholder must stay non-empty — see its constant docstring
+    for why."""
+    return _row(
+        agent=TOTAL_LABEL,
+        project=AGGREGATE_PLACEHOLDER,
+        models=AGGREGATE_PLACEHOLDER,
+        numerics=_summary_as_numerics(summary),
+    )

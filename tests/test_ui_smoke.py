@@ -1137,10 +1137,12 @@ def test_daily_per_day_dataframe_project_column_uses_display_name(
 ) -> None:
     """Project cells on the project sub-rows come from
     `project_display_name(slug)` — same helper the sidebar
-    dropdown consumes. The Total row's Project cell is blank
-    (aggregate spans all projects); blank values are skipped in
-    the rendered-set comparison."""
+    dropdown consumes. The day-total row's Project cell carries
+    `AGGREGATE_PLACEHOLDER` (aggregate spans all projects); we
+    mask the day-total row by Agent so the predicate matches the
+    same constant production uses to mark the row."""
     from tokenscope.paths import project_display_name
+    from tokenscope.ui.daily import TOTAL_LABEL
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
@@ -1156,9 +1158,9 @@ def test_daily_per_day_dataframe_project_column_uses_display_name(
 
     rendered: set[str] = set()
     for df in at.dataframe:
-        for value in df.value["Project"].tolist():
-            if value:  # skip the Total row's blank
-                rendered.add(value)
+        mask = df.value["Agent"] != TOTAL_LABEL
+        for value in df.value.loc[mask, "Project"].tolist():
+            rendered.add(value)
     assert rendered, "no project sub-rows rendered"
     assert rendered <= expected_displays, (
         f"rendered Project values not produced by project_display_name: "
@@ -1174,11 +1176,11 @@ def test_daily_each_day_dataframe_ends_with_day_total_row(
     mock_ccusage, mock_ccusage_version
 ) -> None:
     """Last row of every per-day dataframe has Agent ==
-    `_DAY_TOTAL_LABEL` — the row aggregates that day's project
-    sub-rows above it. Pins the new "totals live inside each day"
-    contract; a regression that drops the Total row or appends it
-    in the wrong place trips this."""
-    from tokenscope.ui.daily import _DAY_TOTAL_LABEL
+    `TOTAL_LABEL` — the row aggregates that day's project sub-rows
+    above it. Pins the "totals live inside each day" contract; a
+    regression that drops the Total row or appends it in the wrong
+    place trips this."""
+    from tokenscope.ui.daily import TOTAL_LABEL
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
@@ -1187,7 +1189,7 @@ def test_daily_each_day_dataframe_ends_with_day_total_row(
     assert at.dataframe, "no per-day dataframes rendered"
     for df in at.dataframe:
         last_row = df.value.iloc[-1]
-        assert last_row["Agent"] == _DAY_TOTAL_LABEL, (
+        assert last_row["Agent"] == TOTAL_LABEL, (
             f"last row Agent is not the day-total label: "
             f"{last_row['Agent']!r}"
         )
@@ -1202,7 +1204,7 @@ def test_daily_day_total_row_matches_day_summary(
     per-project costs. Pins the data invariant: the in-dataframe
     total must agree with the source data the expander label is
     derived from."""
-    from tokenscope.ui.daily import _DAY_TOTAL_LABEL, _round_money
+    from tokenscope.ui.daily import TOTAL_LABEL, _round_money
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
@@ -1219,22 +1221,37 @@ def test_daily_day_total_row_matches_day_summary(
     for exp, df in zip(at.expander, at.dataframe):
         date = exp.label.split(" · ", 1)[0]
         last_row = df.value.iloc[-1]
-        assert last_row["Agent"] == _DAY_TOTAL_LABEL
+        assert last_row["Agent"] == TOTAL_LABEL
         assert last_row["Cost"] == _round_money(cost_by_date[date]), (
             f"day-total cost for {date!r}: row={last_row['Cost']}, "
             f"fixture={_round_money(cost_by_date[date])}"
         )
 
 
-def test_daily_day_total_row_carries_blank_project_and_models(
+def test_daily_day_total_row_carries_aggregate_placeholder_for_project_and_models(
     mock_ccusage, mock_ccusage_version
 ) -> None:
     """The day-total row aggregates across every project and every
-    model for the day. Project and Models cells are blank — a
-    regression that accidentally fills them (e.g. with a project
-    name from the last sub-row) would misrepresent the aggregate
-    as project-specific."""
-    from tokenscope.ui.daily import _DAY_TOTAL_LABEL
+    model for the day. Project and Models cells use
+    `AGGREGATE_PLACEHOLDER` (single space) — NOT empty string.
+
+    Why not empty string: glide-data-grid flags empty-string cells
+    as `isMissingValue` and applies a row-level theme downshift
+    that softens every cell on the row (confirmed empirically;
+    see `AGGREGATE_PLACEHOLDER` docstring in `ui/daily.py`).
+
+    Why not actual content (project name / model list): the
+    aggregate row spans every project and model for the day; a
+    specific value would misrepresent it as project-specific.
+
+    Two regression guards:
+      - Cell value equals `AGGREGATE_PLACEHOLDER` — a future
+        change to `""` re-triggers the soft-row rendering.
+      - Cell content is whitespace-only — a future change to an
+        actual project name or model string leaks specifics into
+        the aggregate row.
+    """
+    from tokenscope.ui.daily import AGGREGATE_PLACEHOLDER, TOTAL_LABEL
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
@@ -1242,15 +1259,44 @@ def test_daily_day_total_row_carries_blank_project_and_models(
     _assert_clean(at)
     for df in at.dataframe:
         last_row = df.value.iloc[-1]
-        assert last_row["Agent"] == _DAY_TOTAL_LABEL
-        assert last_row["Project"] == "", (
-            f"day-total row carries Project={last_row['Project']!r}; "
-            f"should be blank (aggregate spans all projects)"
+        assert last_row["Agent"] == TOTAL_LABEL
+        assert last_row["Project"] == AGGREGATE_PLACEHOLDER, (
+            f"day-total row Project={last_row['Project']!r}; "
+            f"expected the aggregate placeholder. Empty string "
+            f"re-triggers the row-level theme downshift bug."
         )
-        assert last_row["Models"] == "", (
-            f"day-total row carries Models={last_row['Models']!r}; "
-            f"should be blank (aggregate spans all models)"
+        assert last_row["Models"] == AGGREGATE_PLACEHOLDER, (
+            f"day-total row Models={last_row['Models']!r}; "
+            f"expected the aggregate placeholder."
         )
+        # Content-leak guard: even if the placeholder constant
+        # changes value, the aggregate row must stay whitespace-only.
+        assert last_row["Project"].strip() == "", (
+            "day-total row leaked non-whitespace into Project — "
+            "aggregate cell should not carry a specific project name"
+        )
+        assert last_row["Models"].strip() == "", (
+            "day-total row leaked non-whitespace into Models — "
+            "aggregate cell should not carry specific model names"
+        )
+
+
+def test_aggregate_placeholder_is_non_empty() -> None:
+    """Load-bearing invariant: `AGGREGATE_PLACEHOLDER` MUST be
+    non-empty. Empty string trips glide-data-grid's `isMissingValue`
+    predicate and applies a row-level theme downshift that softens
+    every cell on the row — the bug this constant exists to avoid.
+
+    Pinning the invariant at the constant level catches a future
+    refactor that accidentally sets the placeholder to `""` even if
+    the smoke tests above somehow miss the regression."""
+    from tokenscope.ui.daily import AGGREGATE_PLACEHOLDER
+
+    assert AGGREGATE_PLACEHOLDER != "", (
+        "AGGREGATE_PLACEHOLDER must be non-empty — empty string "
+        "re-triggers the glide-data-grid row-level theme downshift "
+        "that this constant was introduced to fix."
+    )
 
 
 def test_daily_cost_values_rounded_to_two_decimal_places(
