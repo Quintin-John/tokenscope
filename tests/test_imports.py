@@ -172,6 +172,10 @@ def test_analytics_public_surface() -> None:
         "available_models_by_project",
         "cells_for_date",
         "pluralize",
+        "peak_day",
+        "active_days_count",
+        "avg_cost_per_active_day",
+        "busiest_model",
     ):
         assert callable(getattr(analytics, name)), name
 

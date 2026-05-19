@@ -18,10 +18,13 @@ from tokenscope.analytics import (
     DailySummary,
     WindowTotals,
     active_block_burn,
+    active_days_count,
     aggregate_cache_hit_ratio,
     available_models,
     available_models_by_project,
+    avg_cost_per_active_day,
     block_cache_hit_ratio,
+    busiest_model,
     block_cost_by_kind,
     blocks_for_session,
     blocks_on_day,
@@ -52,6 +55,7 @@ from tokenscope.analytics import (
     friendly_project_label,
     last_day_cost,
     overview_insight,
+    peak_day,
     spike_day,
     model_breakdown,
     model_family,
@@ -2850,6 +2854,166 @@ def test_filter_daily_by_project_models_matches_daily_by_models_semantics() -> N
 
 
 # ---------- filter_daily_by_models regression: project preservation ----------
+
+
+# ---------- Daily KPI helpers (Slice 5) ----------
+
+
+def _summary(date: str, cost: float, models: int = 1, projects: int = 1) -> DailySummary:
+    """Minimal `DailySummary` factory for KPI tests. Token fields are
+    1/2/3/4 so total_tokens=10 — the KPI functions don't read tokens,
+    so any non-zero pattern works."""
+    return DailySummary(
+        date=date,
+        input_tokens=1,
+        output_tokens=2,
+        cache_creation_tokens=3,
+        cache_read_tokens=4,
+        cost=cost,
+        distinct_models=models,
+        distinct_projects=projects,
+    )
+
+
+def _cell(date: str, model: str, cost: float, project: str = "-A") -> DailyCell:
+    """Minimal `DailyCell` factory for KPI tests."""
+    return DailyCell(
+        date=date,
+        model=model,
+        project=project,
+        input_tokens=1,
+        output_tokens=2,
+        cache_creation_tokens=3,
+        cache_read_tokens=4,
+        cost=cost,
+    )
+
+
+# ---------- peak_day ----------
+
+
+def test_peak_day_empty_input_is_none() -> None:
+    """The KPI card renders `—` for empty windows; analytics returns
+    None so the renderer's branch is explicit, not a magic sentinel
+    value like `("", 0.0)`."""
+    assert peak_day([]) is None
+
+
+def test_peak_day_returns_highest_cost_day() -> None:
+    summaries = [
+        _summary("2026-05-14", cost=10.0),
+        _summary("2026-05-15", cost=50.0),
+        _summary("2026-05-16", cost=30.0),
+    ]
+    assert peak_day(summaries) == ("2026-05-15", 50.0)
+
+
+def test_peak_day_ties_break_by_latest_date() -> None:
+    """Deterministic tie-break: when two days have identical cost,
+    the more recent one is the peak. Avoids flicker between renders
+    on identical inputs."""
+    summaries = [
+        _summary("2026-05-14", cost=20.0),
+        _summary("2026-05-16", cost=20.0),
+        _summary("2026-05-15", cost=20.0),
+    ]
+    date, cost = peak_day(summaries)
+    assert (date, cost) == ("2026-05-16", 20.0)
+
+
+# ---------- active_days_count ----------
+
+
+def test_active_days_count_empty_is_zero() -> None:
+    assert active_days_count([]) == 0
+
+
+def test_active_days_count_equals_summary_count() -> None:
+    """`daily_summaries` only emits a row for dates that produced
+    cells, so the count of summaries IS the count of active days."""
+    summaries = [
+        _summary("2026-05-14", cost=1.0),
+        _summary("2026-05-15", cost=2.0),
+        _summary("2026-05-16", cost=3.0),
+    ]
+    assert active_days_count(summaries) == 3
+
+
+# ---------- avg_cost_per_active_day ----------
+
+
+def test_avg_cost_per_active_day_empty_is_zero() -> None:
+    """Zero on empty input — the renderer's empty-window branch
+    short-circuits before this is shown, but the function must not
+    raise on the path that builds the KPI strip from an empty list."""
+    assert avg_cost_per_active_day([]) == pytest.approx(0.0)
+
+
+def test_avg_cost_per_active_day_distinguishes_from_window_avg() -> None:
+    """The whole point of this KPI: it weights only active days,
+    NOT window length. Same cost across 3 active days yields
+    cost/3, regardless of how big the window was."""
+    summaries = [
+        _summary("2026-05-14", cost=30.0),
+        _summary("2026-05-15", cost=60.0),
+        _summary("2026-05-16", cost=90.0),
+    ]
+    # 180 / 3 = 60 (NOT 180 / window_days for any larger window).
+    assert avg_cost_per_active_day(summaries) == pytest.approx(60.0)
+
+
+# ---------- busiest_model ----------
+
+
+def test_busiest_model_empty_is_none() -> None:
+    assert busiest_model([]) is None
+
+
+def test_busiest_model_zero_total_is_none() -> None:
+    """Defensive: all-zero-cost cells (pathological but legal in the
+    pydantic schema) yield None rather than a divide-by-zero or a
+    misleading "100% share" report."""
+    cells = [_cell("2026-05-16", "claude-opus-4-7", cost=0.0)]
+    assert busiest_model(cells) is None
+
+
+def test_busiest_model_returns_top_with_share() -> None:
+    cells = [
+        _cell("2026-05-14", "claude-opus-4-7", cost=90.0),
+        _cell("2026-05-15", "claude-haiku-4-5", cost=10.0),
+    ]
+    name, share = busiest_model(cells)
+    assert name == "claude-opus-4-7"
+    assert share == pytest.approx(0.9)
+
+
+def test_busiest_model_aggregates_across_dates_and_projects() -> None:
+    """Window-wide rollup: cells of the same model on different
+    dates and projects sum into a single bucket. The KPI is
+    "busiest model across the WHOLE window", not "model that
+    dominated the busiest day"."""
+    cells = [
+        _cell("2026-05-14", "claude-opus-4-7", cost=20.0, project="-A"),
+        _cell("2026-05-14", "claude-opus-4-7", cost=30.0, project="-B"),
+        _cell("2026-05-15", "claude-opus-4-7", cost=10.0, project="-A"),
+        _cell("2026-05-15", "claude-haiku-4-5", cost=40.0, project="-A"),
+    ]
+    name, share = busiest_model(cells)
+    # opus: 20+30+10 = 60; haiku: 40; total: 100; opus share = 0.6.
+    assert name == "claude-opus-4-7"
+    assert share == pytest.approx(0.6)
+
+
+def test_busiest_model_ties_break_by_name_descending() -> None:
+    """Deterministic tie-break: when two models have identical
+    cost totals, the lexicographically-greater name wins. Avoids
+    flicker between renders."""
+    cells = [
+        _cell("2026-05-14", "claude-opus-4-7", cost=50.0),
+        _cell("2026-05-14", "claude-haiku-4-5", cost=50.0),
+    ]
+    name, _share = busiest_model(cells)
+    assert name == "claude-opus-4-7"
 
 
 # ---------- cells_for_date ----------

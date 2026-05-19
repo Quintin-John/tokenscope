@@ -609,26 +609,18 @@ def test_live_renders(mock_ccusage, mock_ccusage_version) -> None:
 # ---------- Daily view (slice 2: header + totals card) ----------
 
 
-def _daily_totals_from_fixture() -> dict[str, int | float]:
-    """Read the expected window totals straight off the fixture JSON
-    so the smoke assertions stay tied to the source data, not
-    duplicated literals. If ccusage's report shape ever drifts, this
-    helper trips at JSON-decode time rather than masking a regression
-    behind a wrong magic number."""
-    raw = json.loads(
-        (FIXTURES / "daily_by_project.json").read_text()
-    )
-    return raw["totals"]
-
-
 def test_daily_renders(mock_ccusage, mock_ccusage_version) -> None:
     """Daily tab renders cleanly and surfaces the `# Daily` H1 + the
-    window-totals metric strip. The totals strip carries one metric
-    per column in `ui.daily._COLUMNS` — same tuple that drives
-    slice 3's per-day sub-table — so the column count and labels
-    are derived from the single source of truth, not hard-coded here.
+    four-card KPI strip. Labels come from the module-level
+    `KPI_LABEL_*` constants — tests and renderer reference the same
+    source so a copy edit propagates without dual maintenance.
     """
-    from tokenscope.ui.daily import _COLUMNS
+    from tokenscope.ui.daily import (
+        KPI_LABEL_ACTIVE_DAYS,
+        KPI_LABEL_AVG_PER_ACTIVE_DAY,
+        KPI_LABEL_BUSIEST_MODEL,
+        KPI_LABEL_PEAK_DAY,
+    )
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
@@ -637,40 +629,166 @@ def test_daily_renders(mock_ccusage, mock_ccusage_version) -> None:
     md = "\n".join(m.value for m in at.markdown)
     assert "# Daily" in md, f"expected `# Daily` H1; got: {md!r}"
 
-    # Every column in `_COLUMNS` produces an st.metric with the spec's
-    # label. AppTest exposes metrics as `at.metric` — labels (not
-    # values) are pinned because the value formatting belongs to the
-    # `_ColumnSpec.formatter` and is checked independently in the
-    # totals-value test below.
     metric_labels = {m.label for m in at.metric}
-    for spec in _COLUMNS:
-        assert spec.label in metric_labels, (
-            f"Daily totals card missing metric for column {spec.label!r}; "
+    for label in (
+        KPI_LABEL_PEAK_DAY,
+        KPI_LABEL_ACTIVE_DAYS,
+        KPI_LABEL_AVG_PER_ACTIVE_DAY,
+        KPI_LABEL_BUSIEST_MODEL,
+    ):
+        assert label in metric_labels, (
+            f"Daily KPI strip missing metric {label!r}; "
             f"saw labels: {metric_labels!r}"
         )
 
 
-def test_daily_totals_card_values_match_fixture_totals(
+def _fixture_peak_day() -> tuple[str, float]:
+    """Derive the expected (date, cost) of the fixture's peak day
+    directly from the JSON so the assertion stays tied to the source."""
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    cost_by_date: dict[str, float] = {}
+    for entries in raw["projects"].values():
+        for e in entries:
+            cost_by_date[e["date"]] = cost_by_date.get(e["date"], 0.0) + e["totalCost"]
+    # Tie-break: latest date wins, matching `analytics.peak_day`.
+    date = max(cost_by_date, key=lambda d: (cost_by_date[d], d))
+    return date, cost_by_date[date]
+
+
+def _fixture_active_days() -> int:
+    return len(_fixture_distinct_dates())
+
+
+def _fixture_busiest_model() -> tuple[str, float]:
+    """Derive the expected (model, share) of the fixture's busiest
+    model directly from the JSON."""
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    cost_by_model: dict[str, float] = {}
+    total = 0.0
+    for entries in raw["projects"].values():
+        for e in entries:
+            for b in e["modelBreakdowns"]:
+                cost_by_model[b["modelName"]] = (
+                    cost_by_model.get(b["modelName"], 0.0) + b["cost"]
+                )
+                total += b["cost"]
+    # Tie-break: lexicographically-greater name wins, matching
+    # `analytics.busiest_model`.
+    model = max(cost_by_model, key=lambda m: (cost_by_model[m], m))
+    return model, cost_by_model[model] / total
+
+
+def test_daily_kpi_peak_day_matches_fixture(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """The totals card's `Cost` metric must equal the fixture's
-    `totals.totalCost` (formatted as `$x,xxx.xx`). Pins the
-    load-bearing invariant from slice 1
-    (`window_totals(daily_cells(report)) == report.totals`) all the
-    way through to the rendered metric — if any layer breaks the
-    invariant, the rendered value would diverge from the fixture's
-    own totals."""
+    """Peak-day card surfaces the right (date, cost) for the fixture.
+    Pins the analytics → renderer chain — if `peak_day` or its UI
+    consumer drifts, the displayed values diverge from the source."""
+    from tokenscope.ui.daily import KPI_LABEL_PEAK_DAY
+
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
+    expected_date, expected_cost = _fixture_peak_day()
+    metric = next(m for m in at.metric if m.label == KPI_LABEL_PEAK_DAY)
+    assert metric.value == f"${expected_cost:,.2f}"
+    # Caption carries the date so users see which day peaked.
+    caption_text = "\n".join(c.value for c in at.caption)
+    assert f"on {expected_date}" in caption_text
 
-    expected = _daily_totals_from_fixture()
-    cost_metric = next(
-        (m for m in at.metric if m.label == "Cost"), None
+
+def test_daily_kpi_active_days_matches_fixture(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Active-days card shows `N / window_days` where N is the count
+    of distinct dates in the fixture. The denominator comes from
+    the sidebar's query window; the numerator comes from the data."""
+    from tokenscope.ui.daily import KPI_LABEL_ACTIVE_DAYS
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    metric = next(m for m in at.metric if m.label == KPI_LABEL_ACTIVE_DAYS)
+    # `<active>` / `<window_days>` — assert active is right; the
+    # window length depends on the sidebar default and isn't worth
+    # pinning here (covered by sidebar tests).
+    active_str = metric.value.split("/")[0].strip()
+    assert int(active_str) == _fixture_active_days()
+
+
+def test_daily_kpi_avg_per_active_day_uses_active_denominator(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Avg-per-active-day card displays `total_cost / active_days`,
+    NOT `total_cost / window_days`. The distinction from Overview's
+    `Avg daily cost` is the entire point of this KPI — pinning the
+    denominator here prevents accidental regression to the
+    Overview-style calculation."""
+    from tokenscope.ui.daily import KPI_LABEL_AVG_PER_ACTIVE_DAY
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
     )
-    assert cost_metric is not None, "Daily totals card has no Cost metric"
-    assert cost_metric.value == f"${expected['totalCost']:,.2f}"
+    total = raw["totals"]["totalCost"]
+    expected = total / _fixture_active_days()
+    metric = next(
+        m for m in at.metric if m.label == KPI_LABEL_AVG_PER_ACTIVE_DAY
+    )
+    assert metric.value == f"${expected:,.2f}"
+
+
+def test_daily_kpi_busiest_model_matches_fixture(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Busiest-model card surfaces the model with the largest share
+    of window cost. Caption carries the share as a percentage."""
+    from tokenscope.analytics import short_model_label
+    from tokenscope.ui.daily import KPI_LABEL_BUSIEST_MODEL
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    expected_model, expected_share = _fixture_busiest_model()
+    metric = next(
+        m for m in at.metric if m.label == KPI_LABEL_BUSIEST_MODEL
+    )
+    # Slice 5 uses `short_model_label` for the model display; slice 6
+    # will swap that for `display_model_label`. Test follows the
+    # renderer's current formatter via the same helper.
+    assert metric.value == short_model_label(expected_model)
+    caption_text = "\n".join(c.value for c in at.caption)
+    assert f"{expected_share:.1%} of window spend" in caption_text
+
+
+def test_daily_day_expanders_open_by_default(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Day expanders render in the open state so the user lands on
+    the breakdowns without per-row clicking. Streamlit preserves
+    user collapses within a session — this contract is the INITIAL
+    state on fresh renders only."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    for exp in at.expander:
+        # AppTest's `Expander` surfaces the initial-expanded state on
+        # its underlying protobuf (`proto.expanded`); there's no
+        # Python-attribute accessor for it.
+        assert exp.proto.expanded is True, (
+            f"expander {exp.label!r} did not open by default"
+        )
 
 
 def test_daily_empty_window_renders_info_message(

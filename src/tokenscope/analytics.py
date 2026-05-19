@@ -742,6 +742,69 @@ def daily_summaries(cells: Iterable[DailyCell]) -> list[DailySummary]:
     return summaries
 
 
+def peak_day(summaries: Iterable[DailySummary]) -> tuple[str, float] | None:
+    """`(date, cost)` of the highest-cost day in `summaries`, or
+    `None` when the input is empty. Ties broken by latest date
+    (more recent peak wins) — a deterministic rule a user can
+    reason about when two days happen to cost the same.
+    """
+    materialised = list(summaries)
+    if not materialised:
+        return None
+    top = max(materialised, key=lambda s: (s.cost, s.date))
+    return top.date, top.cost
+
+
+def active_days_count(summaries: Iterable[DailySummary]) -> int:
+    """Number of days with at least one ccusage cell in the window.
+    Equivalent to `len(summaries)` since `daily_summaries` only emits
+    a row for dates that produced cells — the wrapper exists so the
+    KPI card's denominator has a semantic name and the rule is
+    testable in isolation.
+    """
+    return sum(1 for _ in summaries)
+
+
+def avg_cost_per_active_day(summaries: Iterable[DailySummary]) -> float:
+    """Total window cost divided by `active_days_count`. Zero on
+    empty input (avoids ZeroDivisionError; the Daily renderer's
+    empty-window branch short-circuits before this is shown).
+
+    Distinct from `window_cost / window_days` (which the Overview
+    KPI card surfaces): this metric weights only days that actually
+    spent. A 30-day window with 5 active days at $20 each yields
+    $20 here vs $3.33 on Overview.
+    """
+    materialised = list(summaries)
+    if not materialised:
+        return 0.0
+    return sum(s.cost for s in materialised) / len(materialised)
+
+
+def busiest_model(cells: Iterable[DailyCell]) -> tuple[str, float] | None:
+    """`(model_name, share)` of the highest-cost model in the cell
+    set, where `share` is the model's fraction of total cost
+    (0.0 — 1.0). `None` when there are no cells.
+
+    Aggregates cost per `model` (ignoring date and project) so the
+    answer is window-wide, not per-day. Ties broken by model name
+    descending — deterministic so two models with identical cost
+    don't flicker between renders.
+    """
+    materialised = list(cells)
+    if not materialised:
+        return None
+    cost_by_model: dict[str, float] = {}
+    total = 0.0
+    for c in materialised:
+        cost_by_model[c.model] = cost_by_model.get(c.model, 0.0) + c.cost
+        total += c.cost
+    if total <= 0:
+        return None
+    top_name = max(cost_by_model, key=lambda m: (cost_by_model[m], m))
+    return top_name, cost_by_model[top_name] / total
+
+
 def cells_for_date(cells: Iterable[DailyCell], date_str: str) -> list[DailyCell]:
     """Return the subset of `cells` whose `date == date_str`, sorted by
     cost descending so the renderer iterates "where the money went"

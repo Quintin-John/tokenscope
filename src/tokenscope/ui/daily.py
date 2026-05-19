@@ -2,21 +2,29 @@
 
 Surface (top-to-bottom):
 
-  * `# Daily` H1 + window / timezone caption.
+  * `# Daily` H1 + window/timezone caption + agent-constraint caption.
   * Plan banner (when the active plan supplies one).
-  * Window-totals card (slice 2) — bordered `st.metric` strip with
-    one column per kind, derived from `_COLUMNS`.
+  * KPI strip (slice 5) — four bordered metric cards answering
+    questions Overview doesn't: peak day, active-days fraction,
+    avg-per-active-day, busiest model.
   * Per-day expanders (slice 3) — one expander per date in the
     window, descending order. The collapsed header carries the
     day's totals so the user can scan without expanding. Expanded,
     each shows a `(model, project)` sub-table sorted by cost desc.
 
-Single source of truth for the column grid: `_COLUMNS` for the
-totals card, `_DAY_SUBTABLE_COLUMNS = (model, project, *_COLUMNS)`
-for the sub-table. Both are tuples of `_ColumnSpec(label, attr,
-kind)`; the `kind` discriminator drives formatting and (for the
-sub-table) the `st.column_config` rule. One column-grid definition,
-two render contexts, no parallel literal lists.
+Slice 5 replaced the window-totals strip (slice 2) with the four
+KPI cards above. The cost/tokens-by-kind window-wide rollup that
+strip surfaced already lives on Overview's Cost-composition table —
+duplicating it here added nothing Daily-specific. The KPI strip
+answers per-day-distribution questions Overview can't.
+
+Single source of truth for the per-day sub-table grid:
+`_COLUMNS` (numeric columns) and `_DAY_SUBTABLE_COLUMNS = (model,
+project, *_COLUMNS)`. Both are tuples of `_ColumnSpec(label, attr,
+kind)`; the `kind` discriminator drives formatting and the
+`st.column_config` rule. One column-grid definition, one render
+context now (sub-table only after slice 5), no parallel literal
+lists.
 """
 
 from __future__ import annotations
@@ -30,16 +38,18 @@ from tokenscope import config
 from tokenscope.analytics import (
     DailyCell,
     DailySummary,
-    WindowTotals,
+    active_days_count,
+    avg_cost_per_active_day,
+    busiest_model,
     cells_for_date,
     daily_cells,
     daily_summaries,
     format_compact_int,
     format_timezone_for_display,
     friendly_project_label,
+    peak_day,
     pluralize,
     short_model_label,
-    window_totals,
 )
 from tokenscope.navigation import Navigation
 from tokenscope.paths import home_slug
@@ -65,6 +75,36 @@ AGENT_CONSTRAINT_CAPTION = (
     "All traffic is Claude Code — ccusage reads Claude Code "
     "transcripts only. SDK / console / third-party traffic is not "
     "visible here."
+)
+
+
+# KPI card labels and tooltip — module-level constants so the
+# renderer copy and smoke-test assertions reference one source
+# rather than racing string literals. Each KPI answers a question
+# the Overview tab doesn't answer:
+#
+#   Peak day                 — date + cost of the most expensive
+#                              day in the window.
+#   Active days              — N / window_days; how concentrated
+#                              the spend was in time.
+#   Avg per active day       — cost ÷ active days. Distinct from
+#                              Overview's "Avg daily cost" which
+#                              divides by window length. Tooltip
+#                              spells out the denominator.
+#   Busiest model            — top-cost model window-wide + its
+#                              share of total spend. Pairs with
+#                              the Claude Code chip; saves a click
+#                              into the Models tab.
+KPI_LABEL_PEAK_DAY = "Peak day"
+KPI_LABEL_ACTIVE_DAYS = "Active days"
+KPI_LABEL_AVG_PER_ACTIVE_DAY = "Avg per active day"
+KPI_LABEL_BUSIEST_MODEL = "Busiest model"
+
+KPI_HELP_AVG_PER_ACTIVE_DAY = (
+    "Total window cost divided by days that actually had activity, "
+    "NOT by window length. The Overview tab's `Avg daily cost` "
+    "divides by window length instead — use that to compare windows "
+    "of different lengths; use this to weight by busy days only."
 )
 
 
@@ -147,8 +187,10 @@ def render(state: SidebarState, nav: Navigation) -> None:
         )
         return
 
-    _render_totals_card(window_totals(cells))
-    _render_day_rows(cells, daily_summaries(cells))
+    summaries = daily_summaries(cells)
+    window_days = state.query.window_days() or config.DEFAULT_RANGE_DAYS
+    _render_kpi_strip(summaries, cells, window_days)
+    _render_day_rows(cells, summaries)
 
 
 def _render_page_header(state: SidebarState) -> None:
@@ -166,28 +208,87 @@ def _render_page_header(state: SidebarState) -> None:
     st.caption(AGENT_CONSTRAINT_CAPTION)
 
 
-def _render_totals_card(totals: WindowTotals) -> None:
-    """Window-wide totals — one bordered `st.metric` per column in
-    `st.columns(len(_COLUMNS))`. Matches the Overview / Models KPI
-    strip pattern.
+def _render_kpi_strip(
+    summaries: list[DailySummary],
+    cells: list[DailyCell],
+    window_days: int,
+) -> None:
+    """Four Daily-specific KPI cards in a bordered row. Each card
+    answers a question the Overview tab doesn't:
+
+      1. Peak day                — the most expensive day in the
+                                   window (date + cost).
+      2. Active days             — `N / window_days`; how
+                                   concentrated the spend was.
+      3. Avg per active day      — cost ÷ active days. Tooltip
+                                   spells out the distinction from
+                                   Overview's `Avg daily cost`
+                                   (which divides by window length).
+      4. Busiest model           — top-cost model across the window
+                                   + its share of spend. Pairs
+                                   with the Claude Code agent chip.
+
+    Inputs are the already-computed `summaries` / `cells` from
+    `render()`; no data refetch.
+
+    None-handling: `peak_day` and `busiest_model` return None on
+    empty input. The renderer's empty-window branch short-circuits
+    before this strip is shown, so the `is None` branches below
+    are defensive (e.g. fixture / monkeypatch paths) — they render
+    `—` with a "no activity" caption rather than crashing.
     """
-    cols = st.columns(len(_COLUMNS))
-    for col, spec in zip(cols, _COLUMNS):
-        with col, st.container(border=True):
-            st.metric(spec.label, _metric_value(spec, totals))
+    peak = peak_day(summaries)
+    active = active_days_count(summaries)
+    avg_active = avg_cost_per_active_day(summaries)
+    busiest = busiest_model(cells)
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1, st.container(border=True):
+        if peak is None:
+            st.metric(KPI_LABEL_PEAK_DAY, "—")
+            st.caption("no activity in window")
+        else:
+            date, cost = peak
+            st.metric(KPI_LABEL_PEAK_DAY, _fmt_cost(cost))
+            st.caption(f"on {date}")
+
+    with c2, st.container(border=True):
+        st.metric(KPI_LABEL_ACTIVE_DAYS, f"{active} / {window_days}")
+        st.caption("days with activity")
+
+    with c3, st.container(border=True):
+        st.metric(
+            KPI_LABEL_AVG_PER_ACTIVE_DAY,
+            _fmt_cost(avg_active),
+            help=KPI_HELP_AVG_PER_ACTIVE_DAY,
+        )
+        st.caption(f"across {pluralize(active, 'active day')}")
+
+    with c4, st.container(border=True):
+        if busiest is None:
+            st.metric(KPI_LABEL_BUSIEST_MODEL, "—")
+            st.caption("no models in window")
+        else:
+            model, share = busiest
+            st.metric(KPI_LABEL_BUSIEST_MODEL, short_model_label(model))
+            st.caption(f"{share:.1%} of window spend")
 
 
 def _render_day_rows(
     cells: list[DailyCell], summaries: list[DailySummary]
 ) -> None:
-    """One `st.expander` per day in descending date order. Collapsed
-    header surfaces the day's totals so a user scanning the list can
-    spot the high-cost day without expanding every row. Expanded,
-    each shows the `(model, project)` sub-table for that date.
+    """One `st.expander` per day in descending date order. Expanders
+    open by default — manually clicking each one to inspect a day's
+    breakdown is friction without a payoff (the header carries the
+    summary fields, but the sub-table is what the user came here for).
+    Streamlit preserves the user's collapse choice across reruns
+    within a session, so anyone who wants the scan-only view can
+    collapse a row once and it stays collapsed.
     """
     home = home_slug()
     for summary in summaries:
-        with st.expander(_day_header(summary)):
+        with st.expander(_day_header(summary), expanded=True):
             _render_day_subtable(cells_for_date(cells, summary.date), home)
 
 
@@ -233,21 +334,6 @@ def _render_day_subtable(day_cells: list[DailyCell], home: str) -> None:
         width="stretch",
         hide_index=True,
         column_config=column_config,
-    )
-
-
-def _metric_value(spec: _ColumnSpec, source: WindowTotals) -> str:
-    """Format a `WindowTotals` field for the totals-card `st.metric`.
-    The totals card only carries numeric kinds — "model" / "project"
-    have no meaning at window scope and would indicate a bug if a
-    label-kind column reached this dispatch."""
-    value = getattr(source, spec.attr)
-    if spec.kind == "tokens":
-        return _fmt_tokens(value)
-    if spec.kind == "cost":
-        return _fmt_cost(value)
-    raise ValueError(
-        f"_metric_value: kind {spec.kind!r} is not valid for the totals card"
     )
 
 
