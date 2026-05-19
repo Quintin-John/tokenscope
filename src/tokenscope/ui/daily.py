@@ -47,6 +47,27 @@ from tokenscope.ui._data import load_daily_by_project
 from tokenscope.ui.sidebar import SidebarState
 
 
+# Agent label and constraint caption — single source of truth for the
+# "what client made these requests" surface. Every row in the dataset
+# is Claude Code by construction (ccusage reads `~/.claude/projects/`
+# JSONL only; SDK / console / third-party API traffic doesn't write
+# there). The chip in the day-row header surfaces this so the
+# constant value is explained, not silently omitted. The caption
+# under the page subtitle frames the constraint upfront so users
+# don't mistake the uniformity for a detection bug.
+#
+# Admin API ingestion (the real "differentiate Claude Code vs SDK
+# vs console vs third-party" path) is intentionally not in scope —
+# see BACKLOG.md "Slice 28 — Anthropic Admin API ingestion".
+AGENT_LABEL = "Claude Code"
+
+AGENT_CONSTRAINT_CAPTION = (
+    "All traffic is Claude Code — ccusage reads Claude Code "
+    "transcripts only. SDK / console / third-party traffic is not "
+    "visible here."
+)
+
+
 # `kind` discriminates how the renderer pulls a value out of the
 # source object (`WindowTotals` / `DailyCell`) and how it presents
 # it. "tokens" / "cost" / "model" / "project" are the only kinds
@@ -131,12 +152,18 @@ def render(state: SidebarState, nav: Navigation) -> None:
 
 
 def _render_page_header(state: SidebarState) -> None:
-    """H1 + window/timezone caption — copy and idiom match the
-    Overview / Models headers exactly."""
+    """H1 + window/timezone caption + agent-constraint caption. The
+    second caption sits inline with the window/tz line as a sibling
+    sub-line — same `st.caption` weight, so the user reads them as
+    one block of context rather than as a banner / warning. Copy is
+    `AGENT_CONSTRAINT_CAPTION` (module-level constant) so the
+    constraint statement lives in exactly one place.
+    """
     window_days = state.query.window_days() or config.DEFAULT_RANGE_DAYS
     tz_display = format_timezone_for_display(state.query.tz or "")
     st.markdown("# Daily")
     st.caption(f"Window: last {window_days} days · times in {tz_display}")
+    st.caption(AGENT_CONSTRAINT_CAPTION)
 
 
 def _render_totals_card(totals: WindowTotals) -> None:
@@ -165,17 +192,26 @@ def _render_day_rows(
 
 
 def _day_header(summary: DailySummary) -> str:
-    """Collapsed-state expander header. The format
-    `<date> · <tokens> tokens · <cost> · <N models> · <N projects>`
-    uses the same `_fmt_tokens` / `_fmt_cost` helpers as the totals
-    card so the header values and the totals strip can never drift
-    on formatting."""
+    """Collapsed-state expander header. Format:
+    `<date> · <cost> · <tokens> tokens · <N models> · <N projects> · <agent>`.
+
+    Order is scan-optimised: cost second (the field users come here
+    to compare), tokens third, model/project counts fourth/fifth,
+    agent chip last (constant — every row reads `Claude Code` so
+    placing it last keeps the variable fields scannable on the left).
+
+    Uses the same `_fmt_tokens` / `_fmt_cost` helpers as the totals
+    card and the same `AGENT_LABEL` constant as `_render_page_header`'s
+    caption — header text, totals strip, and constraint caption all
+    share single sources of truth.
+    """
     return (
         f"{summary.date} · "
-        f"{_fmt_tokens(summary.total_tokens)} tokens · "
         f"{_fmt_cost(summary.cost)} · "
+        f"{_fmt_tokens(summary.total_tokens)} tokens · "
         f"{pluralize(summary.distinct_models, 'model')} · "
-        f"{pluralize(summary.distinct_projects, 'project')}"
+        f"{pluralize(summary.distinct_projects, 'project')} · "
+        f"{AGENT_LABEL}"
     )
 
 

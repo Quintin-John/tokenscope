@@ -332,6 +332,50 @@ beats defaults. These slices are UX improvements that trade
 "explicit intent always wins" for "common-case usefulness wins".
 Opinion changes, not defect fixes; hence backlog, not patches.
 
+### Slice 28 — Anthropic Admin API ingestion (true client-source axis)
+
+**Scope.** A second ingestion path, parallel to ccusage, that pulls
+from the Anthropic Admin API
+(`/v1/organizations/usage_report/messages`). New module
+`tokenscope/admin_api.py`, new pydantic shapes for the response,
+new Streamlit cache layer, new merge/dedup logic to reconcile
+Admin API rows against ccusage rows that overlap. Surfaces in the
+Daily view as a real `Agent` column (Claude Code / SDK / console /
+third-party) replacing today's constant `Claude Code` chip.
+
+**Why.** ccusage reads `~/.claude/projects/*/*.jsonl` — Claude Code
+transcripts only. SDK / console / third-party API requests are
+invisible to it. As long as ccusage is our sole ingestion boundary,
+the Daily view's "agent" axis is structurally constant (every row is
+Claude Code by construction) and the chip is informational rather
+than discriminating. The Admin API observes **all** organization
+traffic regardless of client, so this is the only path that yields
+a real client-source breakdown.
+
+**Effort.** **High.** New auth (admin-tier API key handling, distinct
+from the existing per-user key), new module parallel to `ccusage.py`,
+new pydantic shapes (`extra="forbid"`), new caching layer, new
+merge/dedup logic — Admin API rows and ccusage rows will both report
+the same usage when invoked from Claude Code, and the dashboard must
+not double-count. Touches >10 files. Estimate: a 4-6 slice program
+of its own.
+
+**Risk.** **High.** Two issues to design around:
+
+  - **Double-counting.** Admin API reports all usage; ccusage reports
+    Claude-Code-only. Their intersection needs deterministic
+    deduplication or the totals card lies.
+  - **Auth surface.** Admin API keys are organization-level — losing
+    one is worse than losing a user-level key. Storage / rotation
+    is its own concern.
+
+**Why this is parked, not punted.** The Daily view's v1 framed
+agent detection as "missing" — it isn't missing, it's outside our
+ingestion boundary. Surfacing a constant chip + caption is the
+honest v1. This slice is the *real* fix; defer until the Daily
+view's actual usage suggests the client-source axis is worth the
+risk and effort budget.
+
 ## Suggested order
 
 `18 → 19 → 20 → 21 → 22 → 23 → 24` — each independent,
@@ -343,3 +387,8 @@ same pain) can land any time; start with 25 for the lowest-risk
 first pass, escalate to 26 only if the shared-URL pain persists,
 treat 27 as orthogonal (new-model auto-include is its own
 concern). Stop at any rung.
+
+Slice 28 (Admin API ingestion) is its own program of work — a
+4–6 slice expansion, not a one-rung step. Pick it up only when
+the Daily view's constant `Claude Code` chip starts costing real
+analysis time. Until then the chip + caption is the honest v1.

@@ -755,8 +755,10 @@ def test_daily_expanders_are_newest_first_with_summary_header(
 ) -> None:
     """Day expanders appear in descending date order — the most
     recent day at the top — and each label carries the day's date,
-    tokens, cost ($), and the `N models · N projects` summary so
-    the user can scan without expanding."""
+    cost, tokens, model/project counts, and the agent chip so the
+    user can scan without expanding."""
+    from tokenscope.ui.daily import AGENT_LABEL
+
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
@@ -766,13 +768,77 @@ def test_daily_expanders_are_newest_first_with_summary_header(
     assert labels[0].startswith(expected_first), (
         f"newest day not first: {labels[0]!r} (expected to start with {expected_first!r})"
     )
-    # Header carries all four summary fragments. The exact words /
-    # punctuation come from `ui.daily._day_header` — pinning them
-    # here catches accidental copy drift.
+    # Header carries all five summary fragments + the agent chip.
+    # Exact wording lives in `ui.daily._day_header`; assertions
+    # here catch accidental copy drift.
     head = labels[0]
-    assert " tokens · $" in head
+    assert "$" in head
+    assert "tokens" in head
     assert "model" in head
     assert "project" in head
+    assert AGENT_LABEL in head
+
+
+def test_daily_day_header_order_is_date_cost_tokens_counts_agent(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Day-row header segments appear in this exact order so the
+    scan-hot field (cost) is second after the date, and the constant
+    agent chip lands last. The order is asserted positionally — any
+    regression on `_day_header`'s f-string order trips this test."""
+    from tokenscope.ui.daily import AGENT_LABEL
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    head = at.expander[0].label
+    segments = [s.strip() for s in head.split("·")]
+    # Date · Cost · Tokens · Models · Projects · Agent
+    assert len(segments) == 6, (
+        f"expected 6 ·-separated segments in day header; got {segments!r}"
+    )
+    assert segments[0] == max(_fixture_distinct_dates())
+    assert segments[1].startswith("$")
+    assert segments[2].endswith("tokens")
+    assert segments[3].endswith("model") or segments[3].endswith("models")
+    assert segments[4].endswith("project") or segments[4].endswith("projects")
+    assert segments[5] == AGENT_LABEL
+
+
+def test_daily_agent_constraint_caption_visible(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The page subtitle area carries `AGENT_CONSTRAINT_CAPTION` —
+    the upfront explanation that the dashboard sees Claude Code
+    traffic only. Surfacing this on the page (not just in the chip)
+    prevents users misreading the constant chip as a detection bug."""
+    from tokenscope.ui.daily import AGENT_CONSTRAINT_CAPTION
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    caption_text = "\n".join(c.value for c in at.caption)
+    assert AGENT_CONSTRAINT_CAPTION in caption_text
+
+
+def test_daily_every_day_header_carries_agent_chip(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Every day-row header carries the agent chip — not just the
+    first. The chip is constant per design (single ingestion source,
+    single label) so its presence on every row is the contract."""
+    from tokenscope.ui.daily import AGENT_LABEL
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    for exp in at.expander:
+        assert exp.label.endswith(f"· {AGENT_LABEL}"), (
+            f"expander missing agent chip: {exp.label!r}"
+        )
 
 
 def test_daily_newest_day_subtable_cost_matches_fixture_day_total(
