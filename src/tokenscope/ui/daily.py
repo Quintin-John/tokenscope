@@ -378,27 +378,20 @@ def _subtable_value(
     raise ValueError(f"_subtable_value: unknown kind {spec.kind!r}")
 
 
-_PROJECT_COLUMN_HELP = (
-    "Last path segment of the project directory. Lossy when a repo "
-    "name contains hyphens (ccusage encodes path separators as `-`) "
-    "— the sidebar's Project dropdown carries the full slug for "
-    "disambiguation."
-)
-
-
 def _subtable_column_config(spec: _ColumnSpec):
     """Per-column `st.column_config` entry. Numeric columns get
     `NumberColumn` (Streamlit right-aligns those automatically):
     cost → `$%.2f`, tokens → `localized` (`1,374,041,578` with comma
-    separators). The Project column gets a `TextColumn` with column-
-    level help explaining the basename heuristic. Model column falls
-    through to Streamlit's default `TextColumn` (no help needed —
-    the display values are unambiguous).
+    separators). Label columns (model, project) fall through to
+    Streamlit's default `TextColumn` — passing an explicit
+    `TextColumn(help=...)` here previously caused selective text
+    blur on the Project column AND every column header (the
+    tooltip target appears to flip header rasterisation to a
+    different pipeline). Auto-config keeps every label column on
+    the same render path as the Model column, which renders crisp.
     """
     if spec.kind == "cost":
         return st.column_config.NumberColumn(format="$%.2f")
     if spec.kind == "tokens":
         return st.column_config.NumberColumn(format="localized")
-    if spec.kind == "project":
-        return st.column_config.TextColumn(help=_PROJECT_COLUMN_HELP)
     return None
