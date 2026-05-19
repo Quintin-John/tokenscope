@@ -42,7 +42,7 @@ from tokenscope.analytics import (
     per_model_cache_performance,
     cost_share_by_model,
     daily_cache_hit_ratio,
-    daily_cost_by_model,
+    densify_daily_costs,
     daily_token_mix,
     bold_numbers_in_insight,
     collapse_composition_rows,
@@ -570,33 +570,138 @@ def test_active_block_burn_empty_blocks() -> None:
     assert active_block_burn(BlocksReport(blocks=[])) is None
 
 
-# ---------- daily_cost_by_model ----------
+# ---------- densify_daily_costs ----------
+#
+# `densify_daily_costs` turns ccusage's sparse-active-days output
+# into a dense per-(date, family) frame over [min..max], zero-filling
+# inactive (date, family) pairs. The chart and rolling-average layers
+# both consume this — neither has correct semantics on the raw sparse
+# input (Plotly interpolates straight lines across gaps in the chart;
+# the rolling average windows over entries-not-days).
 
 
-def test_daily_cost_by_model_flattens_entries() -> None:
-    breakdowns = [
-        _breakdown("claude-opus-4-7", cost=10.0),
-        _breakdown("claude-haiku-4-5-20251001", cost=1.0),
+def test_densify_daily_costs_empty_report_returns_empty_list() -> None:
+    """No entries → no rows. The span is undefined when the report
+    is empty; consumers short-circuit on the empty list."""
+    assert densify_daily_costs(_report([])) == []
+
+
+def test_densify_daily_costs_contiguous_active_days_round_trip() -> None:
+    """When every day in [min..max] has an entry, densification is
+    a no-op (same shape, same costs, same family per date). Pins
+    the contract on the dense-input baseline."""
+    report = _report(
+        [
+            _entry("2026-05-15", total_cost=3.0),
+            _entry("2026-05-16", total_cost=5.0),
+        ]
+    )
+    rows = densify_daily_costs(report)
+    assert rows == [
+        {"date": "2026-05-15", "family": "opus", "cost": 3.0},
+        {"date": "2026-05-16", "family": "opus", "cost": 5.0},
     ]
+
+
+def test_densify_daily_costs_fills_inactive_days_with_zero() -> None:
+    """The bug-fix contract: a 4-day gap between active days
+    becomes 4 explicit zero-cost rows per family, not absent
+    rows. Same dataset that fails the chart-side test."""
+    report = _report(
+        [
+            _entry("2026-05-15", total_cost=10.0),
+            # gap: May 16, 17, 18 inactive
+            _entry("2026-05-19", total_cost=20.0),
+        ]
+    )
+    rows = densify_daily_costs(report)
+    dates = [r["date"] for r in rows]
+    assert dates == [
+        "2026-05-15", "2026-05-16", "2026-05-17", "2026-05-18", "2026-05-19",
+    ]
+    by_date = {r["date"]: r["cost"] for r in rows}
+    assert by_date["2026-05-15"] == pytest.approx(10.0)
+    assert by_date["2026-05-16"] == pytest.approx(0.0)
+    assert by_date["2026-05-17"] == pytest.approx(0.0)
+    assert by_date["2026-05-18"] == pytest.approx(0.0)
+    assert by_date["2026-05-19"] == pytest.approx(20.0)
+
+
+def test_densify_daily_costs_emits_one_row_per_family_per_day() -> None:
+    """Multiple families on a single active day produce one row per
+    (date, family) pair. Inactive days emit one zero-row per family
+    seen anywhere in the report — so the chart can render every
+    family's trace as a continuous line over the full span."""
     report = _report(
         [
             _entry(
-                "2026-05-16",
+                "2026-05-15",
                 total_cost=11.0,
                 models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
-                model_breakdowns=breakdowns,
-            )
+                model_breakdowns=[
+                    _breakdown("claude-opus-4-7", cost=10.0),
+                    _breakdown("claude-haiku-4-5-20251001", cost=1.0),
+                ],
+            ),
+            # May 16 inactive — emits zero rows for BOTH families
+            _entry("2026-05-17", total_cost=5.0),  # opus only
         ]
     )
-    rows = daily_cost_by_model(report)
+    rows = densify_daily_costs(report)
+    # 3 days x 2 families = 6 rows
+    assert len(rows) == 6
+    by_key = {(r["date"], r["family"]): r["cost"] for r in rows}
+    # May 15: both families present
+    assert by_key[("2026-05-15", "opus")] == pytest.approx(10.0)
+    assert by_key[("2026-05-15", "haiku")] == pytest.approx(1.0)
+    # May 16: both families zero (the gap)
+    assert by_key[("2026-05-16", "opus")] == pytest.approx(0.0)
+    assert by_key[("2026-05-16", "haiku")] == pytest.approx(0.0)
+    # May 17: opus only — haiku still emits a zero row so its trace
+    # stays continuous over the span
+    assert by_key[("2026-05-17", "opus")] == pytest.approx(5.0)
+    assert by_key[("2026-05-17", "haiku")] == pytest.approx(0.0)
+
+
+def test_densify_daily_costs_sums_within_a_day_same_family() -> None:
+    """Two breakdowns on the same day for the same family sum into
+    one (date, family) row. Defensive: a single DailyEntry shouldn't
+    normally carry two breakdowns for the same model, but if it does
+    (or two same-family models like opus-4-7 + opus-4-7-thinking),
+    the family bucket aggregates them rather than emitting duplicate
+    rows that would break the dense-frame uniqueness contract."""
+    report = _report(
+        [
+            _entry(
+                "2026-05-15",
+                total_cost=15.0,
+                models=["claude-opus-4-7"],
+                model_breakdowns=[
+                    _breakdown("claude-opus-4-7", cost=10.0),
+                    _breakdown("claude-opus-4-7", cost=5.0),
+                ],
+            ),
+        ]
+    )
+    rows = densify_daily_costs(report)
     assert rows == [
-        {"date": "2026-05-16", "model": "claude-opus-4-7", "family": "opus", "cost": 10.0},
-        {"date": "2026-05-16", "model": "claude-haiku-4-5-20251001", "family": "haiku", "cost": 1.0},
+        {"date": "2026-05-15", "family": "opus", "cost": 15.0},
     ]
 
 
-def test_daily_cost_by_model_empty_report() -> None:
-    assert daily_cost_by_model(_report([])) == []
+def test_densify_daily_costs_sorts_unordered_input() -> None:
+    """Input entries in arbitrary order produce ascending-date dense
+    output — densification implies its own canonical order, callers
+    don't pre-sort."""
+    report = _report(
+        [
+            _entry("2026-05-17", total_cost=3.0),
+            _entry("2026-05-15", total_cost=1.0),
+        ]
+    )
+    rows = densify_daily_costs(report)
+    dates = [r["date"] for r in rows]
+    assert dates == ["2026-05-15", "2026-05-16", "2026-05-17"]
 
 
 # ---------- daily_token_mix ----------

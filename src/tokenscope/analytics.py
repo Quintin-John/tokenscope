@@ -36,6 +36,69 @@ class _HasCacheTokens(Protocol):
     cache_read_tokens: int
 
 
+def densify_daily_costs(daily_report: DailyReport) -> list[dict]:
+    """Per-(date, family) dense long-form rows over the report's span.
+
+    ccusage's `daily` subcommand emits one entry per *active* day;
+    zero-cost / no-activity days are absent from the report entirely.
+    This helper enumerates every calendar day in
+    `[min(entry.date) .. max(entry.date)]` and produces one row per
+    (date, family) pair — summing costs across the model_breakdowns
+    whose `model_family(model_name)` matches. Inactive (date, family)
+    pairs render as `cost=0`.
+
+    Returns ``[]`` for an empty report. Otherwise each row is a dict
+    with keys: ``date`` (YYYY-MM-DD), ``family`` (e.g. ``opus``),
+    ``cost`` (float, 0.0 on inactive days).
+
+    Consumers:
+      - `_normalised_cost_rows` (charts.py) — the stacked-area trace
+        needs one datapoint per calendar day per family so Plotly
+        doesn't interpolate straight-line segments across multi-day
+        gaps. Zero-fill makes inactive days render as $0 baselines.
+      - `rolling_cost_average` (this module) — the trailing-window
+        mean needs calendar-day cadence (not entry cadence) so the
+        "N-day avg" overlay actually averages over N calendar days,
+        not N active entries that could span a much wider window.
+
+    Span limitation: dense range is `[min(date) .. max(date)]` of
+    the entries themselves. Window-edge days outside that span
+    (queried `since`/`until` that pre-dates or post-dates the first
+    or last active entry) are NOT zero-filled here — the queried
+    window isn't visible at this layer. Plumbing `since`/`until`
+    through `cost_trend_with_rolling` / `rolling_cost_average` is
+    a follow-up slice.
+    """
+    entries = sorted(daily_report.daily, key=lambda e: e.date)
+    if not entries:
+        return []
+
+    actual: dict[tuple[str, str], float] = {}
+    families: set[str] = set()
+    for entry in entries:
+        for bd in entry.model_breakdowns:
+            fam = model_family(bd.model_name)
+            actual[(entry.date, fam)] = (
+                actual.get((entry.date, fam), 0.0) + bd.cost
+            )
+            families.add(fam)
+
+    start = date.fromisoformat(entries[0].date)
+    end = date.fromisoformat(entries[-1].date)
+    out: list[dict] = []
+    cur = start
+    while cur <= end:
+        date_str = cur.isoformat()
+        for fam in sorted(families):
+            out.append({
+                "date": date_str,
+                "family": fam,
+                "cost": actual.get((date_str, fam), 0.0),
+            })
+        cur += timedelta(days=1)
+    return out
+
+
 def rolling_cost_average(
     daily_report: DailyReport, window_days: int
 ) -> list[tuple[str, float]]:
@@ -186,25 +249,6 @@ def active_block_burn(blocks_report: BlocksReport) -> float | None:
         if block.is_active and block.burn_rate is not None:
             return block.burn_rate.cost_per_hour
     return None
-
-
-def daily_cost_by_model(daily_report: DailyReport) -> list[dict]:
-    """Long-form rows for the stacked-area chart.
-
-    One row per (day × model) with columns: date, model, family, cost.
-    The UI layer can group/colour by either `model` or `family` depending
-    on legend density.
-    """
-    return [
-        {
-            "date": entry.date,
-            "model": breakdown.model_name,
-            "family": model_family(breakdown.model_name),
-            "cost": breakdown.cost,
-        }
-        for entry in daily_report.daily
-        for breakdown in entry.model_breakdowns
-    ]
 
 
 def find_daily_entry(daily_report: DailyReport, day: str) -> DailyEntry | None:

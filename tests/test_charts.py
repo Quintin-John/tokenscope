@@ -268,6 +268,58 @@ def test_cost_trend_distinct_family_colors_not_shades_of_one() -> None:
     )
 
 
+def test_cost_trend_sparse_window_emits_zero_filled_daily_datapoints() -> None:
+    """Pin the no-interpolation contract.
+
+    ccusage emits one daily entry per ACTIVE day; zero-cost days are
+    absent from the report. The current implementation passes the
+    sparse rows straight into `go.Scatter(mode='lines',
+    stackgroup='cost')`, which draws straight-line segments between
+    adjacent active days and fills the area beneath. Visually, a
+    13-day gap between two active days reads as continuous activity
+    across the gap — the chart misrepresents which days had spend.
+
+    Contract: each family's Scatter trace must carry one datapoint
+    per calendar day in [min(entry.date) .. max(entry.date)], with
+    y=0 on inactive days. The fill then drops to baseline across
+    gaps instead of slanting between non-zero endpoints.
+
+    Currently FAILS on master — traces carry only the 2 active-day
+    x-values for this 4-entry / 8-calendar-day fixture, not 8.
+    """
+    report = _report(
+        [
+            _entry("2026-04-20", cost=30.0, model="claude-opus-4-7"),
+            _entry("2026-04-21", cost=25.0, model="claude-opus-4-7"),
+            # 6-day gap — nothing on Apr 22..27 from ccusage.
+            _entry("2026-04-28", cost=40.0, model="claude-opus-4-7"),
+            _entry("2026-04-29", cost=35.0, model="claude-opus-4-7"),
+        ]
+    )
+    fig = cost_trend_with_rolling(report)
+    assert fig is not None
+    expected_days = [
+        "2026-04-20", "2026-04-21", "2026-04-22", "2026-04-23",
+        "2026-04-24", "2026-04-25", "2026-04-26", "2026-04-27",
+        "2026-04-28", "2026-04-29",
+    ]
+    family_traces = [t for t in fig.data if t.name == "opus"]
+    assert family_traces, "expected an 'opus' family trace"
+    opus = family_traces[0]
+    rendered_x = [str(x)[:10] for x in opus.x]
+    assert rendered_x == expected_days, (
+        f"opus trace must cover every calendar day in span (zero-fill "
+        f"inactive days); got x={rendered_x!r}"
+    )
+    by_date = dict(zip(rendered_x, opus.y))
+    for inactive in ("2026-04-22", "2026-04-23", "2026-04-24",
+                     "2026-04-25", "2026-04-26", "2026-04-27"):
+        assert by_date[inactive] == pytest.approx(0.0), (
+            f"inactive day {inactive} must render as zero, not interpolated; "
+            f"got {by_date[inactive]}"
+        )
+
+
 def test_cost_trend_adds_spike_annotation_when_provided() -> None:
     """`spike=(date, cost)` adds a Plotly annotation calling out the
     outlier day. Without the kwarg, no annotation is drawn."""
