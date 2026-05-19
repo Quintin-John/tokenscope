@@ -83,18 +83,37 @@ def densify_daily_costs(daily_report: DailyReport) -> list[dict]:
             )
             families.add(fam)
 
-    start = date.fromisoformat(entries[0].date)
-    end = date.fromisoformat(entries[-1].date)
     out: list[dict] = []
-    cur = start
-    while cur <= end:
-        date_str = cur.isoformat()
+    for date_str in _date_strings_in_span(entries[0].date, entries[-1].date):
         for fam in sorted(families):
             out.append({
                 "date": date_str,
                 "family": fam,
                 "cost": actual.get((date_str, fam), 0.0),
             })
+    return out
+
+
+def _date_strings_in_span(start: str, end: str) -> list[str]:
+    """Inclusive ascending YYYY-MM-DD date list from ``start`` to ``end``.
+
+    Both bounds are ISO-format date strings (the same format
+    ``DailyEntry.date`` carries). Output is the contiguous calendar-
+    day range, ascending. ``start == end`` yields ``[start]``;
+    ``start > end`` yields ``[]``.
+
+    Shared by `densify_daily_costs` and `daily_cache_hit_ratio` —
+    one place to find the "inclusive span as ISO strings" rule.
+    Both consumers need the same calendar-day cadence; without a
+    shared helper the contract (inclusive bounds, ISO format,
+    ascending order) would drift if one consumer ever switched to
+    `date` objects or exclusive end.
+    """
+    cur = date.fromisoformat(start)
+    last = date.fromisoformat(end)
+    out: list[str] = []
+    while cur <= last:
+        out.append(cur.isoformat())
         cur += timedelta(days=1)
     return out
 
@@ -552,15 +571,48 @@ def daily_token_mix(daily_report: DailyReport) -> list[dict]:
     return rows
 
 
-def daily_cache_hit_ratio(daily_report: DailyReport) -> list[tuple[str, float]]:
-    """Per-day cache hit ratio, in ascending date order.
+def daily_cache_hit_ratio(
+    daily_report: DailyReport,
+) -> list[tuple[str, float | None]]:
+    """Per-day cache hit ratio over the report's calendar-day span.
 
-    Returns `[(date, ratio), ...]` where ratio uses the same
-    `cache_read / (input + cache_create + cache_read)` formula as
-    `cache_hit_ratio` but applied per-day. Empty input → empty list.
+    Returns ``[(date, ratio), ...]`` ascending by date with one
+    tuple per calendar day in `[min(entry.date) .. max(entry.date)]`.
+    Ratio is `None` on inactive days (no entry that day); on active
+    days it's `cache_hit_ratio(entry)` (the same `cache_read /
+    (input + cache_create + cache_read)` formula). Empty input
+    yields an empty list.
+
+    Why ``None`` on inactive days, not ``0.0``:
+      - A zero-activity day has NO requests → the ratio is undefined,
+        not 0%. Plotting it as 0% would tell a different lie ("the
+        cache had requests and served 0% of them") about a day that
+        had no requests at all.
+      - The sparkline consumer relies on this: pandas converts
+        ``None`` to ``NaN`` when the series is loaded into a
+        DataFrame, and Plotly renders ``NaN`` y-values as broken
+        line segments — visually surfacing the gap honestly instead
+        of interpolating a smooth slope across multi-day inactive
+        stretches.
+      - Distinct from a day that has an entry with all-zero tokens:
+        that day's `cache_hit_ratio(entry)` returns 0.0 (entry
+        exists, just nothing happened — a valid data point). Tests
+        pin the distinction explicitly.
+
+    Span limitation: dense range is `[min(date) .. max(date)]` of
+    the entries themselves. Window-edge inactive days outside that
+    span (queried `since`/`until` that pre-dates or post-dates the
+    first or last active entry) are NOT represented. Plumbing
+    `since`/`until` through is a follow-up slice.
     """
     entries = sorted(daily_report.daily, key=lambda e: e.date)
-    return [(e.date, cache_hit_ratio(e)) for e in entries]
+    if not entries:
+        return []
+    by_date = {e.date: cache_hit_ratio(e) for e in entries}
+    return [
+        (d, by_date.get(d))
+        for d in _date_strings_in_span(entries[0].date, entries[-1].date)
+    ]
 
 
 def model_breakdown(daily_report: DailyReport) -> list[dict]:
