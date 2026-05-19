@@ -44,15 +44,14 @@ from tokenscope.analytics import (
     cells_for_date,
     daily_cells,
     daily_summaries,
+    display_model_label,
     format_compact_int,
     format_timezone_for_display,
-    friendly_project_label,
     peak_day,
     pluralize,
-    short_model_label,
+    project_basename,
 )
 from tokenscope.navigation import Navigation
-from tokenscope.paths import home_slug
 from tokenscope.ui._data import load_daily_by_project
 from tokenscope.ui.sidebar import SidebarState
 
@@ -271,7 +270,7 @@ def _render_kpi_strip(
             st.caption("no models in window")
         else:
             model, share = busiest
-            st.metric(KPI_LABEL_BUSIEST_MODEL, short_model_label(model))
+            st.metric(KPI_LABEL_BUSIEST_MODEL, display_model_label(model))
             st.caption(f"{share:.1%} of window spend")
 
 
@@ -285,11 +284,43 @@ def _render_day_rows(
     Streamlit preserves the user's collapse choice across reruns
     within a session, so anyone who wants the scan-only view can
     collapse a row once and it stays collapsed.
+
+    A thin magnitude bar sits ABOVE each expander (not inside) so
+    it stays visible regardless of the expander's state — a glance
+    reveals where the heavy days are without reading the cost on
+    every header. The bar fill is scaled to the day's share of the
+    peak-day cost; peak day = full fill.
     """
-    home = home_slug()
+    max_cost = max((s.cost for s in summaries), default=0.0)
     for summary in summaries:
+        _render_day_magnitude_bar(summary, max_cost)
         with st.expander(_day_header(summary), expanded=True):
-            _render_day_subtable(cells_for_date(cells, summary.date), home)
+            _render_day_subtable(summary, cells_for_date(cells, summary.date))
+
+
+def _render_day_magnitude_bar(summary: DailySummary, max_cost: float) -> None:
+    """Magnitude bar above each day-row expander. Fill width =
+    `day_cost / max_day_cost` (clamped to [0, 1]). The styling lives
+    in `_app_styles.css` (`.tokenscope-daily-day-bar` /
+    `.tokenscope-daily-day-bar-fill`); only the dynamic width sits
+    inline.
+
+    Defensive zero-handling: when every day in the window costs zero
+    (rare; the renderer's empty-window branch usually short-circuits
+    first), `max_cost == 0` and every bar renders empty rather than
+    triggering a divide-by-zero.
+    """
+    if max_cost > 0:
+        share = max(0.0, min(1.0, summary.cost / max_cost))
+    else:
+        share = 0.0
+    st.markdown(
+        f'<div class="tokenscope-daily-day-bar">'
+        f'<div class="tokenscope-daily-day-bar-fill" '
+        f'style="width: {share * 100:.2f}%"></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _day_header(summary: DailySummary) -> str:
@@ -316,17 +347,35 @@ def _day_header(summary: DailySummary) -> str:
     )
 
 
-def _render_day_subtable(day_cells: list[DailyCell], home: str) -> None:
+def _columns_for_day(distinct_projects: int) -> tuple[_ColumnSpec, ...]:
+    """Per-day subset of `_DAY_SUBTABLE_COLUMNS`. Drops the Project
+    column when only one project ran that day — the expander header
+    already reads `1 project`, so the column would repeat the same
+    string in every row. Kept when 2+ projects are present so the
+    user can see which project drove which cost.
+    """
+    if distinct_projects > 1:
+        return _DAY_SUBTABLE_COLUMNS
+    return tuple(c for c in _DAY_SUBTABLE_COLUMNS if c.kind != "project")
+
+
+def _render_day_subtable(
+    summary: DailySummary, day_cells: list[DailyCell]
+) -> None:
     """`(model, project)` rows for one day. Sorted by cost desc by
-    `cells_for_date`; pre-formatted token strings and raw cost floats
-    go into the dataframe; `column_config` formats cost as USD."""
+    `cells_for_date`. Numeric token / cost columns reach the
+    dataframe as raw numbers; `column_config` formats them and
+    Streamlit right-aligns numeric columns automatically. The Project
+    column is dropped on single-project days (see `_columns_for_day`).
+    """
+    columns = _columns_for_day(summary.distinct_projects)
     rows = [
-        {spec.label: _subtable_value(spec, cell, home) for spec in _DAY_SUBTABLE_COLUMNS}
+        {spec.label: _subtable_value(spec, cell) for spec in columns}
         for cell in day_cells
     ]
     column_config = {
         spec.label: cc
-        for spec in _DAY_SUBTABLE_COLUMNS
+        for spec in columns
         if (cc := _subtable_column_config(spec)) is not None
     }
     st.dataframe(
@@ -338,35 +387,51 @@ def _render_day_subtable(day_cells: list[DailyCell], home: str) -> None:
 
 
 def _subtable_value(
-    spec: _ColumnSpec, cell: DailyCell, home: str
+    spec: _ColumnSpec, cell: DailyCell
 ) -> str | int | float:
     """Format a `DailyCell` field for the per-day sub-table.
 
-    Tokens are pre-formatted as compact strings (1.37B style). Cost
-    is returned raw (float) — `_subtable_column_config` supplies a
-    `NumberColumn(format="$%.2f")` so Streamlit handles the formatting
-    AND right-aligns the column. Model / Project are pre-formatted
-    via the existing `short_model_label` / `friendly_project_label`
-    helpers so the Daily view never introduces a parallel display
-    rule for those fields.
+    Numeric kinds (`tokens`, `cost`) return raw values; the
+    corresponding `NumberColumn` entries in `_subtable_column_config`
+    format them and Streamlit right-aligns numeric columns by default.
+    Label kinds (`model`, `project`) return pre-formatted strings
+    from `display_model_label` / `project_basename` — those helpers
+    live in `analytics.py` so the Daily view doesn't introduce a
+    parallel display rule.
     """
     value = getattr(cell, spec.attr)
     if spec.kind == "tokens":
-        return _fmt_tokens(value)
+        return int(value)
     if spec.kind == "cost":
         return value
     if spec.kind == "model":
-        return short_model_label(value)
+        return display_model_label(value)
     if spec.kind == "project":
-        return friendly_project_label(value, home_slug=home)
+        return project_basename(value)
     raise ValueError(f"_subtable_value: unknown kind {spec.kind!r}")
 
 
+_PROJECT_COLUMN_HELP = (
+    "Last path segment of the project directory. Lossy when a repo "
+    "name contains hyphens (ccusage encodes path separators as `-`) "
+    "— the sidebar's Project dropdown carries the full slug for "
+    "disambiguation."
+)
+
+
 def _subtable_column_config(spec: _ColumnSpec):
-    """Per-column `st.column_config` entry — only the cost column
-    needs one (NumberColumn for right-aligned $%.2f). Token / model /
-    project columns fall through to Streamlit's default TextColumn
-    treatment since their values reach the dataframe pre-formatted."""
+    """Per-column `st.column_config` entry. Numeric columns get
+    `NumberColumn` (Streamlit right-aligns those automatically):
+    cost → `$%.2f`, tokens → `localized` (`1,374,041,578` with comma
+    separators). The Project column gets a `TextColumn` with column-
+    level help explaining the basename heuristic. Model column falls
+    through to Streamlit's default `TextColumn` (no help needed —
+    the display values are unambiguous).
+    """
     if spec.kind == "cost":
         return st.column_config.NumberColumn(format="$%.2f")
+    if spec.kind == "tokens":
+        return st.column_config.NumberColumn(format="localized")
+    if spec.kind == "project":
+        return st.column_config.TextColumn(help=_PROJECT_COLUMN_HELP)
     return None

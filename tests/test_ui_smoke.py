@@ -751,8 +751,9 @@ def test_daily_kpi_busiest_model_matches_fixture(
     mock_ccusage, mock_ccusage_version
 ) -> None:
     """Busiest-model card surfaces the model with the largest share
-    of window cost. Caption carries the share as a percentage."""
-    from tokenscope.analytics import short_model_label
+    of window cost, displayed via `display_model_label` (Slice 6).
+    Caption carries the share as a percentage."""
+    from tokenscope.analytics import display_model_label
     from tokenscope.ui.daily import KPI_LABEL_BUSIEST_MODEL
 
     _wire_default_fixtures(mock_ccusage)
@@ -763,10 +764,7 @@ def test_daily_kpi_busiest_model_matches_fixture(
     metric = next(
         m for m in at.metric if m.label == KPI_LABEL_BUSIEST_MODEL
     )
-    # Slice 5 uses `short_model_label` for the model display; slice 6
-    # will swap that for `display_model_label`. Test follows the
-    # renderer's current formatter via the same helper.
-    assert metric.value == short_model_label(expected_model)
+    assert metric.value == display_model_label(expected_model)
     caption_text = "\n".join(c.value for c in at.caption)
     assert f"{expected_share:.1%} of window spend" in caption_text
 
@@ -989,23 +987,230 @@ def test_daily_newest_day_subtable_cost_matches_fixture_day_total(
     assert rendered_cost == pytest.approx(expected_cost)
 
 
-def test_daily_subtable_has_model_and_project_columns(
+def _projects_per_date_from_fixture() -> dict[str, set[str]]:
+    """Read the fixture once and return `date -> {project_key, ...}`
+    so smoke tests can derive expected per-day distinct-project counts
+    without literal-list duplication."""
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    result: dict[str, set[str]] = {}
+    for project, entries in raw["projects"].items():
+        for e in entries:
+            result.setdefault(e["date"], set()).add(project)
+    return result
+
+
+def test_daily_subtable_columns_match_day_summary(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Every day's sub-table carries the Model + Project label columns
-    in addition to the numeric columns. Derived from
-    `_DAY_SUBTABLE_COLUMNS` so the test follows the single source
-    of truth — a reorder or rename in `daily.py` won't silently
-    drop coverage."""
-    from tokenscope.ui.daily import _DAY_SUBTABLE_COLUMNS
+    """Per-day column set is `_columns_for_day(distinct_projects)`:
+    single-project days drop the Project column (redundant — every
+    row would read the same value); multi-project days keep it. The
+    expected column list is derived from the fixture data, so a
+    rename or reorder in `_DAY_SUBTABLE_COLUMNS` propagates without
+    test-side maintenance."""
+    from tokenscope.ui.daily import _columns_for_day
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-    expected_columns = [spec.label for spec in _DAY_SUBTABLE_COLUMNS]
-    for df_element in at.dataframe:
-        assert list(df_element.value.columns) == expected_columns
+
+    projects_per_date = _projects_per_date_from_fixture()
+    # Newest first — same order the renderer iterates summaries.
+    dates_newest_first = sorted(projects_per_date, reverse=True)
+    assert len(at.dataframe) == len(dates_newest_first), (
+        f"dataframe count mismatch: {len(at.dataframe)} dataframes "
+        f"vs {len(dates_newest_first)} distinct dates"
+    )
+    for df, date in zip(at.dataframe, dates_newest_first):
+        distinct_projects = len(projects_per_date[date])
+        expected = [c.label for c in _columns_for_day(distinct_projects)]
+        assert list(df.value.columns) == expected, (
+            f"date {date} ({distinct_projects} projects) columns: "
+            f"got {list(df.value.columns)!r}, expected {expected!r}"
+        )
+
+
+def test_daily_single_project_day_drops_project_column(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """At least one day in the fixture has only one project — its
+    sub-table must NOT carry a Project column. Explicit assertion
+    on the column-hiding behaviour beyond the general-case test
+    above, so a future regression that re-introduces the always-show
+    behaviour is caught with a clear failure message."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+
+    projects_per_date = _projects_per_date_from_fixture()
+    single_project_dates = {
+        d for d, ps in projects_per_date.items() if len(ps) == 1
+    }
+    assert single_project_dates, (
+        "fixture has no single-project days — test premise invalid"
+    )
+    dates_newest_first = sorted(projects_per_date, reverse=True)
+    for df, date in zip(at.dataframe, dates_newest_first):
+        if date in single_project_dates:
+            assert "Project" not in df.value.columns, (
+                f"date {date} has one project but Project column "
+                f"is still rendered: {list(df.value.columns)!r}"
+            )
+
+
+def test_daily_multi_project_day_keeps_project_column(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Days with 2+ projects must keep the Project column visible —
+    the column carries real signal there. Skipped if the fixture
+    has no multi-project days (some test runs may use a stripped
+    fixture)."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+
+    projects_per_date = _projects_per_date_from_fixture()
+    multi_project_dates = {
+        d for d, ps in projects_per_date.items() if len(ps) > 1
+    }
+    if not multi_project_dates:
+        pytest.skip("fixture has no multi-project days")
+    dates_newest_first = sorted(projects_per_date, reverse=True)
+    for df, date in zip(at.dataframe, dates_newest_first):
+        if date in multi_project_dates:
+            assert "Project" in df.value.columns, (
+                f"date {date} has multiple projects but Project "
+                f"column is missing: {list(df.value.columns)!r}"
+            )
+
+
+def test_daily_sub_table_model_column_uses_display_label(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Sub-table Model column values come from `display_model_label`
+    (`Opus 4.7`), not from the raw `claude-opus-4-7` form. Pins the
+    Slice 6 helper swap end-to-end."""
+    from tokenscope.analytics import display_model_label
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    raw = json.loads(
+        (FIXTURES / "daily_by_project.json").read_text()
+    )
+    # Pick any (model, date) combination present in the fixture.
+    sample_model = next(
+        iter(
+            {
+                b["modelName"]
+                for entries in raw["projects"].values()
+                for e in entries
+                for b in e["modelBreakdowns"]
+            }
+        )
+    )
+    expected = display_model_label(sample_model)
+    # The display form must appear in at least one rendered Model cell.
+    rendered_models: set[str] = set()
+    for df in at.dataframe:
+        rendered_models.update(df.value["Model"].tolist())
+    assert expected in rendered_models, (
+        f"expected display label {expected!r} not in rendered "
+        f"Model column values: {rendered_models!r}"
+    )
+    # Inverse contract: the raw form must NOT appear (regression
+    # guard against a future revert to short_model_label).
+    assert sample_model not in rendered_models or (
+        # If display_model_label is a no-op for this model
+        # (e.g. non-claude vendor), the raw form is the display.
+        display_model_label(sample_model) == sample_model
+    )
+
+
+def test_daily_sub_table_project_column_uses_basename(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Sub-table Project column values come from `project_basename`
+    (last `-` segment), not the full slug. Only meaningful on days
+    that have the Project column at all (multi-project days)."""
+    from tokenscope.analytics import project_basename
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    projects_per_date = _projects_per_date_from_fixture()
+    multi = {d for d, ps in projects_per_date.items() if len(ps) > 1}
+    if not multi:
+        pytest.skip("fixture has no multi-project days")
+    raw_slugs = {
+        slug
+        for date_slugs in projects_per_date.values()
+        for slug in date_slugs
+    }
+    expected_basenames = {project_basename(s) for s in raw_slugs}
+    # Collect rendered project values across all days.
+    rendered: set[str] = set()
+    dates_newest_first = sorted(projects_per_date, reverse=True)
+    for df, date in zip(at.dataframe, dates_newest_first):
+        if "Project" in df.value.columns:
+            rendered.update(df.value["Project"].tolist())
+    assert rendered, "no Project column rendered on any multi-project day"
+    # Every rendered value must be a basename from the slug set.
+    assert rendered <= expected_basenames
+    # Inverse contract: no rendered cell carries a leading dash
+    # (the encoded-slug marker).
+    assert not any(v.startswith("-") for v in rendered)
+
+
+def test_daily_renders_magnitude_bar_per_day(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """A `.tokenscope-daily-day-bar` HTML element is emitted above
+    each day-row expander. Visual scan signal for spend concentration
+    — content lives in the markdown blocks, styling in
+    `_app_styles.css`.
+
+    Matches the exact `<div class="tokenscope-daily-day-bar">` open
+    tag rather than the bare class name; the bare-name match would
+    also count the two occurrences in the injected stylesheet
+    (`.tokenscope-daily-day-bar { ... }` and the `-fill` variant)
+    and double-count the contract."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    md_text = "\n".join(m.value for m in at.markdown)
+    parent_open = '<div class="tokenscope-daily-day-bar">'
+    expected = len(_fixture_distinct_dates())
+    assert md_text.count(parent_open) == expected, (
+        f"magnitude bar count mismatch: got {md_text.count(parent_open)} "
+        f"`{parent_open}` occurrences, expected {expected} (one per day)"
+    )
+
+
+def test_daily_magnitude_bar_peak_day_fills_fully(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The peak day's magnitude bar must fill the full track
+    (`width: 100.00%`). Other days fill proportionally — the peak
+    is the only day where the inline style is guaranteed to be
+    exactly 100%, which is the deterministic assertion to pin."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    md_text = "\n".join(m.value for m in at.markdown)
+    assert "width: 100.00%" in md_text, (
+        "no `width: 100.00%` magnitude bar fill found — peak day "
+        "is not rendering at full width"
+    )
 
 
 # ---------- Live view rework ----------

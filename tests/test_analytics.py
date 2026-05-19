@@ -45,6 +45,7 @@ from tokenscope.analytics import (
     daily_token_mix,
     bold_numbers_in_insight,
     collapse_composition_rows,
+    display_model_label,
     filter_daily_by_models,
     filter_daily_by_project_models,
     find_block,
@@ -56,6 +57,7 @@ from tokenscope.analytics import (
     last_day_cost,
     overview_insight,
     peak_day,
+    project_basename,
     spike_day,
     model_breakdown,
     model_family,
@@ -3170,4 +3172,83 @@ def test_filter_daily_by_models_preserves_project_field() -> None:
         ["claude-opus-4-7"],
     )
     assert filtered.daily[0].project == "-proj-specific"
+
+
+# ---------- project_basename (Slice 6) ----------
+
+
+def test_project_basename_simple_path() -> None:
+    """ccusage-encoded path: take everything after the last `-`."""
+    assert project_basename(
+        "-Users-quintin-johnsmith-Documents-RiderProjects-tokenscope"
+    ) == "tokenscope"
+
+
+def test_project_basename_lossy_on_hyphenated_repo() -> None:
+    """Documented limitation: ccusage's encoding can't distinguish a
+    path separator from a hyphen in a directory name. A repo
+    literally called `BareMetal-LLMV2` returns `LLMV2`, not the full
+    repo name. This is the trade-off the helper accepts in exchange
+    for column compactness — the sidebar's Project dropdown carries
+    the full slug for users who need disambiguation."""
+    assert project_basename("-Users-q-BareMetal-LLMV2") == "LLMV2"
+
+
+def test_project_basename_empty_passthrough() -> None:
+    """Empty string returns empty (no traceback, no synthetic
+    placeholder). Defensive behaviour for malformed ccusage rows."""
+    assert project_basename("") == ""
+
+
+def test_project_basename_no_dash_passthrough() -> None:
+    """A bare name without dashes returns unchanged — `rsplit('-', 1)`
+    on a no-dash string yields a single-element list."""
+    assert project_basename("plain") == "plain"
+
+
+def test_project_basename_trailing_dash_falls_back() -> None:
+    """A slug ending in `-` would otherwise return an empty string.
+    The `or slug` fallback returns the original input so the column
+    never renders an empty cell from a malformed slug."""
+    assert project_basename("-Users-foo-") == "-Users-foo-"
+
+
+# ---------- display_model_label (Slice 6) ----------
+
+
+def test_display_model_label_modern_ordering() -> None:
+    """`claude-<family>-<v>-<v>` → `<Family> <v>.<v>`. The Daily
+    view's display rule."""
+    assert display_model_label("claude-opus-4-7") == "Opus 4.7"
+    assert display_model_label("claude-sonnet-4-6") == "Sonnet 4.6"
+    assert display_model_label("claude-haiku-4-5") == "Haiku 4.5"
+
+
+def test_display_model_label_strips_date_suffix() -> None:
+    """8-digit YYYYMMDD trailing token is dropped — delegates to
+    `short_model_label`, so the date-strip rule lives in one place."""
+    assert display_model_label("claude-haiku-4-5-20251001") == "Haiku 4.5"
+
+
+def test_display_model_label_legacy_numeric_prefix_ordering() -> None:
+    """`claude-<v>-<v>-<family>-<date>` (legacy 3.x naming) →
+    `<Family> <v>.<v>`. The family-detection rule (first alpha
+    segment) handles both orderings without a special-case table."""
+    assert (
+        display_model_label("claude-3-5-sonnet-20240620") == "Sonnet 3.5"
+    )
+    assert display_model_label("claude-3-opus-20240229") == "Opus 3"
+
+
+def test_display_model_label_non_claude_passthrough() -> None:
+    """Anything not prefixed `claude-` is returned unchanged — we
+    don't try to invent a display rule for unknown vendors."""
+    assert display_model_label("gpt-4o") == "gpt-4o"
+    assert display_model_label("") == ""
+
+
+def test_display_model_label_no_version_segments() -> None:
+    """`claude-<family>` with no version digits → just the
+    capitalised family name."""
+    assert display_model_label("claude-opus") == "Opus"
 

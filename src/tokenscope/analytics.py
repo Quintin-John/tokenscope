@@ -900,6 +900,68 @@ def friendly_project_label(slug: str, home_slug: str | None = None) -> str:
     return slug
 
 
+def project_basename(slug: str) -> str:
+    """Last `-`-delimited segment of a ccusage project slug.
+
+    Example: `-Users-q-Documents-RiderProjects-tokenscope` → `tokenscope`.
+
+    LOSSY: ccusage encodes paths by replacing `/` with `-`, so a repo
+    literally named `BareMetal-LLMV2` slugs to a string indistinguishable
+    from path-encoded `BareMetal/LLMV2`. This helper takes the last
+    `-`-delimited token verbatim and will return `LLMV2` for that input.
+    Same lossiness caveat as `friendly_project_label`. Acceptable for
+    the Daily view's column compactness — the sidebar's Project
+    dropdown carries the full slug for disambiguation.
+
+    Empty or `-`-only inputs return the input unchanged so the caller
+    can render *something* rather than a blank cell.
+    """
+    if not slug:
+        return slug
+    leaf = slug.rsplit("-", 1)[-1]
+    return leaf or slug
+
+
+def display_model_label(model_name: str) -> str:
+    """Human-readable model name for the Daily view: family
+    capitalised, version digits joined with `.`, `claude-` prefix
+    and the trailing YYYYMMDD date suffix both stripped.
+
+    Examples:
+        claude-opus-4-7            -> Opus 4.7
+        claude-haiku-4-5-20251001  -> Haiku 4.5
+        claude-sonnet-4-6          -> Sonnet 4.6
+        claude-3-5-sonnet-20240620 -> Sonnet 3.5   (legacy ordering)
+        claude-3-opus-20240229     -> Opus 3       (legacy ordering)
+        gpt-4o                     -> gpt-4o       (no claude- prefix; passthrough)
+        ""                         -> ""           (defensive)
+
+    Delegates the date-suffix strip to `short_model_label` so the
+    8-digit-YYYYMMDD rule lives in exactly one place. The
+    family-detection logic (first all-alpha segment) handles both
+    the modern `claude-<family>-<v>-<v>` ordering and the legacy
+    `claude-<v>-<v>-<family>` ordering without a special-case table.
+    """
+    if not model_name or not model_name.startswith("claude-"):
+        return model_name
+    stripped = short_model_label(model_name)
+    body = stripped[len("claude-"):]
+    parts = body.split("-")
+    family_idx = next(
+        (i for i, p in enumerate(parts) if p.isalpha()),
+        None,
+    )
+    if family_idx is None:
+        # No alpha token to capitalise as the family. Pass the
+        # date-stripped form through rather than mangling further.
+        return stripped
+    family = parts[family_idx].capitalize()
+    version_segments = parts[:family_idx] + parts[family_idx + 1:]
+    if not version_segments:
+        return family
+    return f"{family} {'.'.join(version_segments)}"
+
+
 def short_model_label(model_name: str) -> str:
     """Strip the trailing date suffix from a Claude model identifier.
 

@@ -342,6 +342,34 @@ footer {
     display: none !important;
 }
 
+/* ---------- Daily view: per-day magnitude bar ----------
+ * Thin horizontal bar rendered ABOVE each day-row expander. Fill
+ * width is scaled (inline `style="width: N%"`) to the day's share of
+ * the peak-day cost — so a glance reveals where the heavy days sit
+ * without reading the cost figure on every header. Sits OUTSIDE the
+ * expander so it stays visible when the user collapses individual
+ * rows.
+ *
+ * Track color = #f1f5f9 (slate-100) matches the dashboard's neutral
+ * background tones. Fill color = #475569 matches `.tokenscope-insight`'s
+ * left-border accent — the dashboard's established slate for
+ * informational, non-categorical signals (the bar represents
+ * magnitude, not model/kind attribution, so palette colors would
+ * over-signal).
+ */
+.tokenscope-daily-day-bar {
+    height: 4px;
+    background: #f1f5f9;
+    border-radius: 2px;
+    margin: 0.75rem 0 0.15rem 0;
+    overflow: hidden;
+}
+.tokenscope-daily-day-bar-fill {
+    height: 100%;
+    background: #475569;
+    border-radius: 2px;
+}
+
 /* ---------- Responsive column wrap for KPI rows ----------
  * Streamlit's `st.columns(N)` shrinks columns to fit at any viewport
  * width, which crushes 4-card KPI rows into unreadable slivers on a
