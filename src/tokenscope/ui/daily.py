@@ -284,43 +284,10 @@ def _render_day_rows(
     Streamlit preserves the user's collapse choice across reruns
     within a session, so anyone who wants the scan-only view can
     collapse a row once and it stays collapsed.
-
-    A thin magnitude bar sits ABOVE each expander (not inside) so
-    it stays visible regardless of the expander's state — a glance
-    reveals where the heavy days are without reading the cost on
-    every header. The bar fill is scaled to the day's share of the
-    peak-day cost; peak day = full fill.
     """
-    max_cost = max((s.cost for s in summaries), default=0.0)
     for summary in summaries:
-        _render_day_magnitude_bar(summary, max_cost)
         with st.expander(_day_header(summary), expanded=True):
             _render_day_subtable(summary, cells_for_date(cells, summary.date))
-
-
-def _render_day_magnitude_bar(summary: DailySummary, max_cost: float) -> None:
-    """Magnitude bar above each day-row expander. Fill width =
-    `day_cost / max_day_cost` (clamped to [0, 1]). The styling lives
-    in `_app_styles.css` (`.tokenscope-daily-day-bar` /
-    `.tokenscope-daily-day-bar-fill`); only the dynamic width sits
-    inline.
-
-    Defensive zero-handling: when every day in the window costs zero
-    (rare; the renderer's empty-window branch usually short-circuits
-    first), `max_cost == 0` and every bar renders empty rather than
-    triggering a divide-by-zero.
-    """
-    if max_cost > 0:
-        share = max(0.0, min(1.0, summary.cost / max_cost))
-    else:
-        share = 0.0
-    st.markdown(
-        f'<div class="tokenscope-daily-day-bar">'
-        f'<div class="tokenscope-daily-day-bar-fill" '
-        f'style="width: {share * 100:.2f}%"></div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
 
 
 def _day_header(summary: DailySummary) -> str:

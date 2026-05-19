@@ -1169,50 +1169,6 @@ def test_daily_sub_table_project_column_uses_basename(
     assert not any(v.startswith("-") for v in rendered)
 
 
-def test_daily_renders_magnitude_bar_per_day(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """A `.tokenscope-daily-day-bar` HTML element is emitted above
-    each day-row expander. Visual scan signal for spend concentration
-    — content lives in the markdown blocks, styling in
-    `_app_styles.css`.
-
-    Matches the exact `<div class="tokenscope-daily-day-bar">` open
-    tag rather than the bare class name; the bare-name match would
-    also count the two occurrences in the injected stylesheet
-    (`.tokenscope-daily-day-bar { ... }` and the `-fill` variant)
-    and double-count the contract."""
-    _wire_default_fixtures(mock_ccusage)
-    at = _at("daily")
-    at.run()
-    _assert_clean(at)
-    md_text = "\n".join(m.value for m in at.markdown)
-    parent_open = '<div class="tokenscope-daily-day-bar">'
-    expected = len(_fixture_distinct_dates())
-    assert md_text.count(parent_open) == expected, (
-        f"magnitude bar count mismatch: got {md_text.count(parent_open)} "
-        f"`{parent_open}` occurrences, expected {expected} (one per day)"
-    )
-
-
-def test_daily_magnitude_bar_peak_day_fills_fully(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """The peak day's magnitude bar must fill the full track
-    (`width: 100.00%`). Other days fill proportionally — the peak
-    is the only day where the inline style is guaranteed to be
-    exactly 100%, which is the deterministic assertion to pin."""
-    _wire_default_fixtures(mock_ccusage)
-    at = _at("daily")
-    at.run()
-    _assert_clean(at)
-    md_text = "\n".join(m.value for m in at.markdown)
-    assert "width: 100.00%" in md_text, (
-        "no `width: 100.00%` magnitude bar fill found — peak day "
-        "is not rendering at full width"
-    )
-
-
 # ---------- Live view rework ----------
 
 
