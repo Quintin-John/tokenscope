@@ -893,10 +893,11 @@ def test_daily_skips_zero_cost_days(
     at = _at("daily")
     at.run()
     _assert_clean(at)
-    # Daily renders per-day expanders + one total dataframe. The
-    # zero-day filter must exclude both: no expander label starts
-    # with `zero_day`, and the total dataframe's Cost equals only
-    # the paid day's cost (not paid + zero).
+    # Daily renders one expander per active day, each with a
+    # per-day dataframe. The zero-day filter must exclude the
+    # zero day's expander entirely, AND the paid day's day-total
+    # row must carry only the paid day's cost (no zero-day
+    # contribution leaked into a window-wide sum).
     expander_labels = [e.label for e in at.expander]
     assert any(label.startswith(paid_day) for label in expander_labels), (
         f"paid day {paid_day!r} missing from expanders: {expander_labels!r}"
@@ -905,11 +906,16 @@ def test_daily_skips_zero_cost_days(
         f"zero-cost day {zero_day!r} should be filtered but appeared: "
         f"{expander_labels!r}"
     )
-    # Total dataframe should carry only the paid day's cost.
-    _, total = _daily_dataframes(at)
-    assert total.value["Cost"].iloc[0] == 12.5, (
-        f"total cost {total.value['Cost'].iloc[0]} should equal "
-        f"only the paid day's cost 12.5 — zero-cost day leaked through"
+    # Paid day's per-day dataframe should have the paid cost on its
+    # day-total row.
+    assert len(at.dataframe) == 1, (
+        f"expected one per-day dataframe (paid day only); "
+        f"got {len(at.dataframe)}"
+    )
+    day_total = at.dataframe[0].value.iloc[-1]
+    assert day_total["Cost"] == 12.5, (
+        f"paid day's Total-row cost {day_total['Cost']} != 12.5 — "
+        f"zero-day data leaked"
     )
 
 
@@ -996,32 +1002,6 @@ def _projects_per_date_from_fixture() -> dict[str, set[str]]:
 # ---------- Daily per-day expanders + money rounding (Slice 9) ----------
 
 
-def _daily_dataframes(at: AppTest) -> tuple[list, "object"]:
-    """Split AppTest's `at.dataframe` list into (per-day, total) for
-    the Daily tab. The Daily render emits N per-day dataframes (one
-    per expander) plus one final standalone total dataframe at the
-    bottom. The total dataframe is the only one that carries a
-    `Date` column (per-day dataframes drop it because the date is
-    in the expander label); we find it by that contract rather
-    than by index — robust against a renderer regression that
-    reorders the renders."""
-    per_day: list = []
-    total = None
-    for df in at.dataframe:
-        if "Date" in df.value.columns:
-            assert total is None, (
-                f"more than one dataframe carries a Date column: "
-                f"{list(df.value.columns)!r}"
-            )
-            total = df
-        else:
-            per_day.append(df)
-    assert total is not None, (
-        "no total dataframe found (a dataframe carrying a Date column)"
-    )
-    return per_day, total
-
-
 def test_daily_renders_one_expander_per_active_day(
     mock_ccusage, mock_ccusage_version
 ) -> None:
@@ -1103,67 +1083,63 @@ def test_daily_expanders_appear_in_descending_date_order(
 def test_daily_per_day_dataframe_columns_match_spec(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Per-day dataframes carry `PER_DAY_COLUMNS` exactly (9 columns,
-    no Date — date is in the expander label). The total dataframe
-    carries `TOTAL_COLUMNS` (10 columns = Date + the same 9). The
-    two column tuples are derived from the same source config in
-    `daily.py`, so a rename / reorder of any shared column
-    propagates to both without test maintenance."""
-    from tokenscope.ui.daily import PER_DAY_COLUMNS, TOTAL_COLUMNS
+    """Every per-day dataframe carries `PER_DAY_COLUMNS` exactly
+    (9 columns, no Date — date is in the expander label). The
+    standalone window-total dataframe is gone; each per-day
+    dataframe carries its own Total row as the last row, so there
+    are no per-day vs total column branches to test against —
+    every dataframe on the surface uses the same shape."""
+    from tokenscope.ui.daily import PER_DAY_COLUMNS
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-    per_day, total = _daily_dataframes(at)
-    expected_per_day = list(PER_DAY_COLUMNS)
-    expected_total = list(TOTAL_COLUMNS)
-    for df in per_day:
-        assert list(df.value.columns) == expected_per_day, (
-            f"per-day column drift: rendered={list(df.value.columns)!r}, "
-            f"expected={expected_per_day!r}"
+    expected = list(PER_DAY_COLUMNS)
+    assert at.dataframe, "no dataframes rendered"
+    for df in at.dataframe:
+        assert list(df.value.columns) == expected, (
+            f"column drift: rendered={list(df.value.columns)!r}, "
+            f"expected={expected!r}"
         )
-    assert list(total.value.columns) == expected_total, (
-        f"total column drift: rendered={list(total.value.columns)!r}, "
-        f"expected={expected_total!r}"
-    )
 
 
-def test_daily_per_day_dataframe_row_count_matches_projects(
+def test_daily_per_day_dataframe_row_count_is_projects_plus_total_row(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Each per-day dataframe carries exactly N project sub-rows
-    where N is the number of distinct projects active on that day
-    in the fixture. The expander label tells us which date the
-    dataframe belongs to (parsed from the first segment of the
-    label); the fixture tells us how many projects that date had."""
+    """Each per-day dataframe carries N project sub-rows + 1
+    Total row. N is the distinct-project count for that date in
+    the fixture; the +1 is the day-total row at the end. The
+    expander label tells us which date the dataframe belongs to
+    (parsed from the first segment of the label)."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
     projects_per_date = _projects_per_date_from_fixture()
-    per_day, _total = _daily_dataframes(at)
-    assert len(per_day) == len(at.expander), (
-        f"per-day dataframe count {len(per_day)} != expander count "
-        f"{len(at.expander)}"
+    assert len(at.dataframe) == len(at.expander), (
+        f"dataframe count {len(at.dataframe)} != expander count "
+        f"{len(at.expander)} — one per-day dataframe per expander"
     )
-    for exp, df in zip(at.expander, per_day):
+    for exp, df in zip(at.expander, at.dataframe):
         date = exp.label.split(" · ", 1)[0]
-        expected = len(projects_per_date[date])
+        expected = len(projects_per_date[date]) + 1
         actual = len(df.value)
         assert actual == expected, (
             f"per-day dataframe for {date!r} has {actual} rows; "
-            f"fixture has {expected} projects"
+            f"fixture has {len(projects_per_date[date])} projects + 1 "
+            f"Total row = {expected}"
         )
 
 
 def test_daily_per_day_dataframe_project_column_uses_display_name(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Project cells in every per-day dataframe come from
+    """Project cells on the project sub-rows come from
     `project_display_name(slug)` — same helper the sidebar
-    dropdown consumes. Regression guard against the basename-era
-    `johnsmith` bug AND the pre-Slice-8 raw-slug rendering."""
+    dropdown consumes. The Total row's Project cell is blank
+    (aggregate spans all projects); blank values are skipped in
+    the rendered-set comparison."""
     from tokenscope.paths import project_display_name
 
     _wire_default_fixtures(mock_ccusage)
@@ -1179,10 +1155,9 @@ def test_daily_per_day_dataframe_project_column_uses_display_name(
     expected_displays = {project_display_name(slug) for slug in all_slugs}
 
     rendered: set[str] = set()
-    per_day, _total = _daily_dataframes(at)
-    for df in per_day:
+    for df in at.dataframe:
         for value in df.value["Project"].tolist():
-            if value:
+            if value:  # skip the Total row's blank
                 rendered.add(value)
     assert rendered, "no project sub-rows rendered"
     assert rendered <= expected_displays, (
@@ -1195,30 +1170,87 @@ def test_daily_per_day_dataframe_project_column_uses_display_name(
     )
 
 
-def test_daily_total_dataframe_renders_below_expanders(
+def test_daily_each_day_dataframe_ends_with_day_total_row(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """A single-row total dataframe renders BELOW all per-day
-    expanders. Date column = `_TOTAL_LABEL`; Cost equals the
-    fixture's window-wide `totals.totalCost` (rounded to 2dp by
-    `_round_money`)."""
-    from tokenscope.ui.daily import _TOTAL_LABEL, _round_money
+    """Last row of every per-day dataframe has Agent ==
+    `_DAY_TOTAL_LABEL` — the row aggregates that day's project
+    sub-rows above it. Pins the new "totals live inside each day"
+    contract; a regression that drops the Total row or appends it
+    in the wrong place trips this."""
+    from tokenscope.ui.daily import _DAY_TOTAL_LABEL
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-    _, total = _daily_dataframes(at)
-    assert len(total.value) == 1, (
-        f"total dataframe must have exactly 1 row; got {len(total.value)}"
-    )
-    last_row = total.value.iloc[0]
-    assert last_row["Date"] == _TOTAL_LABEL
+    assert at.dataframe, "no per-day dataframes rendered"
+    for df in at.dataframe:
+        last_row = df.value.iloc[-1]
+        assert last_row["Agent"] == _DAY_TOTAL_LABEL, (
+            f"last row Agent is not the day-total label: "
+            f"{last_row['Agent']!r}"
+        )
+
+
+def test_daily_day_total_row_matches_day_summary(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The day-total row's Cost equals `round_money(sum of project
+    costs for that date)`. The expander label tells us which date
+    each dataframe belongs to; the fixture tells us the day's
+    per-project costs. Pins the data invariant: the in-dataframe
+    total must agree with the source data the expander label is
+    derived from."""
+    from tokenscope.ui.daily import _DAY_TOTAL_LABEL, _round_money
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
     raw = json.loads((FIXTURES / "daily_by_project.json").read_text())
-    assert last_row["Cost"] == _round_money(raw["totals"]["totalCost"]), (
-        f"total-row cost {last_row['Cost']} != round_money(fixture) "
-        f"{_round_money(raw['totals']['totalCost'])}"
-    )
+    cost_by_date: dict[str, float] = {}
+    for entries in raw["projects"].values():
+        for e in entries:
+            cost_by_date[e["date"]] = (
+                cost_by_date.get(e["date"], 0.0) + e["totalCost"]
+            )
+
+    for exp, df in zip(at.expander, at.dataframe):
+        date = exp.label.split(" · ", 1)[0]
+        last_row = df.value.iloc[-1]
+        assert last_row["Agent"] == _DAY_TOTAL_LABEL
+        assert last_row["Cost"] == _round_money(cost_by_date[date]), (
+            f"day-total cost for {date!r}: row={last_row['Cost']}, "
+            f"fixture={_round_money(cost_by_date[date])}"
+        )
+
+
+def test_daily_day_total_row_carries_blank_project_and_models(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """The day-total row aggregates across every project and every
+    model for the day. Project and Models cells are blank — a
+    regression that accidentally fills them (e.g. with a project
+    name from the last sub-row) would misrepresent the aggregate
+    as project-specific."""
+    from tokenscope.ui.daily import _DAY_TOTAL_LABEL
+
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    for df in at.dataframe:
+        last_row = df.value.iloc[-1]
+        assert last_row["Agent"] == _DAY_TOTAL_LABEL
+        assert last_row["Project"] == "", (
+            f"day-total row carries Project={last_row['Project']!r}; "
+            f"should be blank (aggregate spans all projects)"
+        )
+        assert last_row["Models"] == "", (
+            f"day-total row carries Models={last_row['Models']!r}; "
+            f"should be blank (aggregate spans all models)"
+        )
 
 
 def test_daily_cost_values_rounded_to_two_decimal_places(
@@ -1418,10 +1450,9 @@ def test_daily_table_project_resolves_via_jsonl_in_docker_context(
     _assert_clean(at)
     # The synthetic fixture has one date with one project — there
     # will be one per-day expander containing one dataframe with
-    # one project sub-row.
-    per_day, _total = _daily_dataframes(at)
+    # one project sub-row plus a day-total row.
     rendered_projects: set[str] = set()
-    for df in per_day:
+    for df in at.dataframe:
         rendered_projects.update(df.value["Project"].tolist())
     assert "tokenscope" in rendered_projects, (
         f"Project column doesn't show JSONL-resolved basename: "
