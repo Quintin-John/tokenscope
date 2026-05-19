@@ -1127,6 +1127,12 @@ def test_available_models_empty_report() -> None:
 
 
 def test_daily_cache_hit_ratio_per_day_in_order() -> None:
+    """Active days produce ratios in ascending date order. Inactive
+    days within the span emit ``None`` (a zero-activity day has no
+    defined hit ratio — denominator would be 0/0, NOT a 0% ratio).
+
+    Fixture has activity on May 13 and May 15 with May 14 inactive;
+    expect 3 tuples, with ``None`` at the middle index."""
     report = _report(
         [
             _entry(
@@ -1144,14 +1150,124 @@ def test_daily_cache_hit_ratio_per_day_in_order() -> None:
         ]
     )
     series = daily_cache_hit_ratio(report)
-    # Sorted ascending by date.
-    assert [d for d, _ in series] == ["2026-05-13", "2026-05-15"]
+    assert [d for d, _ in series] == [
+        "2026-05-13", "2026-05-14", "2026-05-15",
+    ]
     assert series[0][1] == 0.0
-    assert series[1][1] == pytest.approx(0.8)
+    assert series[1][1] is None
+    assert series[2][1] == pytest.approx(0.8)
 
 
 def test_daily_cache_hit_ratio_empty_report() -> None:
     assert daily_cache_hit_ratio(_report([])) == []
+
+
+def test_daily_cache_hit_ratio_sparse_emits_one_tuple_per_calendar_day() -> None:
+    """Sparse input (active days Apr 1 + Apr 5, nothing between)
+    must produce 5 tuples — one per calendar day in the span — not
+    2. Pins the dense-output shape contract. Anyone reverting to
+    sparse-active-entry output trips this with a length mismatch."""
+    report = _report(
+        [
+            _entry(
+                "2026-04-01",
+                input_tokens=10,
+                cache_creation_tokens=10,
+                cache_read_tokens=80,
+            ),
+            _entry(
+                "2026-04-05",
+                input_tokens=20,
+                cache_creation_tokens=20,
+                cache_read_tokens=60,
+            ),
+        ]
+    )
+    series = daily_cache_hit_ratio(report)
+    dates = [d for d, _ in series]
+    assert dates == [
+        "2026-04-01", "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05",
+    ], (
+        f"sparse hit-ratio series must emit one tuple per calendar day "
+        f"in [min..max]; got {dates!r}"
+    )
+
+
+def test_daily_cache_hit_ratio_inactive_days_emit_none_not_zero() -> None:
+    """Inactive days emit ``None``, NOT ``0.0``.
+
+    Why this is load-bearing: ``0.0`` would tell the sparkline "the
+    cache served 0% of requests that day" — a different lie about a
+    day that had no requests at all. ``None`` is the honest
+    representation of absence; pandas converts it to ``NaN`` and
+    Plotly renders the line as a broken segment at the gap.
+
+    Anyone refactoring this to ``0.0`` (e.g. for arithmetic
+    convenience downstream) trips this test with a clear signal."""
+    report = _report(
+        [
+            _entry(
+                "2026-04-01",
+                input_tokens=10,
+                cache_creation_tokens=10,
+                cache_read_tokens=80,
+            ),
+            _entry(
+                "2026-04-05",
+                input_tokens=20,
+                cache_creation_tokens=20,
+                cache_read_tokens=60,
+            ),
+        ]
+    )
+    by_date = dict(daily_cache_hit_ratio(report))
+    # Active days have defined ratios.
+    assert by_date["2026-04-01"] == pytest.approx(0.8)
+    assert by_date["2026-04-05"] == pytest.approx(0.6)
+    # Inactive days emit None (NOT 0.0).
+    for inactive in ("2026-04-02", "2026-04-03", "2026-04-04"):
+        assert by_date[inactive] is None, (
+            f"inactive day {inactive} must emit None (undefined ratio), "
+            f"not a numeric placeholder; got {by_date[inactive]!r}"
+        )
+
+
+def test_daily_cache_hit_ratio_distinguishes_inactive_day_from_zero_token_entry() -> None:
+    """A day with an entry that has all-zero tokens emits
+    ``(date, 0.0)`` — the entry exists, the ratio is defined as 0.0
+    by the `cache_hit_ratio` formula (numerator and denominator
+    both zero, special-cased to 0.0). A different day with NO entry
+    at all emits ``(date, None)`` — the ratio is undefined because
+    no requests were made.
+
+    Pins that the "entry exists but is empty" vs "entry doesn't
+    exist" distinction is preserved end-to-end. A refactor that
+    collapses them into a single sentinel (either ``0.0`` or
+    ``None``) loses real semantic information about the day."""
+    report = _report(
+        [
+            _entry(
+                "2026-04-01",
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation_tokens=0,
+                cache_read_tokens=0,
+            ),
+            _entry(
+                "2026-04-03",
+                input_tokens=10,
+                cache_creation_tokens=0,
+                cache_read_tokens=90,
+            ),
+        ]
+    )
+    by_date = dict(daily_cache_hit_ratio(report))
+    # Entry on Apr 1 has all-zero tokens → ratio defined as 0.0.
+    assert by_date["2026-04-01"] == 0.0
+    # No entry on Apr 2 → ratio undefined → None.
+    assert by_date["2026-04-02"] is None
+    # Entry on Apr 3 has real tokens → real ratio.
+    assert by_date["2026-04-03"] == pytest.approx(0.9)
 
 
 # ---------- model_breakdown ----------

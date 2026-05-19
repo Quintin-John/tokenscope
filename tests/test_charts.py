@@ -1538,6 +1538,68 @@ def test_cache_hit_sparkline_returns_none_with_fewer_than_two_points() -> None:
     assert cache_hit_sparkline(one_day) is None
 
 
+def test_cache_hit_sparkline_breaks_line_at_inactive_day_gaps() -> None:
+    """The bug-fix contract: with sparse input (active days
+    separated by inactive ones), the sparkline's line trace must
+    cover every calendar day in the report's span, with NaN y-
+    values on inactive days. Plotly renders NaN as broken line
+    segments — surfacing the gap honestly instead of interpolating
+    a smooth slope across it.
+
+    This is the exact regression guard for the user-visible bug:
+    before this fix, `daily_cache_hit_ratio` returned only the
+    active-day datapoints, and `go.Scatter(mode="lines")` drew
+    straight line segments between adjacent active days. A multi-
+    day gap rendered as a continuous slope, falsely implying the
+    ratio transitioned smoothly across days that had no activity.
+
+    Fixture: Apr 1 (high ratio) + Apr 5 (lower ratio) with Apr 2-4
+    inactive. Expected: 5 datapoints in trace.x, with y=NaN on
+    Apr 2-4. Anyone reverting the data layer to sparse-active-
+    entry output trips this with both a length mismatch and a
+    "found numeric value where NaN expected" failure."""
+    import math
+
+    report = _report(
+        [
+            _entry(
+                "2026-04-01",
+                cost=1.0,
+                model="claude-opus-4-7",
+            ),
+            _entry(
+                "2026-04-05",
+                cost=2.0,
+                model="claude-opus-4-7",
+            ),
+        ]
+    )
+    fig = cache_hit_sparkline(report)
+    assert fig is not None
+    line_trace = fig.data[0]
+    xs = [str(x)[:10] for x in line_trace.x]
+    ys = list(line_trace.y)
+    assert xs == [
+        "2026-04-01", "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05",
+    ], (
+        f"line trace must cover every calendar day in span (dense, with "
+        f"NaN on inactive); got x={xs!r}"
+    )
+    # Active days carry real numbers.
+    assert not math.isnan(float(ys[0])), (
+        f"Apr 1 (active) y must be a real number; got {ys[0]!r}"
+    )
+    assert not math.isnan(float(ys[-1])), (
+        f"Apr 5 (active) y must be a real number; got {ys[-1]!r}"
+    )
+    # Inactive days carry NaN — Plotly's break-the-line marker.
+    for i, d in enumerate(("2026-04-02", "2026-04-03", "2026-04-04"), start=1):
+        assert math.isnan(float(ys[i])), (
+            f"inactive day {d} (index {i}) must carry NaN so Plotly "
+            f"renders a broken line segment; got y={ys[i]!r}"
+        )
+
+
 # ---------- cache_reads_vs_writes_bar ----------
 
 
