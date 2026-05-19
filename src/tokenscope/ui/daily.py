@@ -1,5 +1,4 @@
-"""Daily view — single unified table matching Overview's Cost-composition
-visual language, with per-day breakdown rows interleaved.
+"""Daily view — per-day expanders over the unified data shape.
 
 Surface (top-to-bottom):
 
@@ -8,39 +7,36 @@ Surface (top-to-bottom):
   * Plan banner (when the active plan supplies one).
   * KPI strip (slice 5) — four bordered metric cards: peak day,
     active-days fraction, avg-per-active-day, busiest model.
-  * One unified `st.dataframe` rendered via `render_data_table` —
-    same primitive Overview's Cost composition uses, same fonts,
-    widths, alignment by construction.
+  * One `st.expander` per active day (newest first, `expanded=True`
+    by default). Label = day summary
+    (`<date> · $<cost> · <tokens> tokens · <N model[s]> · <N project[s]>`).
+    Contents: a `render_data_table` call carrying that day's
+    per-project sub-rows.
+  * One final `render_data_table` call below all expanders rendering
+    the window-total row (Date="Total"). Not inside an expander —
+    the total is always visible.
 
-Unified table shape (10 columns):
+Per-day dataframes AND the total dataframe share
+`_TABLE_COLUMN_CONFIG` (10 columns). Per-day rows leave Date blank
+(date is in the expander label); the Total row carries `"Total"` in
+Date. Same column widths + types across every dataframe on the
+page by construction.
 
-    Date · Agent · Project · Models · Input · Output ·
-    Cache create · Cache read · Total tokens · Cost
+DRY / SOLID anchors:
 
-Row structure, descending date order (newest day at top):
-
-  - "All" row per day:        Date filled, Agent="All", Project blank,
-                              Models blank, numeric columns = day's
-                              aggregate sums across every cell.
-  - Project sub-row(s):       Date blank, Agent="- Claude Code",
-                              Project = `project_display_name(slug)`,
-                              Models = `, `-joined `display_model_label`
-                              outputs in per-(date, project, model)
-                              cost-descending order, numerics = the
-                              project's day total summed across models.
-                              One sub-row per project that ran that day.
-  - "Total" row at the bottom: Date="Total", Agent blank, Project
-                              blank, Models blank, numerics = window-
-                              wide sums.
-
-Column-config mirrors Overview Cost composition exactly: TextColumn
-for every label/token column carrying pre-formatted strings, Cost is
-the one NumberColumn. Explicit `width` on every column — no
-auto-detect. That's the DRY/SOLID anchor: one render primitive
-(`render_data_table`), one project-display rule
-(`paths.project_display_name`), one model-display rule
-(`analytics.display_model_label`), one per-(date, project) rollup
-(`analytics.daily_project_aggregates`).
+  - `ui/_tables.py:render_data_table` — single `st.dataframe`
+    invocation. Same primitive Overview's Cost composition uses.
+  - `paths.project_display_name` — single project-display rule;
+    sidebar and Daily both consume it.
+  - `analytics.daily_project_aggregates` — single per-(date,
+    project) rollup. Pure function; renderer is a thin caller.
+  - `_round_money` (private) — single money-rounding rule, applied
+    at the row-builder boundary so dataframe Cost cells carry
+    clean 2-dp values (NumberColumn formats `$X.XX` on top).
+  - Module constants `_TOTAL_LABEL`, `_AGENT_BREAKDOWN_LABEL`,
+    `AGENT_CONSTRAINT_CAPTION`, `_EMPTY_WINDOW_MESSAGE`,
+    `KPI_LABEL_*` — every user-facing string lives in exactly
+    one place.
 """
 
 from __future__ import annotations
@@ -110,11 +106,13 @@ KPI_HELP_AVG_PER_ACTIVE_DAY = (
     "of different lengths; use this to weight by busy days only."
 )
 
-# Unified-table row-type labels and agent indent marker. Every
-# user-facing string in the table that isn't a function-call result
-# lives in one of these constants. Tests reference these by name —
-# a copy edit propagates from one place.
-_ALL_LABEL = "All"
+# Row-label constants. Every user-facing string in the table that
+# isn't a function-call result lives in one of these — tests
+# reference them by name, copy edits propagate from one place.
+#
+# (`_ALL_LABEL` from slice 8 was deleted along with `_all_row`:
+# the day-aggregate row moved into the per-day expander's label,
+# so there's no longer an "All" cell in any dataframe.)
 _TOTAL_LABEL = "Total"
 # Leading dash mirrors ccusage's sub-row indent convention. The
 # "Claude Code" suffix keeps the agent label consistent with our
@@ -253,56 +251,91 @@ def _render_kpi_strip(
             st.caption(f"{share:.1%} of window spend")
 
 
+def _round_money(amount: float) -> float:
+    """Round a cost value to 2 decimal places (USD cents convention).
+
+    Used at the row-builder boundary so dataframe Cost cells carry
+    clean 2-dp values for copy / sort / export, while Streamlit's
+    `NumberColumn(format="$%.2f")` still applies the currency
+    formatter on top.
+
+    Without this, a raw IEEE float like `14.178827999999998` renders
+    as `$14.18` (NumberColumn rounds the display) but the underlying
+    cell carries the noisy raw value — copying a column to the
+    clipboard or sorting numerically exposes the noise.
+
+    Python's `round()` uses banker's rounding (half-to-even). For
+    money values arising from float arithmetic over upstream cents,
+    the rounding direction at the half-cent boundary is functionally
+    irrelevant: the input is float noise around a true value, not
+    actual half-cents.
+    """
+    return round(amount, 2)
+
+
 def _render_unified_table(
     summaries: list[DailySummary],
     cells: list[DailyCell],
     totals: WindowTotals,
 ) -> None:
-    """Build the table rows (per-day All + per-project sub-rows + one
-    Total row) and hand off to `render_data_table`. The render
-    primitive is shared with Overview's Cost composition — same
-    Streamlit invocation, same fonts/widths/alignment by
-    construction."""
+    """Render the Daily table as N per-day `st.expander`s (newest day
+    first) plus one final window-total dataframe below all expanders.
+
+    Each expander's label carries the day's summary (date · cost ·
+    tokens · model count · project count) — the user can scan day
+    summaries without expanding, and collapse days they don't care
+    about. The expander contents are a single `render_data_table`
+    call with that day's per-project sub-rows; the Date column is
+    blank on those rows (the date is in the label).
+
+    The window total renders as its own one-row `render_data_table`
+    call BELOW all expanders — not inside an expander, because the
+    user always wants the total visible. Every per-day dataframe
+    AND the total dataframe share `_TABLE_COLUMN_CONFIG`, so column
+    widths and types are identical by construction.
+    """
     summary_by_date = {s.date: s for s in summaries}
-    project_rows = daily_project_aggregates(cells)
     project_rows_by_date: dict[str, list[dict]] = {}
-    for row in project_rows:
+    for row in daily_project_aggregates(cells):
         project_rows_by_date.setdefault(row["date"], []).append(row)
 
-    table_rows: list[dict] = []
     for date in sorted(summary_by_date, reverse=True):
-        table_rows.append(_all_row(summary_by_date[date]))
-        for project_row in project_rows_by_date.get(date, []):
-            table_rows.append(_project_sub_row(project_row))
-    table_rows.append(_total_row(totals))
+        summary = summary_by_date[date]
+        day_rows = [
+            _project_sub_row(r) for r in project_rows_by_date.get(date, [])
+        ]
+        with st.expander(_day_expander_label(summary), expanded=True):
+            render_data_table(day_rows, _TABLE_COLUMN_CONFIG)
 
-    render_data_table(table_rows, _TABLE_COLUMN_CONFIG)
+    render_data_table([_total_row(totals)], _TABLE_COLUMN_CONFIG)
 
 
-def _all_row(summary: DailySummary) -> dict:
-    """Aggregate row for one day. Date filled with the date string;
-    Agent = `All`; Project / Models blank; numeric columns carry the
-    day's aggregate sums."""
-    return {
-        "Date": summary.date,
-        "Agent": _ALL_LABEL,
-        "Project": "",
-        "Models": "",
-        "Input": format_compact_int(summary.input_tokens),
-        "Output": format_compact_int(summary.output_tokens),
-        "Cache create": format_compact_int(summary.cache_creation_tokens),
-        "Cache read": format_compact_int(summary.cache_read_tokens),
-        "Total tokens": format_compact_int(summary.total_tokens),
-        "Cost": summary.cost,
-    }
+def _day_expander_label(summary: DailySummary) -> str:
+    """Label for the per-day expander. Format:
+    `<date> · $<cost> · <tokens> tokens · <N model[s]> · <N project[s]>`.
+
+    Order is scan-optimised: cost second (the field users come here
+    to compare), tokens third, model/project counts last. The cost
+    formatter matches the dataframe Cost column's display format
+    (`$X.XX`) so the header and the column never read with different
+    money precision.
+    """
+    return (
+        f"{summary.date} · "
+        f"${_round_money(summary.cost):,.2f} · "
+        f"{format_compact_int(summary.total_tokens)} tokens · "
+        f"{pluralize(summary.distinct_models, 'model')} · "
+        f"{pluralize(summary.distinct_projects, 'project')}"
+    )
 
 
 def _project_sub_row(project_row: dict) -> dict:
-    """Per-project breakdown row under a day's All row. Date blank
-    (visual cue that this row continues the day above); Agent has
-    the leading-dash indent marker; Project is the resolved display
-    name; Models is the `, `-joined model labels for this
-    (date, project) bucket in per-model cost-desc order."""
+    """Per-project breakdown row inside a day's expander. Date blank
+    (date is the expander label); Agent has the leading-dash indent
+    marker; Project is the resolved display name; Models is the
+    `, `-joined model labels for this (date, project) bucket in
+    per-model cost-desc order; Cost is money-rounded for clean
+    underlying cell values."""
     return {
         "Date": "",
         "Agent": _AGENT_BREAKDOWN_LABEL,
@@ -315,13 +348,14 @@ def _project_sub_row(project_row: dict) -> dict:
         "Cache create": format_compact_int(project_row["cache_creation_tokens"]),
         "Cache read": format_compact_int(project_row["cache_read_tokens"]),
         "Total tokens": format_compact_int(project_row["total_tokens"]),
-        "Cost": project_row["cost"],
+        "Cost": _round_money(project_row["cost"]),
     }
 
 
 def _total_row(totals: WindowTotals) -> dict:
     """Final window-wide totals row. Date = "Total" literal;
-    Agent / Project / Models blank; numerics are the window sums."""
+    Agent / Project / Models blank; numerics are the window sums;
+    Cost is money-rounded so the cell carries a clean 2-dp value."""
     return {
         "Date": _TOTAL_LABEL,
         "Agent": "",
@@ -332,5 +366,5 @@ def _total_row(totals: WindowTotals) -> dict:
         "Cache create": format_compact_int(totals.cache_creation_tokens),
         "Cache read": format_compact_int(totals.cache_read_tokens),
         "Total tokens": format_compact_int(totals.total_tokens),
-        "Cost": totals.cost,
+        "Cost": _round_money(totals.cost),
     }

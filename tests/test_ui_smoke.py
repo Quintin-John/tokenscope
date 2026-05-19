@@ -893,19 +893,23 @@ def test_daily_skips_zero_cost_days(
     at = _at("daily")
     at.run()
     _assert_clean(at)
-    # Daily renders one unified dataframe; the zero-day filter must
-    # exclude the zero_day's row entirely. Assert against the Date
-    # column of the rendered table.
-    assert len(at.dataframe) == 1, (
-        f"expected one unified dataframe; got {len(at.dataframe)}"
+    # Daily renders per-day expanders + one total dataframe. The
+    # zero-day filter must exclude both: no expander label starts
+    # with `zero_day`, and the total dataframe's Cost equals only
+    # the paid day's cost (not paid + zero).
+    expander_labels = [e.label for e in at.expander]
+    assert any(label.startswith(paid_day) for label in expander_labels), (
+        f"paid day {paid_day!r} missing from expanders: {expander_labels!r}"
     )
-    dates_in_table = at.dataframe[0].value["Date"].tolist()
-    assert paid_day in dates_in_table, (
-        f"paid day {paid_day!r} missing from rendered table: {dates_in_table!r}"
-    )
-    assert zero_day not in dates_in_table, (
+    assert not any(label.startswith(zero_day) for label in expander_labels), (
         f"zero-cost day {zero_day!r} should be filtered but appeared: "
-        f"{dates_in_table!r}"
+        f"{expander_labels!r}"
+    )
+    # Total dataframe should carry only the paid day's cost.
+    _, total = _daily_dataframes(at)
+    assert total.value["Cost"].iloc[0] == 12.5, (
+        f"total cost {total.value['Cost'].iloc[0]} should equal "
+        f"only the paid day's cost 12.5 — zero-cost day leaked through"
     )
 
 
@@ -989,125 +993,175 @@ def _projects_per_date_from_fixture() -> dict[str, set[str]]:
     return result
 
 
-# ---------- Daily unified table (Slice 8) ----------
+# ---------- Daily per-day expanders + money rounding (Slice 9) ----------
 
 
-def test_daily_renders_single_dataframe(
+def _daily_dataframes(at: AppTest) -> tuple[list, "object"]:
+    """Split AppTest's `at.dataframe` list into (per-day, total) for
+    the Daily tab. The Daily render emits N per-day dataframes (one
+    per expander) plus one final standalone total dataframe at the
+    bottom. The total dataframe is the only one carrying a non-empty
+    Date column ("Total" label), so we find it by that contract
+    rather than by index — robust against a renderer regression
+    that reorders the renders."""
+    per_day: list = []
+    total = None
+    for df in at.dataframe:
+        dates = df.value["Date"].tolist() if "Date" in df.value.columns else []
+        if dates and dates[0] != "":
+            assert total is None, (
+                f"more than one non-blank-Date dataframe: {dates!r}"
+            )
+            total = df
+        else:
+            per_day.append(df)
+    assert total is not None, (
+        "no total dataframe found (a dataframe with a non-blank Date "
+        "cell on its first row)"
+    )
+    return per_day, total
+
+
+def test_daily_renders_one_expander_per_active_day(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """The Daily tab renders exactly one `st.dataframe` — no
-    per-day cards, no per-day expanders, no separate sub-tables.
-    The unified-table shape is the load-bearing contract; this
-    test pins it at one assertion."""
+    """The Daily tab renders one `st.expander` per active day in the
+    fixture (descending date order). The expander count is the
+    primary per-day grouping contract."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-    assert len(at.dataframe) == 1, (
-        f"Daily must render exactly one dataframe; got {len(at.dataframe)}"
-    )
-    # No expanders anywhere on the Daily surface.
-    assert len(at.expander) == 0, (
-        f"Daily must contain zero expanders; got {len(at.expander)}: "
-        f"{[e.label for e in at.expander]!r}"
+    projects_per_date = _projects_per_date_from_fixture()
+    assert len(at.expander) == len(projects_per_date), (
+        f"expander count {len(at.expander)} != active days "
+        f"{len(projects_per_date)}: {[e.label for e in at.expander]!r}"
     )
 
 
-def test_daily_table_columns_match_spec(
+def test_daily_expander_label_carries_day_summary(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """The unified table's column list equals
-    `tokenscope.ui.daily.TABLE_COLUMNS` exactly, in order. Derives
-    the expected list from the module constant so a column rename
-    / reorder in `daily.py` propagates here without manual edits."""
+    """Every expander label is built by `_day_expander_label` and
+    carries 5 ` · `-separated segments: date, cost (with `$`),
+    tokens (ending in `tokens`), model count, project count. Pins
+    the label format end-to-end."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    assert at.expander, "no expanders rendered"
+    for exp in at.expander:
+        segments = [s.strip() for s in exp.label.split("·")]
+        assert len(segments) == 5, (
+            f"expander label not 5 segments: {exp.label!r} → {segments!r}"
+        )
+        assert segments[1].startswith("$"), (
+            f"second segment is not cost: {segments[1]!r}"
+        )
+        assert segments[2].endswith("tokens"), (
+            f"third segment is not tokens: {segments[2]!r}"
+        )
+        assert segments[3].endswith("model") or segments[3].endswith("models")
+        assert segments[4].endswith("project") or segments[4].endswith("projects")
+
+
+def test_daily_expanders_default_expanded(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Day expanders open by default so the user lands on the
+    breakdowns without per-row clicking. Streamlit preserves user
+    collapses within a session; this contract is the INITIAL state
+    on fresh renders only."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    for exp in at.expander:
+        # AppTest's Expandable carries `expanded` on its protobuf.
+        assert exp.proto.expanded is True, (
+            f"expander {exp.label!r} not expanded by default"
+        )
+
+
+def test_daily_expanders_appear_in_descending_date_order(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Expander labels start with the date; the labels' leading
+    dates appear in strictly descending order (newest day at top).
+    Pins the dashboard's recent-first convention end-to-end."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    dates = [exp.label.split(" · ", 1)[0] for exp in at.expander]
+    assert dates == sorted(dates, reverse=True), (
+        f"expander dates not descending: {dates!r}"
+    )
+
+
+def test_daily_per_day_dataframe_columns_match_spec(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Every per-day dataframe AND the total dataframe carry the
+    full `TABLE_COLUMNS` set, in order. Same column shape across
+    every dataframe on the page — that's the contract that makes
+    the shared `_TABLE_COLUMN_CONFIG` work for all of them."""
     from tokenscope.ui.daily import TABLE_COLUMNS
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-    rendered = list(at.dataframe[0].value.columns)
-    assert rendered == list(TABLE_COLUMNS), (
-        f"column drift: rendered={rendered!r}, expected={list(TABLE_COLUMNS)!r}"
-    )
+    expected = list(TABLE_COLUMNS)
+    for df in at.dataframe:
+        assert list(df.value.columns) == expected, (
+            f"column drift: rendered={list(df.value.columns)!r}, "
+            f"expected={expected!r}"
+        )
 
 
-def test_daily_table_row_count_matches_fixture(
+def test_daily_per_day_dataframe_row_count_matches_projects(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Row count formula: 1 (Total) + Σ_active_day(1 (All) +
-    N_projects_that_day). Derives from the fixture so adding /
-    removing dates or projects propagates without test
-    maintenance. ccusage doesn't emit zero-cost days in this
-    fixture, so the `s.cost > 0` filter is a no-op here."""
+    """Each per-day dataframe carries exactly N project sub-rows
+    where N is the number of distinct projects active on that day
+    in the fixture. The expander label tells us which date the
+    dataframe belongs to (parsed from the first segment of the
+    label); the fixture tells us how many projects that date had."""
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-
     projects_per_date = _projects_per_date_from_fixture()
-    expected = 1 + sum(1 + len(p) for p in projects_per_date.values())
-    actual = len(at.dataframe[0].value)
-    assert actual == expected, (
-        f"row count mismatch: got {actual}, expected {expected} = 1 (Total) + "
-        f"Σ(1 + N_projects) over {len(projects_per_date)} days"
+    per_day, _total = _daily_dataframes(at)
+    assert len(per_day) == len(at.expander), (
+        f"per-day dataframe count {len(per_day)} != expander count "
+        f"{len(at.expander)}"
     )
-
-
-def test_daily_table_all_rows_carry_day_summary(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """Each active date in the fixture must produce one row with
-    `Date == <date>` and `Agent == "All"`. Cost on that row equals
-    the fixture's day-total cost summed across every (project,
-    model) cell on that date. Pins the load-bearing invariant
-    end-to-end: aggregate rows must agree with the source data."""
-    from tokenscope.ui.daily import _ALL_LABEL
-
-    _wire_default_fixtures(mock_ccusage)
-    at = _at("daily")
-    at.run()
-    _assert_clean(at)
-
-    raw = json.loads((FIXTURES / "daily_by_project.json").read_text())
-    cost_by_date: dict[str, float] = {}
-    for entries in raw["projects"].values():
-        for e in entries:
-            cost_by_date[e["date"]] = cost_by_date.get(e["date"], 0.0) + e["totalCost"]
-
-    df = at.dataframe[0].value
-    all_rows = df[(df["Agent"] == _ALL_LABEL) & (df["Date"] != "")]
-    assert len(all_rows) == len(cost_by_date), (
-        f"All-row count {len(all_rows)} != distinct fixture dates "
-        f"{len(cost_by_date)}"
-    )
-    for _, row in all_rows.iterrows():
-        date = row["Date"]
-        assert date in cost_by_date, (
-            f"All-row carries unknown date {date!r}"
-        )
-        assert row["Cost"] == pytest.approx(cost_by_date[date]), (
-            f"All-row cost mismatch for {date}: row={row['Cost']}, "
-            f"fixture={cost_by_date[date]}"
+    for exp, df in zip(at.expander, per_day):
+        date = exp.label.split(" · ", 1)[0]
+        expected = len(projects_per_date[date])
+        actual = len(df.value)
+        assert actual == expected, (
+            f"per-day dataframe for {date!r} has {actual} rows; "
+            f"fixture has {expected} projects"
         )
 
 
-def test_daily_table_project_sub_rows_carry_project_display_name(
+def test_daily_per_day_dataframe_project_column_uses_display_name(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """Every project sub-row (rows where Agent == AGENT_BREAKDOWN_LABEL)
-    renders its Project column via `project_display_name`. The set
-    of rendered Project values must equal the set of
-    `project_display_name(slug)` for every distinct slug in the
-    fixture's `daily --instances` payload."""
+    """Project cells in every per-day dataframe come from
+    `project_display_name(slug)` — same helper the sidebar
+    dropdown consumes. Regression guard against the basename-era
+    `johnsmith` bug AND the pre-Slice-8 raw-slug rendering."""
     from tokenscope.paths import project_display_name
-    from tokenscope.ui.daily import _AGENT_BREAKDOWN_LABEL
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-
     projects_per_date = _projects_per_date_from_fixture()
     all_slugs = {
         slug
@@ -1116,98 +1170,163 @@ def test_daily_table_project_sub_rows_carry_project_display_name(
     }
     expected_displays = {project_display_name(slug) for slug in all_slugs}
 
-    df = at.dataframe[0].value
-    sub_rows = df[df["Agent"] == _AGENT_BREAKDOWN_LABEL]
-    rendered_projects = set(sub_rows["Project"].tolist())
-    assert rendered_projects, "no project sub-rows rendered"
-    # Subset relation: rendered values are all in the expected set
-    # (a slug appears only on the dates it was active, so the
-    # rendered set may equal or be a subset of the expected set).
-    assert rendered_projects <= expected_displays, (
+    rendered: set[str] = set()
+    per_day, _total = _daily_dataframes(at)
+    for df in per_day:
+        for value in df.value["Project"].tolist():
+            if value:
+                rendered.add(value)
+    assert rendered, "no project sub-rows rendered"
+    assert rendered <= expected_displays, (
         f"rendered Project values not produced by project_display_name: "
-        f"unexpected={rendered_projects - expected_displays!r}"
+        f"unexpected={rendered - expected_displays!r}"
     )
-    # Regression: the basename-era `johnsmith` value must not appear.
-    assert "johnsmith" not in rendered_projects, (
+    assert "johnsmith" not in rendered, (
         "rendered Project values include the username — "
         "project_basename regression?"
     )
 
 
-def test_daily_table_total_row_at_end(
+def test_daily_total_dataframe_renders_below_expanders(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """The last row of the unified table has `Date == "Total"` and
-    its Cost equals the fixture's window-wide `totals.totalCost`.
-    Pins the structural contract (Total row is last) AND the
-    numeric invariant (window sums match source)."""
-    from tokenscope.ui.daily import _TOTAL_LABEL
+    """A single-row total dataframe renders BELOW all per-day
+    expanders. Date column = `_TOTAL_LABEL`; Cost equals the
+    fixture's window-wide `totals.totalCost` (rounded to 2dp by
+    `_round_money`)."""
+    from tokenscope.ui.daily import _TOTAL_LABEL, _round_money
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-
-    df = at.dataframe[0].value
-    last_row = df.iloc[-1]
-    assert last_row["Date"] == _TOTAL_LABEL, (
-        f"last row Date is not the Total label: {last_row['Date']!r}"
+    _, total = _daily_dataframes(at)
+    assert len(total.value) == 1, (
+        f"total dataframe must have exactly 1 row; got {len(total.value)}"
     )
+    last_row = total.value.iloc[0]
+    assert last_row["Date"] == _TOTAL_LABEL
     raw = json.loads((FIXTURES / "daily_by_project.json").read_text())
-    assert last_row["Cost"] == pytest.approx(raw["totals"]["totalCost"]), (
-        f"Total-row cost {last_row['Cost']} != fixture totals.totalCost "
-        f"{raw['totals']['totalCost']}"
+    assert last_row["Cost"] == _round_money(raw["totals"]["totalCost"]), (
+        f"total-row cost {last_row['Cost']} != round_money(fixture) "
+        f"{_round_money(raw['totals']['totalCost'])}"
     )
 
 
-def test_daily_table_descending_date_order(
+def test_daily_cost_values_rounded_to_two_decimal_places(
     mock_ccusage, mock_ccusage_version
 ) -> None:
-    """All-rows (rows with non-empty Date and Agent == "All") appear
-    in strictly descending date order — newest day at the top.
-    Matches the dashboard's recent-first convention."""
-    from tokenscope.ui.daily import _ALL_LABEL
+    """Every Cost cell across every per-day dataframe AND the
+    total dataframe carries a 2-dp value (`value == round(value, 2)`).
+    Pins the money-rounding contract end-to-end so copy/sort/export
+    never expose the IEEE-noisy raw floats like `14.178827999999998`.
+    Empty-string Cost cells are allowed but not produced by the
+    current builders."""
+    _wire_default_fixtures(mock_ccusage)
+    at = _at("daily")
+    at.run()
+    _assert_clean(at)
+    for df in at.dataframe:
+        for value in df.value["Cost"].tolist():
+            if value == "":
+                continue
+            assert isinstance(value, (int, float)) and not isinstance(value, bool)
+            assert value == round(value, 2), (
+                f"Cost cell {value!r} not 2-dp rounded — "
+                f"`_round_money` regression?"
+            )
+
+
+def test_daily_token_columns_are_compact_strings(
+    mock_ccusage, mock_ccusage_version
+) -> None:
+    """Token columns (Input / Output / Cache create / Cache read /
+    Total tokens) reach the dataframe as pre-formatted compact
+    strings (`1.37B`, `522.2M`) via `format_compact_int`. Applies
+    to every per-day dataframe AND the total dataframe — same
+    column-type pattern as Overview's Cost composition Tokens
+    column, so glide-data-grid's NumberColumn-vs-TextColumn font-
+    weight asymmetry doesn't surface."""
+    from tokenscope.analytics import format_compact_int
 
     _wire_default_fixtures(mock_ccusage)
     at = _at("daily")
     at.run()
     _assert_clean(at)
-
-    df = at.dataframe[0].value
-    all_dates = df[(df["Agent"] == _ALL_LABEL) & (df["Date"] != "")]["Date"].tolist()
-    assert all_dates == sorted(all_dates, reverse=True), (
-        f"All-row dates not strictly descending: {all_dates!r}"
+    token_columns = ["Input", "Output", "Cache create", "Cache read", "Total tokens"]
+    seen_values: set[str] = set()
+    for df in at.dataframe:
+        for col in token_columns:
+            assert col in df.value.columns
+            for value in df.value[col].tolist():
+                assert isinstance(value, str), (
+                    f"column {col!r} carries non-string value {value!r} "
+                    f"({type(value).__name__}); expected compact string"
+                )
+                if value:
+                    seen_values.add(value)
+    raw = json.loads((FIXTURES / "daily_by_project.json").read_text())
+    fixture_values: set[int] = set()
+    for entries in raw["projects"].values():
+        for e in entries:
+            for b in e["modelBreakdowns"]:
+                fixture_values.add(b["inputTokens"])
+                fixture_values.add(b["outputTokens"])
+                fixture_values.add(b["cacheCreationTokens"])
+                fixture_values.add(b["cacheReadTokens"])
+    expected_some = {format_compact_int(v) for v in fixture_values}
+    assert seen_values & expected_some, (
+        f"rendered token values don't include any format_compact_int "
+        f"output: seen={sorted(seen_values)[:5]}, "
+        f"expected_some={sorted(expected_some)[:5]}"
     )
 
 
-def test_daily_table_cost_column_stays_numeric(
-    mock_ccusage, mock_ccusage_version
-) -> None:
-    """Cost column must stay as raw numerics (float / int) reaching
-    `NumberColumn` — that's what lets `format="$%.2f"` do the
-    currency formatting Streamlit-side. Regression guard against
-    accidentally moving cost into the TextColumn pre-format path
-    used for tokens.
+# ---------- _round_money unit tests ----------
+#
+# The contract is "round to 2 decimal places" (USD cents) so
+# dataframe Cost cells carry clean values for copy / sort / export.
+# The half-cent-boundary rounding direction is intentionally NOT
+# pinned — money values arising from float arithmetic over upstream
+# cents are IEEE noise around true values, not actual half-cents,
+# and the IEEE representation of `0.005` isn't exactly 0.005 anyway
+# (Python's `round(0.005, 2)` returns `0.01`, not `0.0`, because of
+# the float's actual stored value). The tests below pin the
+# load-bearing contract (2-dp output, noise collapsed, float type)
+# without nailing down the corner-case semantics.
 
-    Empty-string cells are allowed on rows where the row schema
-    leaves Cost blank (none in the current shape — All / sub-row /
-    Total all populate Cost — but the contract is "numeric when
-    populated", not "always populated")."""
-    _wire_default_fixtures(mock_ccusage)
-    at = _at("daily")
-    at.run()
-    _assert_clean(at)
 
-    df = at.dataframe[0].value
-    assert "Cost" in df.columns
-    for value in df["Cost"].tolist():
-        if value == "":
-            continue
-        assert isinstance(value, (int, float)) and not isinstance(value, bool), (
-            f"Cost column carries non-numeric value {value!r} "
-            f"({type(value).__name__}); NumberColumn formatting "
-            f"requires raw floats"
-        )
+def test_round_money_collapses_ieee_float_noise() -> None:
+    """The specific bug: raw floats like `14.178827999999998` (IEEE
+    noise around 14.18) get cleaned to 14.18."""
+    from tokenscope.ui.daily import _round_money
+
+    assert _round_money(14.178827999999998) == 14.18
+
+
+def test_round_money_passthrough_for_already_clean_values() -> None:
+    """A value already at 2dp passes through unchanged."""
+    from tokenscope.ui.daily import _round_money
+
+    assert _round_money(25.31) == 25.31
+    assert _round_money(0.0) == 0.0
+
+
+def test_round_money_handles_negative_values() -> None:
+    """Defensive: a refund / credit cost would be negative;
+    rounding direction is symmetric."""
+    from tokenscope.ui.daily import _round_money
+
+    assert _round_money(-1.234) == -1.23
+
+
+def test_round_money_returns_float_type() -> None:
+    """Streamlit's `NumberColumn` requires a numeric type (float or
+    int). The helper must NOT return `Decimal` or similar — that
+    would break the currency formatter."""
+    from tokenscope.ui.daily import _round_money
+
+    assert isinstance(_round_money(1.0), float)
 
 
 def test_daily_table_project_resolves_via_jsonl_in_docker_context(
@@ -1289,7 +1408,13 @@ def test_daily_table_project_resolves_via_jsonl_in_docker_context(
     at = _at("daily")
     at.run()
     _assert_clean(at)
-    rendered_projects = set(at.dataframe[0].value["Project"].tolist())
+    # The synthetic fixture has one date with one project — there
+    # will be one per-day expander containing one dataframe with
+    # one project sub-row.
+    per_day, _total = _daily_dataframes(at)
+    rendered_projects: set[str] = set()
+    for df in per_day:
+        rendered_projects.update(df.value["Project"].tolist())
     assert "tokenscope" in rendered_projects, (
         f"Project column doesn't show JSONL-resolved basename: "
         f"{rendered_projects!r}"
