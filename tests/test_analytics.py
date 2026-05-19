@@ -42,7 +42,7 @@ from tokenscope.analytics import (
     per_model_cache_performance,
     cost_share_by_model,
     daily_cache_hit_ratio,
-    daily_cost_by_model,
+    densify_daily_costs,
     daily_token_mix,
     bold_numbers_in_insight,
     collapse_composition_rows,
@@ -246,6 +246,129 @@ def test_rolling_cost_average_invalid_window_raises() -> None:
         rolling_cost_average(report, window_days=0)
     with pytest.raises(ValueError, match="window_days must be >= 1"):
         rolling_cost_average(report, window_days=-3)
+
+
+# ---------- rolling_cost_average — sparse-data contract ----------
+#
+# ccusage's `daily` subcommand emits one entry per *active* day; zero-
+# cost / no-activity days are absent from the report entirely. The
+# rolling average is labelled "N-day avg" in the UI (charts.py — the
+# `rolling_label = f"{rolling_window_days}-day avg"` line); the
+# implementation MUST window over N calendar days, not N entries.
+# With sparse data the two diverge: a 7-entry window can span 22
+# calendar days, which is what the entry-based implementation
+# returned despite the UI label saying "7-day avg".
+#
+# Contract pinned by these tests:
+#   1. Output has one (date, avg) tuple per CALENDAR day in the span
+#      [min(entry.date), max(entry.date)], not per active entry.
+#   2. The trailing window covers N calendar days, with absent days
+#      contributing zero to the mean. So "7-day avg" on a day with
+#      no prior activity for 6 days is `today_cost / 7`, not the
+#      mean of the most recent 7 entries regardless of how far back
+#      they reach.
+#   3. Leading-edge: window expands from 1 day on day 1 up to N
+#      days on day N, then strict trailing N thereafter (Option 2;
+#      see `test_rolling_cost_average_leading_edge_expanding_window`
+#      for the alternatives considered and why they were rejected).
+
+
+def test_rolling_cost_average_sparse_emits_one_output_per_calendar_day() -> None:
+    """A sparse report (active days Apr 1 + Apr 10, nothing between)
+    must produce 10 outputs — one per calendar day in the span —
+    not 2. Days without entries are zero-cost days, not skipped
+    points."""
+    report = _report(
+        [
+            _entry("2026-04-01", total_cost=10.0),
+            _entry("2026-04-10", total_cost=20.0),
+        ]
+    )
+    result = rolling_cost_average(report, window_days=3)
+    dates = [d for d, _ in result]
+    assert dates == [
+        "2026-04-01", "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05",
+        "2026-04-06", "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10",
+    ], (
+        f"sparse rolling avg must emit one tuple per calendar day in "
+        f"[min..max]; got {dates!r}"
+    )
+
+
+def test_rolling_cost_average_sparse_window_covers_calendar_days_not_entries() -> None:
+    """For Apr 10 with `window_days=3`, the trailing window is
+    Apr 8 / Apr 9 / Apr 10. Apr 8 and Apr 9 had no activity so they
+    contribute 0; only Apr 10 contributes 20.0. Mean = 20/3 ≈ 6.67.
+
+    The earlier entry-based implementation returned
+    (10 + 20) / 2 = 15.0 because it averaged the two most recent
+    ENTRIES (Apr 1 and Apr 10), ignoring that 8 zero-cost calendar
+    days separate them."""
+    report = _report(
+        [
+            _entry("2026-04-01", total_cost=10.0),
+            _entry("2026-04-10", total_cost=20.0),
+        ]
+    )
+    result = dict(rolling_cost_average(report, window_days=3))
+    assert result["2026-04-10"] == pytest.approx(20.0 / 3), (
+        f"Apr 10 trailing 3-day avg should be 20/3 (Apr 8 + Apr 9 are "
+        f"zero-cost days); got {result['2026-04-10']}"
+    )
+    assert result["2026-04-05"] == pytest.approx(0.0), (
+        f"Apr 5 trailing 3-day avg should be 0 (Apr 3, 4, 5 all had no "
+        f"activity); got {result['2026-04-05']}"
+    )
+
+
+def test_rolling_cost_average_leading_edge_expanding_window() -> None:
+    """Leading-edge contract (deliberate choice, not accidental):
+    the window EXPANDS from 1 day on the first day of the span up
+    to `window_days` on day `window_days`, then becomes strict
+    trailing thereafter.
+
+    This is what financial dashboards typically mean by "moving
+    average with warm-up" and matches the earlier implementation's
+    docstring intent ("early days in the report average over a
+    shorter window rather than producing NaN") — just now applied
+    to calendar days, not entries.
+
+    Alternative leading-edge semantics considered and rejected:
+      - Strict trailing (treat pre-span days as zero): produces a
+        visually misleading "rolling line ramps from low" artifact
+        for the first N days regardless of activity pattern.
+      - NaN/null (don't render until N days exist): drops 6 of 30
+        days of overlay coverage on a default-window dashboard —
+        too much.
+    """
+    report = _report(
+        [
+            _entry("2026-04-01", total_cost=10.0),
+            # gap, then later activity
+            _entry("2026-04-10", total_cost=20.0),
+        ]
+    )
+    result = dict(rolling_cost_average(report, window_days=3))
+    # Apr 1: only 1 day in span → window size = 1, avg = 10.
+    assert result["2026-04-01"] == pytest.approx(10.0), (
+        f"Apr 1 (day 1 of span) avg should be just Apr 1's cost; "
+        f"got {result['2026-04-01']}"
+    )
+    # Apr 2: window expands to 2 days → avg = (10 + 0) / 2 = 5.
+    assert result["2026-04-02"] == pytest.approx(5.0), (
+        f"Apr 2 (day 2 of span) avg should average Apr 1 + Apr 2; "
+        f"got {result['2026-04-02']}"
+    )
+    # Apr 3: window reaches full 3 days → avg = (10 + 0 + 0) / 3.
+    assert result["2026-04-03"] == pytest.approx(10.0 / 3), (
+        f"Apr 3 (day 3 of span, window fully expanded) avg should "
+        f"be 10/3; got {result['2026-04-03']}"
+    )
+    # Apr 4 onward: strict trailing 3-day window.
+    assert result["2026-04-04"] == pytest.approx(0.0), (
+        f"Apr 4 trailing 3-day window (Apr 2, 3, 4) is all zero; "
+        f"got {result['2026-04-04']}"
+    )
 
 
 # ---------- cache_hit_ratio ----------
@@ -570,33 +693,138 @@ def test_active_block_burn_empty_blocks() -> None:
     assert active_block_burn(BlocksReport(blocks=[])) is None
 
 
-# ---------- daily_cost_by_model ----------
+# ---------- densify_daily_costs ----------
+#
+# `densify_daily_costs` turns ccusage's sparse-active-days output
+# into a dense per-(date, family) frame over [min..max], zero-filling
+# inactive (date, family) pairs. The chart and rolling-average layers
+# both consume this — neither has correct semantics on the raw sparse
+# input (Plotly interpolates straight lines across gaps in the chart;
+# the rolling average windows over entries-not-days).
 
 
-def test_daily_cost_by_model_flattens_entries() -> None:
-    breakdowns = [
-        _breakdown("claude-opus-4-7", cost=10.0),
-        _breakdown("claude-haiku-4-5-20251001", cost=1.0),
+def test_densify_daily_costs_empty_report_returns_empty_list() -> None:
+    """No entries → no rows. The span is undefined when the report
+    is empty; consumers short-circuit on the empty list."""
+    assert densify_daily_costs(_report([])) == []
+
+
+def test_densify_daily_costs_contiguous_active_days_round_trip() -> None:
+    """When every day in [min..max] has an entry, densification is
+    a no-op (same shape, same costs, same family per date). Pins
+    the contract on the dense-input baseline."""
+    report = _report(
+        [
+            _entry("2026-05-15", total_cost=3.0),
+            _entry("2026-05-16", total_cost=5.0),
+        ]
+    )
+    rows = densify_daily_costs(report)
+    assert rows == [
+        {"date": "2026-05-15", "family": "opus", "cost": 3.0},
+        {"date": "2026-05-16", "family": "opus", "cost": 5.0},
     ]
+
+
+def test_densify_daily_costs_fills_inactive_days_with_zero() -> None:
+    """The bug-fix contract: a 4-day gap between active days
+    becomes 4 explicit zero-cost rows per family, not absent
+    rows. Same dataset that fails the chart-side test."""
+    report = _report(
+        [
+            _entry("2026-05-15", total_cost=10.0),
+            # gap: May 16, 17, 18 inactive
+            _entry("2026-05-19", total_cost=20.0),
+        ]
+    )
+    rows = densify_daily_costs(report)
+    dates = [r["date"] for r in rows]
+    assert dates == [
+        "2026-05-15", "2026-05-16", "2026-05-17", "2026-05-18", "2026-05-19",
+    ]
+    by_date = {r["date"]: r["cost"] for r in rows}
+    assert by_date["2026-05-15"] == pytest.approx(10.0)
+    assert by_date["2026-05-16"] == pytest.approx(0.0)
+    assert by_date["2026-05-17"] == pytest.approx(0.0)
+    assert by_date["2026-05-18"] == pytest.approx(0.0)
+    assert by_date["2026-05-19"] == pytest.approx(20.0)
+
+
+def test_densify_daily_costs_emits_one_row_per_family_per_day() -> None:
+    """Multiple families on a single active day produce one row per
+    (date, family) pair. Inactive days emit one zero-row per family
+    seen anywhere in the report — so the chart can render every
+    family's trace as a continuous line over the full span."""
     report = _report(
         [
             _entry(
-                "2026-05-16",
+                "2026-05-15",
                 total_cost=11.0,
                 models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
-                model_breakdowns=breakdowns,
-            )
+                model_breakdowns=[
+                    _breakdown("claude-opus-4-7", cost=10.0),
+                    _breakdown("claude-haiku-4-5-20251001", cost=1.0),
+                ],
+            ),
+            # May 16 inactive — emits zero rows for BOTH families
+            _entry("2026-05-17", total_cost=5.0),  # opus only
         ]
     )
-    rows = daily_cost_by_model(report)
+    rows = densify_daily_costs(report)
+    # 3 days x 2 families = 6 rows
+    assert len(rows) == 6
+    by_key = {(r["date"], r["family"]): r["cost"] for r in rows}
+    # May 15: both families present
+    assert by_key[("2026-05-15", "opus")] == pytest.approx(10.0)
+    assert by_key[("2026-05-15", "haiku")] == pytest.approx(1.0)
+    # May 16: both families zero (the gap)
+    assert by_key[("2026-05-16", "opus")] == pytest.approx(0.0)
+    assert by_key[("2026-05-16", "haiku")] == pytest.approx(0.0)
+    # May 17: opus only — haiku still emits a zero row so its trace
+    # stays continuous over the span
+    assert by_key[("2026-05-17", "opus")] == pytest.approx(5.0)
+    assert by_key[("2026-05-17", "haiku")] == pytest.approx(0.0)
+
+
+def test_densify_daily_costs_sums_within_a_day_same_family() -> None:
+    """Two breakdowns on the same day for the same family sum into
+    one (date, family) row. Defensive: a single DailyEntry shouldn't
+    normally carry two breakdowns for the same model, but if it does
+    (or two same-family models like opus-4-7 + opus-4-7-thinking),
+    the family bucket aggregates them rather than emitting duplicate
+    rows that would break the dense-frame uniqueness contract."""
+    report = _report(
+        [
+            _entry(
+                "2026-05-15",
+                total_cost=15.0,
+                models=["claude-opus-4-7"],
+                model_breakdowns=[
+                    _breakdown("claude-opus-4-7", cost=10.0),
+                    _breakdown("claude-opus-4-7", cost=5.0),
+                ],
+            ),
+        ]
+    )
+    rows = densify_daily_costs(report)
     assert rows == [
-        {"date": "2026-05-16", "model": "claude-opus-4-7", "family": "opus", "cost": 10.0},
-        {"date": "2026-05-16", "model": "claude-haiku-4-5-20251001", "family": "haiku", "cost": 1.0},
+        {"date": "2026-05-15", "family": "opus", "cost": 15.0},
     ]
 
 
-def test_daily_cost_by_model_empty_report() -> None:
-    assert daily_cost_by_model(_report([])) == []
+def test_densify_daily_costs_sorts_unordered_input() -> None:
+    """Input entries in arbitrary order produce ascending-date dense
+    output — densification implies its own canonical order, callers
+    don't pre-sort."""
+    report = _report(
+        [
+            _entry("2026-05-17", total_cost=3.0),
+            _entry("2026-05-15", total_cost=1.0),
+        ]
+    )
+    rows = densify_daily_costs(report)
+    dates = [r["date"] for r in rows]
+    assert dates == ["2026-05-15", "2026-05-16", "2026-05-17"]
 
 
 # ---------- daily_token_mix ----------

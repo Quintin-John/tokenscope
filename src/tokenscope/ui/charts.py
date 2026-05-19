@@ -31,7 +31,7 @@ from tokenscope.analytics import (
     cost_share_by_model,
     daily_cache_hit_ratio,
     daily_cache_savings,
-    daily_cost_by_model,
+    densify_daily_costs,
     daily_token_mix,
     model_breakdown,
     per_model_cache_performance,
@@ -355,36 +355,38 @@ def _daily_metric_figure(
     return fig
 
 
-_UNKNOWN_FAMILY_FALLBACK = "other"
-
-
 def _normalised_cost_rows(
     daily_report: DailyReport,
 ) -> pd.DataFrame | None:
-    """Return per-day cost-by-family rows with `family` guaranteed to
-    be a non-empty string.
+    """Return per-(date, family) dense rows, zero-filled for inactive days.
 
-    The earlier implementation passed the raw `daily_cost_by_model`
-    output to `px.area` / `px.bar`. If any row had an empty / `None` /
-    `NaN` family value, Plotly emitted an extra trace whose name
-    became the JS literal `undefined` — visible as a phantom band and
-    a `undefined` legend entry. Filtering and coercing here means
-    every trace downstream has a real category name.
+    Delegates to `analytics.densify_daily_costs`, which enumerates
+    every calendar day in the report's span and emits one row per
+    (date, family) pair — with `cost=0` on inactive days. The chart
+    layer needs this density so the stacked-area trace renders a
+    $0 baseline on inactive days instead of letting Plotly draw
+    straight-line segments connecting active days across multi-day
+    gaps (the interpolation bug that prompted this slice).
 
-    Returns `None` when the report has no rows or no positive cost,
-    so the caller can short-circuit to an empty chart.
+    `model_family` (which `densify_daily_costs` calls per breakdown)
+    returns `UNKNOWN_MODEL_FAMILY` for falsy inputs, so every family
+    value reaching this function is a non-empty string. No NaN /
+    None / empty-string fallback is needed at this layer — the
+    earlier filter was guarding against an `undefined` legend
+    artifact from `px.area` on raw rows that `densify_daily_costs`
+    now prevents at source.
+
+    Returns `None` when the report has no entries or every dense
+    row has zero cost (all-zero windows can't form a meaningful
+    stacked-area chart).
     """
-    rows = daily_cost_by_model(daily_report)
+    rows = densify_daily_costs(daily_report)
     if not rows:
         return None
     df = pd.DataFrame(rows)
-    df["family"] = (
-        df["family"].fillna("").astype(str).where(
-            df["family"].notna() & (df["family"] != ""),
-            _UNKNOWN_FAMILY_FALLBACK,
-        )
-    )
-    return df.groupby(["date", "family"], as_index=False)["cost"].sum()
+    if (df["cost"] == 0).all():
+        return None
+    return df
 
 
 def cost_trend_with_rolling(

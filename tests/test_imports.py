@@ -134,7 +134,7 @@ def test_analytics_public_surface() -> None:
         "today_cost",
         "aggregate_cache_hit_ratio",
         "active_block_burn",
-        "daily_cost_by_model",
+        "densify_daily_costs",
         "daily_token_mix",
         "find_daily_entry",
         "sessions_on_day",
