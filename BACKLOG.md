@@ -376,6 +376,10 @@ honest v1. This slice is the *real* fix; defer until the Daily
 view's actual usage suggests the client-source axis is worth the
 risk and effort budget.
 
+## Known platform limitations
+
+- **Sub-table font-weight inconsistency**: NumberColumn cells render heavier than TextColumn cells and headers in glide-data-grid. Platform-level, requires custom HTML rendering to fix. Deferred.
+
 ## Suggested order
 
 `18 → 19 → 20 → 21 → 22 → 23 → 24` — each independent,
