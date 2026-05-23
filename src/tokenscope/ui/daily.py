@@ -79,7 +79,7 @@ from tokenscope.analytics import (
 )
 from tokenscope.navigation import Navigation
 from tokenscope.paths import project_display_name
-from tokenscope.ui._data import load_daily_by_project
+from tokenscope.ui._data import EMPTY_WINDOW_MESSAGE, load_daily_by_project
 from tokenscope.ui._tables import render_data_table
 from tokenscope.ui.sidebar import SidebarState
 
@@ -96,15 +96,6 @@ AGENT_CONSTRAINT_CAPTION = (
     "All traffic is Claude Code — ccusage reads Claude Code "
     "transcripts only. SDK / console / third-party traffic is not "
     "visible here."
-)
-
-# Empty-window info copy — shared by both short-circuit paths in
-# `render()` (no cells from ccusage / every cell filtered out by the
-# zero-cost rule). Single source.
-_EMPTY_WINDOW_MESSAGE = (
-    "No usage in the selected window. Try widening the **Date "
-    "range** in the sidebar, or clearing the **Project** filter "
-    "if one is set."
 )
 
 # KPI card labels + tooltip — module-level constants so renderer copy
@@ -193,7 +184,7 @@ def render(state: SidebarState, nav: Navigation) -> None:
     # `busiest_model` stay consistent with `summaries`.
     summaries = [s for s in daily_summaries(cells) if s.cost > 0]
     if not summaries:
-        st.info(_EMPTY_WINDOW_MESSAGE)
+        st.info(EMPTY_WINDOW_MESSAGE)
         return
     active_dates = {s.date for s in summaries}
     cells = [c for c in cells if c.date in active_dates]

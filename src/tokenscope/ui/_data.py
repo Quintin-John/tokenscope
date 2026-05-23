@@ -38,6 +38,16 @@ from tokenscope.ui.sidebar import SidebarState
 _log = get_logger(__name__)
 
 
+# Shared empty-window copy. Every window-scoped view (Overview, Cache,
+# Models, Daily) renders this same `st.info` line when the loaded report
+# has no entries — one source of truth so the wording can't drift between
+# views.
+EMPTY_WINDOW_MESSAGE = (
+    "No usage in the selected window. Try widening the **Date range** "
+    "in the sidebar, or clearing the **Project** filter if one is set."
+)
+
+
 def _render_ccusage_error(label: str, exc: CcusageError) -> None:
     """Single error-rendering rule shared by every loader. Logs at ERROR
     with the loader label (so log greps stay specific) and renders

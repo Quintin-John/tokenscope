@@ -43,7 +43,7 @@ from tokenscope.analytics import (
 from tokenscope.models import DailyReport
 from tokenscope.navigation import Navigation
 from tokenscope.plans import Plan
-from tokenscope.ui._data import load_daily
+from tokenscope.ui._data import EMPTY_WINDOW_MESSAGE, load_daily
 from tokenscope.ui.charts import (
     cache_hit_sparkline,
     cache_reads_vs_writes_bar,
@@ -241,11 +241,7 @@ def render(state: SidebarState, nav: Navigation) -> None:
     _render_data_range_banner(daily_report, since_date=state.query.since_date())
 
     if not daily_report.daily:
-        st.info(
-            "No usage in the selected window. Try widening the **Date "
-            "range** in the sidebar, or clearing the **Project** filter "
-            "if one is set."
-        )
+        st.info(EMPTY_WINDOW_MESSAGE)
         return
 
     savings = cache_savings(daily_report)
