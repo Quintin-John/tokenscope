@@ -10,11 +10,14 @@ caption flags that approximation so the user isn't misled.
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
+
 import streamlit as st
 
 from tokenscope import data
 from tokenscope.analytics import blocks_for_session, find_session
 from tokenscope.ccusage import CcusageError
+from tokenscope.models import BlocksReport
 from tokenscope.navigation import Navigation
 from tokenscope.ui import breadcrumbs
 from tokenscope.ui._nav import handle_chart_drill
@@ -35,49 +38,76 @@ def render(state: SidebarState, nav: Navigation) -> None:
     st.subheader("Session detail")
     st.caption(f"`{nav.session}`")
 
-    try:
-        report = data.session(state.query)
-    except CcusageError as exc:
-        st.error(f"ccusage failed:\n\n```\n{exc}\n```")
-        return
+    # The blocks fetch feeds only the timeline at the bottom and is
+    # independent of the session fetch, so kick it off in a worker now:
+    # it overlaps the session subprocess and the chart rendering below,
+    # turning the drill's two cold-cache ccusage calls from sum into max
+    # wall-clock. Mirrors overview.py's main-thread + one-worker fan-out;
+    # `subprocess.run` releases the GIL during the child wait, so the two
+    # genuinely overlap. The future is consumed in
+    # `_render_blocks_timeline` under its OWN error handling, so a blocks
+    # failure still leaves the session KPIs/charts rendered — the same
+    # graceful degradation the serial version had.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        blocks_future: Future[BlocksReport] = pool.submit(
+            data.blocks, active=False, query=state.query
+        )
 
-    # `nav.session_project` disambiguates when multiple sessions
-    # share `nav.session` (the `subagents`-per-project case). When
-    # absent (legacy shareable URL) and the lookup is ambiguous,
-    # `find_session` returns None — failing closed rather than
-    # silently picking the first match.
-    entry = find_session(report, nav.session, nav.session_project)
-    if entry is None:
-        st.caption("Session not found in the selected date range.")
-        return
+        try:
+            report = data.session(state.query)
+        except CcusageError as exc:
+            st.error(f"ccusage failed:\n\n```\n{exc}\n```")
+            return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Cost", f"${entry.total_cost:,.2f}")
-    c2.metric("Total tokens", f"{entry.total_tokens:,}")
-    c3.metric("Models used", str(len(entry.models_used)))
-    c4.metric("Last activity", entry.last_activity)
+        # `nav.session_project` disambiguates when multiple sessions
+        # share `nav.session` (the `subagents`-per-project case). When
+        # absent (legacy shareable URL) and the lookup is ambiguous,
+        # `find_session` returns None — failing closed rather than
+        # silently picking the first match.
+        entry = find_session(report, nav.session, nav.session_project)
+        if entry is None:
+            st.caption("Session not found in the selected date range.")
+            return
 
-    st.caption(f"Project: `{entry.project_path}`")
-    st.divider()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Cost", f"${entry.total_cost:,.2f}")
+        c2.metric("Total tokens", f"{entry.total_tokens:,}")
+        c3.metric("Models used", str(len(entry.models_used)))
+        c4.metric("Last activity", entry.last_activity)
 
-    left, right = st.columns([1, 1])
-    with left:
-        st.markdown("**Cost share by model**")
-        fig = donut_cost_by_model(entry)
-        if fig is not None:
-            st.plotly_chart(fig, width="stretch")
-        else:
-            st.caption("No model breakdown.")
-    with right:
-        st.markdown("**Token mix**")
-        st.plotly_chart(session_token_mix(entry), width="stretch")
+        st.caption(f"Project: `{entry.project_path}`")
+        st.divider()
 
-    st.divider()
-    _render_blocks_timeline(state, nav, entry)
+        left, right = st.columns([1, 1])
+        with left:
+            st.markdown("**Cost share by model**")
+            fig = donut_cost_by_model(entry)
+            if fig is not None:
+                st.plotly_chart(fig, width="stretch")
+            else:
+                st.caption("No model breakdown.")
+        with right:
+            st.markdown("**Token mix**")
+            st.plotly_chart(session_token_mix(entry), width="stretch")
+
+        st.divider()
+        _render_blocks_timeline(state, nav, entry, blocks_future)
 
 
-def _render_blocks_timeline(state: SidebarState, nav: Navigation, entry) -> None:
-    """Blocks-within-session timeline (PLAN.md §3.1 last drill)."""
+def _render_blocks_timeline(
+    state: SidebarState,
+    nav: Navigation,
+    entry,
+    blocks_future: Future[BlocksReport],
+) -> None:
+    """Blocks-within-session timeline (PLAN.md §3.1 last drill).
+
+    Consumes the blocks report from the future `render` started, so the
+    fetch overlaps the session fetch and the chart rendering above. Reads
+    it under its own try/except: a blocks failure surfaces here (in the
+    timeline section) without aborting the session KPIs/charts already
+    rendered — the graceful degradation the serial version had.
+    """
     st.markdown("**Blocks on this day**")
     st.caption(
         "5-hour billing windows whose start time falls on this session's "
@@ -87,7 +117,7 @@ def _render_blocks_timeline(state: SidebarState, nav: Navigation, entry) -> None
     )
 
     try:
-        blocks_report = data.blocks(active=False, query=state.query)
+        blocks_report = blocks_future.result()
     except CcusageError as exc:
         st.error(f"ccusage failed:\n\n```\n{exc}\n```")
         return

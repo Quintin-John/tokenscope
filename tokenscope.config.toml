@@ -28,6 +28,10 @@ refresh_seconds = 30
 # daily cost. Lower = more sensitive, higher = only annotate genuinely
 # extreme days. 3.0 is the conventional outlier heuristic.
 spike_threshold_median_multiplier = 3.0
+# Trailing-window size (calendar days) for the rolling-average overlay
+# line on the Overview cost chart. The chart's "{N}-day avg" label is
+# derived from this. 7 = week-long smoothing.
+rolling_window_days = 7
 
 [pricing]
 # Source of truth for per-model rates (input / output / cache_create /

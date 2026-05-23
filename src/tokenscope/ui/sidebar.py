@@ -19,6 +19,7 @@ carry inline copy at their call sites.
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -33,7 +34,7 @@ from tokenscope.analytics import (
 from tokenscope.ccusage import CcusageError
 from tokenscope.log import get_logger
 from tokenscope.paths import project_display_name
-from tokenscope.plans import Plan, get_plan, plan_names
+from tokenscope.plans import DEFAULT_PLAN, Plan, get_plan, plan_names
 from tokenscope.query import Query
 from tokenscope.tz import detect_local_iana
 
@@ -250,6 +251,17 @@ def _seed_session_from_url() -> None:
             st.session_state[_KEY_PLAN] = params["plan"]
 
 
+def _plan_url_value(plan_name: str) -> str | None:
+    """The `plan` URL value for `plan_name`: ``None`` for the default
+    plan (omitted to keep shared links short), otherwise the name.
+
+    Keys off `plans.DEFAULT_PLAN` rather than a hardcoded name so the
+    default and the omission rule stay in sync — reordering PLANS or
+    renaming the default updates one place.
+    """
+    return plan_name if plan_name != DEFAULT_PLAN.name else None
+
+
 def _sync_url_from_session(
     since_date: date,
     until_date: date,
@@ -259,7 +271,7 @@ def _sync_url_from_session(
     plan_name: str,
 ) -> None:
     """Write current sidebar state back into the URL so the page is
-    bookmarkable / shareable. Defaults are omitted (Enterprise plan,
+    bookmarkable / shareable. Defaults are omitted (default plan,
     offline=False, no model narrowing) — keeps shared links short."""
     desired: dict[str, str | None] = {
         "since": since_date.isoformat() if since_date else None,
@@ -267,7 +279,7 @@ def _sync_url_from_session(
         "offline": "true" if offline else None,
         "project": project_value,
         "models": ",".join(selected_models) if selected_models else None,
-        "plan": plan_name if plan_name != "Enterprise" else None,
+        "plan": _plan_url_value(plan_name),
     }
     for key, value in desired.items():
         cur = st.query_params.get(key)
@@ -313,23 +325,40 @@ def _fetch_discovery_options(query: Query) -> tuple[list[str], list[str]]:
     """Populate the Project / Models dropdown option lists.
 
     Two ccusage calls (daily for models, daily_by_project for projects)
-    cached via `data.*`. Failures are swallowed so a first-run user
-    without ccusage configured still gets a usable sidebar — the
-    dropdowns just render empty option lists, the rest of the dashboard
-    surfaces the underlying error via its own `st.error` paths.
+    cached via `data.*`. They are independent, so they run concurrently:
+    on a cold cache the sidebar's wall-clock latency drops from the sum
+    of the two subprocess calls to their max. The sidebar renders on
+    every page, so this is on the hot path. `subprocess.run` releases
+    the GIL while it waits on the child, so the two genuinely overlap —
+    the same fan-out `day.py` / `overview.py` already use.
+
+    Each result is read under its own `except CcusageError`, so a
+    failure of one call still yields the other's options (daily fails →
+    models empty, projects intact; and vice versa). Both futures are
+    submitted eagerly, so `daily_by_project` runs even when `daily`
+    fails — that's the intended swallow behaviour (we want projects even
+    when models can't be read), and matches the prior serial code, whose
+    two separate try-blocks already attempted both on `CcusageError`.
+    Failures are swallowed so a first-run user without ccusage configured
+    still gets a usable sidebar; non-`CcusageError` bugs still propagate.
+
+    The threads touch no Streamlit state (no `st.*` here), so the
+    concurrency is safe — error presentation stays on the main thread in
+    the views' own `st.error` paths.
     """
     model_options: list[str] = []
     project_options: list[str] = []
-    try:
-        discovery_daily = data.daily(query)
-        model_options = available_models(discovery_daily)
-    except CcusageError as exc:
-        _log.warning("sidebar.discovery.daily_failed exc=%s", exc)
-    try:
-        discovery_proj = data.daily_by_project(query)
-        project_options = sorted(discovery_proj.projects.keys())
-    except CcusageError as exc:
-        _log.warning("sidebar.discovery.by_project_failed exc=%s", exc)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        daily_future = pool.submit(data.daily, query)
+        proj_future = pool.submit(data.daily_by_project, query)
+        try:
+            model_options = available_models(daily_future.result())
+        except CcusageError as exc:
+            _log.warning("sidebar.discovery.daily_failed exc=%s", exc)
+        try:
+            project_options = sorted(proj_future.result().projects.keys())
+        except CcusageError as exc:
+            _log.warning("sidebar.discovery.by_project_failed exc=%s", exc)
     return model_options, project_options
 
 
@@ -411,7 +440,7 @@ def _render_plan_selectbox() -> str:
     label alone."""
     plan_kwargs: dict = {"key": _KEY_PLAN}
     if _KEY_PLAN not in st.session_state:
-        plan_kwargs["index"] = 0
+        plan_kwargs["index"] = plan_names().index(DEFAULT_PLAN.name)
     return st.selectbox(
         "Subscription", options=plan_names(), help=_HELP_PLAN, **plan_kwargs
     )

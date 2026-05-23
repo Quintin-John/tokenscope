@@ -26,7 +26,6 @@ from tokenscope.ui.charts import (
     BRAND_HUE_SHADES,
     PALETTE,
     TOKEN_KIND_COLORS,
-    _daily_metric_figure,
     apply_enterprise_style,
     burn_gauge,
     cache_hit_sparkline,
@@ -81,87 +80,6 @@ def _report(entries: list[DailyEntry]) -> DailyReport:
             totalCost=sum(e.total_cost for e in entries),
         ),
     )
-
-
-# ---------- _daily_metric_figure (the single-day fallback helper) ----------
-
-
-def _two_day_df():
-    import pandas as pd
-    return pd.DataFrame(
-        [
-            {"date": "2026-05-15", "y": 1.0, "g": "a"},
-            {"date": "2026-05-15", "y": 2.0, "g": "b"},
-            {"date": "2026-05-16", "y": 3.0, "g": "a"},
-            {"date": "2026-05-16", "y": 4.0, "g": "b"},
-        ]
-    )
-
-
-def _one_day_df():
-    import pandas as pd
-    return pd.DataFrame(
-        [
-            {"date": "2026-05-16", "y": 5.0, "g": "a"},
-            {"date": "2026-05-16", "y": 6.0, "g": "b"},
-        ]
-    )
-
-
-def test_daily_metric_figure_multi_day_area_uses_stackgroup() -> None:
-    fig = _daily_metric_figure(
-        _two_day_df(),
-        x="date", y="y", color="g",
-        labels={"date": "Date", "y": "Y", "g": "G"},
-        multi_day="area",
-    )
-    # px.area renders scatter traces with stackgroup set (that's how
-    # plotly_express distinguishes "area" from "line" — fill is None,
-    # the stackgroup attr carries the layering identity).
-    assert all(t.type == "scatter" for t in fig.data)
-    assert all(t.stackgroup for t in fig.data), (
-        f"expected stackgroup on every trace, got "
-        f"{[t.stackgroup for t in fig.data]}"
-    )
-
-
-def test_daily_metric_figure_multi_day_line_has_markers_and_lines() -> None:
-    fig = _daily_metric_figure(
-        _two_day_df()[["date", "y"]].drop_duplicates(subset=["date"]),
-        x="date", y="y",
-        labels={"date": "Date", "y": "Y"},
-        multi_day="line",
-    )
-    assert len(fig.data) == 1
-    assert fig.data[0].type == "scatter"
-    assert fig.data[0].mode == "lines+markers"
-
-
-def test_daily_metric_figure_single_day_forces_bar_with_stack_when_coloured() -> None:
-    fig = _daily_metric_figure(
-        _one_day_df(),
-        x="date", y="y", color="g",
-        labels={"date": "Date", "y": "Y", "g": "G"},
-        multi_day="area",
-    )
-    assert all(t.type == "bar" for t in fig.data)
-    assert fig.layout.barmode == "stack"
-
-
-def test_daily_metric_figure_single_day_uncoloured_bar_no_stack_directive() -> None:
-    """When ``color`` is None there's no series split, so barmode must not
-    be touched — leaving Plotly's default is the correct authoritative
-    behaviour (no spurious layout override)."""
-    fig = _daily_metric_figure(
-        _one_day_df()[["date", "y"]].drop_duplicates(subset=["date"]),
-        x="date", y="y",
-        labels={"date": "Date", "y": "Y"},
-        multi_day="line",
-    )
-    assert len(fig.data) == 1
-    assert fig.data[0].type == "bar"
-    # We did not set barmode in this branch — Plotly default ('group') stands.
-    assert fig.layout.barmode != "stack"
 
 
 # ---------- cost_trend_with_rolling ----------
@@ -1331,7 +1249,7 @@ def test_live_spend_trajectory_returns_two_traces() -> None:
     `Actual` and `Projected`."""
     block = _block_with_burn()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     )
     assert fig is not None
     names = [t.name for t in fig.data]
@@ -1344,7 +1262,7 @@ def test_live_spend_trajectory_actual_starts_at_zero_cost() -> None:
     from some arbitrary baseline."""
     block = _block_with_burn()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     )
     actual = next(t for t in fig.data if t.name == "Actual")
     assert list(actual.y)[0] == 0.0
@@ -1356,7 +1274,7 @@ def test_live_spend_trajectory_actual_ends_at_current_cost() -> None:
     line stops where the dashed projection picks up."""
     block = _block_with_burn()
     now = "2026-05-16T15:30:00Z"
-    fig = live_spend_trajectory(block, samples=[], now_iso=now)
+    fig = live_spend_trajectory(block, now_iso=now)
     actual = next(t for t in fig.data if t.name == "Actual")
     assert list(actual.x)[-1] == now
     assert list(actual.y)[-1] == block.cost_usd
@@ -1367,7 +1285,7 @@ def test_live_spend_trajectory_projection_is_dashed() -> None:
     projected" as a single visual contract."""
     block = _block_with_burn()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     )
     projected = next(t for t in fig.data if t.name == "Projected")
     assert projected.line.dash == "dot"
@@ -1378,29 +1296,22 @@ def test_live_spend_trajectory_projection_endpoints() -> None:
     `projection.total_cost`. Verified for end-to-end correctness."""
     block = _block_with_burn()
     now = "2026-05-16T15:30:00Z"
-    fig = live_spend_trajectory(block, samples=[], now_iso=now)
+    fig = live_spend_trajectory(block, now_iso=now)
     projected = next(t for t in fig.data if t.name == "Projected")
     assert list(projected.x) == [now, block.end_time]
     assert list(projected.y) == [block.cost_usd, block.projection.total_cost]
 
 
-def test_live_spend_trajectory_samples_extend_actual_line() -> None:
-    """Persisted samples (from session_state) get woven into the
-    actual line so a long-open page shows real intra-block
-    trajectory instead of a straight start→now segment."""
+def test_live_spend_trajectory_actual_is_two_points() -> None:
+    """The actual line is exactly two points — block start at $0 and the
+    current `now` snapshot at `block.cost_usd`. No intra-block sample
+    history is woven in; the chart rebuilds from the latest snapshot on
+    each refresh."""
     block = _block_with_burn()
-    samples = [
-        ("2026-05-16T13:30:00Z", 0.20),
-        ("2026-05-16T14:00:00Z", 0.50),
-        ("2026-05-16T14:30:00Z", 0.80),
-    ]
-    fig = live_spend_trajectory(
-        block, samples=samples, now_iso="2026-05-16T15:30:00Z"
-    )
+    fig = live_spend_trajectory(block, now_iso="2026-05-16T15:30:00Z")
     actual = next(t for t in fig.data if t.name == "Actual")
-    # Anchor + 3 samples + now = 5 points
-    assert len(actual.x) == 5
-    assert list(actual.y) == [0.0, 0.20, 0.50, 0.80, block.cost_usd]
+    assert list(actual.x) == [block.start_time, "2026-05-16T15:30:00Z"]
+    assert list(actual.y) == [0.0, block.cost_usd]
 
 
 def test_live_spend_trajectory_returns_none_without_projection() -> None:
@@ -1426,7 +1337,7 @@ def test_live_spend_trajectory_returns_none_without_projection() -> None:
         projection=None,
     )
     assert live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     ) is None
 
 
@@ -1436,23 +1347,25 @@ def test_live_spend_trajectory_uses_palette_overlay_color() -> None:
     Single palette source of truth."""
     block = _block_with_burn()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     )
     for trace in fig.data:
         assert trace.line.color == PALETTE["7-day avg"]
 
 
 def test_burn_gauge_with_typical_renders_threshold_marker() -> None:
-    """When ``typical`` is provided and > 0, the gauge gets a red
-    threshold line at that value — visual cue for "above/below my usual
-    burn". Threshold structure: gauge.threshold = {"line": {"color":
-    "#d62728", ...}, "thickness": 0.85, "value": typical}."""
+    """When ``typical`` is provided and > 0, the gauge gets a neutral
+    reference line at that value — visual cue for "above/below my usual
+    burn". The line uses the PALETTE "7-day avg" reference hue, never a
+    reserved red. Threshold structure: gauge.threshold = {"line":
+    {"color": PALETTE["7-day avg"], ...}, "thickness": 0.85,
+    "value": typical}."""
     fig = burn_gauge(_block_with_burn(), typical=5.0)
     assert isinstance(fig, go.Figure)
     threshold = fig.data[0].gauge.threshold
     assert threshold is not None
     assert threshold.value == 5.0
-    assert threshold.line.color == "#d62728"
+    assert threshold.line.color == PALETTE["7-day avg"]
 
 
 def test_burn_gauge_typical_zero_does_not_set_threshold() -> None:
@@ -2038,10 +1951,210 @@ def test_live_spend_trajectory_renders_now_reference_line() -> None:
     so the spend and throughput charts share one visual anchor."""
     block = _block_with_burn()
     now = "2026-05-16T15:30:00Z"
-    fig = live_spend_trajectory(block, samples=[], now_iso=now)
+    fig = live_spend_trajectory(block, now_iso=now)
     now_lines = [
         s for s in fig.layout.shapes
         if s.type == "line" and s.x0 == now and s.x1 == now
     ]
     assert len(now_lines) == 1
     assert now_lines[0].line.dash == "dot"
+
+
+# ---------- drill-chart color contract (PALETTE / no-red) ----------
+#
+# Enforces the invariant the module docstring asserts (charts.py:
+# "every chart references PALETTE … NO data series anywhere in the app
+# uses red"). The "drill" detail charts (donut / session token mix /
+# burn gauge / session timeline) were built outside the PALETTE
+# discipline the Overview/Cache charts follow; this guard catches any
+# regression where a builder reintroduces an off-PALETTE or red data
+# color via a Plotly default sequence.
+
+import re as _re
+
+_HEX6 = _re.compile(r"^#[0-9a-fA-F]{6}$")
+
+# Plotly's default-qualitative red and the legacy hardcoded gauge red.
+# A data series must never use either (red is reserved for warnings).
+_RESERVED_REDS = {"#ef553b", "#d62728"}
+
+
+def _data_colors(fig: go.Figure) -> set[str]:
+    """Every explicit 6-digit hex color carried by a figure's DATA
+    series — trace line/marker/fill colors, pie per-slice marker
+    colors, and Indicator gauge bar + threshold-line colors.
+
+    Layout chrome (gridlines, text, backgrounds) is deliberately
+    excluded: the PALETTE / no-red contract governs data series, not
+    styling neutrals. Colors are lower-cased so the comparison is
+    case-insensitive.
+    """
+    found: set[str] = set()
+
+    def _add(value: object) -> None:
+        if isinstance(value, str) and _HEX6.match(value):
+            found.add(value.lower())
+
+    for trace in fig.data:
+        line = getattr(trace, "line", None)
+        if line is not None:
+            _add(getattr(line, "color", None))
+        marker = getattr(trace, "marker", None)
+        if marker is not None:
+            _add(getattr(marker, "color", None))
+            for c in getattr(marker, "colors", None) or ():
+                _add(c)
+        _add(getattr(trace, "fillcolor", None))
+        gauge = getattr(trace, "gauge", None)
+        if gauge is not None:
+            bar = getattr(gauge, "bar", None)
+            if bar is not None:
+                _add(getattr(bar, "color", None))
+            threshold = getattr(gauge, "threshold", None)
+            thr_line = getattr(threshold, "line", None) if threshold else None
+            if thr_line is not None:
+                _add(getattr(thr_line, "color", None))
+    return found
+
+
+def _drill_figures() -> dict[str, go.Figure]:
+    """One representative figure per drill chart, each with data that
+    exercises its full color path (multi-family donut, both block
+    states on the timeline, a gauge threshold)."""
+    donut_entry = DailyEntry(
+        date="2026-05-16",
+        inputTokens=100, outputTokens=200,
+        cacheCreationTokens=300, cacheReadTokens=400,
+        totalTokens=1000, totalCost=12.0,
+        modelsUsed=["claude-opus-4-7", "claude-sonnet-4-6"],
+        modelBreakdowns=[
+            ModelBreakdown(
+                modelName="claude-opus-4-7", inputTokens=100, outputTokens=200,
+                cacheCreationTokens=300, cacheReadTokens=400, cost=8.0,
+            ),
+            ModelBreakdown(
+                modelName="claude-sonnet-4-6", inputTokens=50, outputTokens=60,
+                cacheCreationTokens=70, cacheReadTokens=80, cost=4.0,
+            ),
+        ],
+    )
+    return {
+        "donut_cost_by_model": donut_cost_by_model(donut_entry),
+        "session_token_mix": session_token_mix(_session()),
+        "burn_gauge": burn_gauge(_block_with_burn(), typical=5.0),
+        "session_blocks_timeline": session_blocks_timeline(
+            [
+                _block(
+                    block_id="b-1",
+                    start="2026-05-16T13:00:00.000Z",
+                    end="2026-05-16T18:00:00.000Z",
+                ),
+                _block(
+                    block_id="b-2",
+                    start="2026-05-16T19:00:00.000Z",
+                    end="2026-05-17T00:00:00.000Z",
+                    is_active=True,
+                ),
+            ]
+        ),
+    }
+
+
+_DRILL_CHART_NAMES = (
+    "donut_cost_by_model",
+    "session_token_mix",
+    "burn_gauge",
+    "session_blocks_timeline",
+)
+
+
+@pytest.mark.parametrize("chart_name", _DRILL_CHART_NAMES)
+def test_drill_chart_data_colors_all_from_palette(chart_name: str) -> None:
+    """Every data-series color in each drill chart comes from PALETTE —
+    no Plotly default-sequence color leaks through."""
+    fig = _drill_figures()[chart_name]
+    colors = _data_colors(fig)
+    allowed = {c.lower() for c in PALETTE.values()}
+    assert colors, f"{chart_name}: expected at least one explicit data color"
+    off_palette = colors - allowed
+    assert not off_palette, (
+        f"{chart_name}: off-PALETTE data colors {sorted(off_palette)} "
+        f"(allowed: {sorted(allowed)})"
+    )
+
+
+@pytest.mark.parametrize("chart_name", _DRILL_CHART_NAMES)
+def test_drill_chart_uses_no_reserved_red(chart_name: str) -> None:
+    """No drill chart paints a data series in a reserved red — red is
+    reserved for warning / error states throughout the product."""
+    fig = _drill_figures()[chart_name]
+    reds = _data_colors(fig) & _RESERVED_REDS
+    assert not reds, f"{chart_name}: data series uses reserved red {sorted(reds)}"
+
+
+# ---------- rolling-window config wiring ----------
+
+
+def test_cost_trend_rolling_window_default_is_config_backed() -> None:
+    """The rolling-average window is operator-tunable via config, not a
+    hardcoded literal: the builder's default equals
+    config.OVERVIEW_ROLLING_WINDOW_DAYS so changing the TOML moves the
+    default without a code edit."""
+    import inspect
+
+    from tokenscope import config
+
+    default = (
+        inspect.signature(cost_trend_with_rolling)
+        .parameters["rolling_window_days"]
+        .default
+    )
+    assert default == config.OVERVIEW_ROLLING_WINDOW_DAYS
+
+
+def test_overview_rolling_window_days_shipped_default() -> None:
+    """The shipped tokenscope.config.toml default is a positive int
+    (7 = week-long smoothing)."""
+    from tokenscope import config
+
+    assert isinstance(config.OVERVIEW_ROLLING_WINDOW_DAYS, int)
+    assert config.OVERVIEW_ROLLING_WINDOW_DAYS == 7
+
+
+# ---------- composition bar delegates cache-hit ratio to analytics ----------
+
+
+def test_composition_bar_logs_delegated_cache_hit_ratio(caplog) -> None:
+    """The diagnostic cache_hit_ratio logged by the composition bar equals
+    analytics.block_cache_hit_ratio(block) — proving the formula is sourced
+    from the single authority, not recomputed inline. Compared against the
+    function (not a literal) so it can't drift from the canonical rule."""
+    import logging
+
+    from tokenscope.analytics import block_cache_hit_ratio
+
+    block = _block_with_burn()
+    with caplog.at_level(logging.INFO, logger="tokenscope.ui.charts"):
+        live_token_kind_composition_bar(block)
+    records = [
+        r for r in caplog.records if "live_token_mix.built" in r.getMessage()
+    ]
+    assert records, "expected the composition-bar build log line"
+    logged_ratio = records[-1].args[-1]
+    assert logged_ratio == pytest.approx(block_cache_hit_ratio(block))
+
+
+# ---------- canonical family colors derive from the known registry --------
+
+
+def test_family_canonical_colors_built_from_known_registry() -> None:
+    """The canonical family→color map is derived from
+    analytics.KNOWN_MODEL_FAMILIES (the single registry of known
+    families), not a re-listed tuple — so registering a new family there
+    (plus a PALETTE entry) flows into the chart colors automatically."""
+    from tokenscope.analytics import KNOWN_MODEL_FAMILIES
+    from tokenscope.ui.charts import _FAMILY_CANONICAL_COLORS
+
+    assert set(_FAMILY_CANONICAL_COLORS) == set(KNOWN_MODEL_FAMILIES)
+    for family in KNOWN_MODEL_FAMILIES:
+        assert _FAMILY_CANONICAL_COLORS[family] == PALETTE[family]

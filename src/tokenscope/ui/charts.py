@@ -18,15 +18,15 @@ means building the figure and ending with
 
 from __future__ import annotations
 
-from typing import Literal
-
 import logging
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+from tokenscope import config
 from tokenscope.analytics import (
+    KNOWN_MODEL_FAMILIES,
     UNKNOWN_MODEL_FAMILY,
     cost_share_by_model,
     daily_cache_hit_ratio,
@@ -115,6 +115,12 @@ BRAND_HUE_SHADES: tuple[str, ...] = (
 #   * Token kinds (Token mix, Cost composition): pink / blue / amber / teal
 #   * Overlay reference line (7-day avg): near-black so it sits as a
 #     summary line over the colored bands.
+#   * Block lifecycle (Session timeline) + burn-rate gauge value: a
+#     neutral slate ramp, deliberately OUTSIDE the family/kind hues so a
+#     block-state or gauge bar never reads as a model family or token
+#     kind. Drill-detail charts (donut / session token mix / burn gauge
+#     / session timeline) reference these instead of falling back to a
+#     Plotly default sequence (whose 2nd entry is the reserved red).
 PALETTE: dict[str, str] = {
     # Model families
     "opus": "#8b5cf6",         # violet
@@ -130,6 +136,16 @@ PALETTE: dict[str, str] = {
 
     # Overlay lines
     "7-day avg": "#1f2937",    # near-black (dashed)
+
+    # Block lifecycle states (Session timeline). Active is darker so the
+    # live block stands out against the muted completed ones.
+    "active": "#475569",       # slate-600 (prominent)
+    "completed": "#cbd5e1",    # slate-300 (muted)
+
+    # Burn-rate gauge value bar — neutral slate, distinct from the two
+    # block-state shades above. The gauge's "typical" threshold reuses
+    # the "7-day avg" reference hue rather than introducing a fourth.
+    "burn_rate": "#334155",    # slate-700
 }
 
 
@@ -155,9 +171,15 @@ TOKEN_KIND_LABELS: frozenset[str] = frozenset(TOKEN_KIND_COLORS)
 # Canonical colors for currently-known Anthropic families. Each
 # family keeps the same hue across every render regardless of input
 # ordering or which other families are present.
+#
+# Keyed by `analytics.KNOWN_MODEL_FAMILIES` — the single registry of
+# known families — so registering a new family there (plus a matching
+# PALETTE entry) flows into the chart colors with no edit here. The
+# dict-build raises `KeyError` at import time if a known family lacks a
+# PALETTE entry, which is the right failure mode (load-time loud).
 _FAMILY_CANONICAL_COLORS: dict[str, str] = {
     family: PALETTE[family]
-    for family in ("opus", "sonnet", "haiku")
+    for family in KNOWN_MODEL_FAMILIES
 }
 
 # Color for any family the registry doesn't recognise (the
@@ -325,36 +347,6 @@ def apply_enterprise_style(fig: go.Figure) -> go.Figure:
 __all_style_exports__ = ("apply_enterprise_style", "BRAND_HUE_SHADES")
 
 
-def _daily_metric_figure(
-    df: pd.DataFrame,
-    *,
-    x: str,
-    y: str,
-    labels: dict[str, str],
-    color: str | None = None,
-    multi_day: Literal["area", "line"],
-) -> go.Figure:
-    """Single-day-safe per-day metric figure.
-
-    `px.area` paints a zero-width band when only one x-value is
-    present; `px.line` shrinks to a marker that's easy to miss next to
-    a $-axis. Both fall back to `px.bar` (stacked when ``color`` is
-    set) so the data stays visible in every window length. This is the
-    one authoritative path for that fallback — chart builders compose
-    it instead of duplicating the branching logic.
-    """
-    if df[x].nunique() == 1:
-        fig = px.bar(df, x=x, y=y, color=color, labels=labels)
-        if color is not None:
-            fig.update_layout(barmode="stack")
-        return fig
-    if multi_day == "area":
-        return px.area(df, x=x, y=y, color=color, labels=labels)
-    fig = px.line(df, x=x, y=y, color=color, labels=labels)
-    fig.update_traces(mode="lines+markers")
-    return fig
-
-
 def _normalised_cost_rows(
     daily_report: DailyReport,
 ) -> pd.DataFrame | None:
@@ -392,7 +384,7 @@ def _normalised_cost_rows(
 def cost_trend_with_rolling(
     daily_report: DailyReport,
     *,
-    rolling_window_days: int = 7,
+    rolling_window_days: int = config.OVERVIEW_ROLLING_WINDOW_DAYS,
     spike: tuple[str, float] | None = None,
     mode: str = "stacked",
 ) -> go.Figure | None:
@@ -754,6 +746,15 @@ def token_mix_non_cache_percent_bar(
 def donut_cost_by_model(entry: DailyEntry | SessionEntry) -> go.Figure | None:
     """Donut: cost share by model for a single day or session.
 
+    Each slice is one model, colored by its FAMILY hue via the shared
+    `family_color_map` — so a model's slice carries the same color it
+    has on every other chart (opus violet, sonnet cyan, …). Two
+    versions of one family (e.g. opus-4-6 + opus-4-7) intentionally
+    share the family hue and are told apart by the slice label; this
+    keeps the donut on the single PALETTE source of truth rather than
+    falling back to a Plotly default sequence (whose 2nd color is the
+    reserved red).
+
     Returns None when the entry has no model breakdowns (defensive — every
     entry ccusage emits has at least one in practice).
     """
@@ -761,10 +762,14 @@ def donut_cost_by_model(entry: DailyEntry | SessionEntry) -> go.Figure | None:
     if not rows:
         return None
     df = pd.DataFrame(rows)
+    fam_colors = family_color_map([r["family"] for r in rows])
+    color_map = {r["model"]: fam_colors[r["family"]] for r in rows}
     fig = px.pie(
         df,
         values="cost",
         names="model",
+        color="model",
+        color_discrete_map=color_map,
         hole=0.55,
     )
     fig.update_traces(textposition="inside", textinfo="percent+label")
@@ -786,6 +791,7 @@ def session_token_mix(entry: SessionEntry) -> go.Figure:
         x="kind",
         y="tokens",
         color="kind",
+        color_discrete_map=TOKEN_KIND_COLORS,
         category_orders={"kind": list(KINDS)},
         labels={"kind": "", "tokens": "Tokens"},
     )
@@ -802,9 +808,12 @@ def burn_gauge(
     """Burn-rate gauge: actual cost-per-hour with projected end-of-window cost as a delta.
 
     When `typical` is provided (median burn from completed historical
-    blocks), a red threshold line is drawn at that value — gives users an
-    instant "above/below my usual" read instead of asking them to remember
-    what their typical burn looks like.
+    blocks), a neutral reference line is drawn at that value — gives
+    users an instant "above/below my usual" read instead of asking them
+    to remember what their typical burn looks like. The line uses the
+    PALETTE "7-day avg" reference hue (NOT red — red is reserved for
+    warning / error states throughout the product); the value bar uses
+    the PALETTE "burn_rate" slate.
 
     Returns None when the block has no burn rate (gap block or finished block).
     """
@@ -814,11 +823,11 @@ def burn_gauge(
     delta = {"reference": projected, "valueformat": "$,.2f"} if projected else None
     gauge: dict = {
         "axis": {"tickprefix": "$"},
-        "bar": {"color": "#1f77b4"},
+        "bar": {"color": PALETTE["burn_rate"]},
     }
     if typical is not None and typical > 0:
         gauge["threshold"] = {
-            "line": {"color": "#d62728", "width": 3},
+            "line": {"color": PALETTE["7-day avg"], "width": 3},
             "thickness": 0.85,
             "value": typical,
         }
@@ -1209,10 +1218,9 @@ def _apply_block_window_xaxis(
     regression the user flagged).
 
     Tick density of 11 gives roughly half-hourly ticks across five
-    hours — readable without crowding. Both `live_spend_trajectory`
-    and `live_token_throughput` route through this helper so the
-    two charts share one X-axis contract: same range, same ticks,
-    same `now` reference position.
+    hours — readable without crowding. `live_spend_trajectory` routes
+    through this helper to pin the X-axis to the block window: fixed
+    range, fixed ticks, and a `now` reference at a stable position.
     """
     fig.update_xaxes(
         range=[
@@ -1268,7 +1276,6 @@ def _add_now_reference(fig: go.Figure, now_iso: str) -> None:
 
 def live_spend_trajectory(
     block: BlockEntry,
-    samples: list[tuple[str, float]],
     *,
     now_iso: str,
     tz: str | None = None,
@@ -1277,11 +1284,9 @@ def live_spend_trajectory(
 
     Two traces:
 
-    * "Actual" — solid line tracking cost from the block's start
-      (cost=$0) through every recorded ``samples`` point up to the
-      "now" point at ``block.cost_usd``. Without persisted samples
-      this collapses to a two-point line (start → now); with samples
-      it shows the real intra-session trajectory.
+    * "Actual" — solid two-point line from the block's start (cost=$0)
+      to the "now" point at ``block.cost_usd``. Its slope is the
+      average burn rate so far in the window.
     * "Projected" — dashed continuation from the "now" point to the
       block's end at ``block.projection.total_cost`` (if a projection
       exists).
@@ -1296,8 +1301,7 @@ def live_spend_trajectory(
     naive local-clock ISO before reaching Plotly so the axis ticks
     render in the user's wall-clock time rather than UTC. The block
     window's start and end set the X-axis range explicitly so the
-    chart always spans the full 5 hours regardless of how many
-    samples have accumulated.
+    chart always spans the full 5 hours.
 
     Returns ``None`` if the block has no projection (gap block,
     finished block) — the caller renders an empty-state caption
@@ -1307,16 +1311,14 @@ def live_spend_trajectory(
         return None
 
     color = PALETTE["7-day avg"]
-    actual_x: list[str] = [_localize_iso(block.start_time, tz)]
-    actual_y: list[float] = [0.0]
-    for sample_t, sample_cost in samples:
-        actual_x.append(_localize_iso(sample_t, tz))
-        actual_y.append(sample_cost)
-    # Always anchor the actual line on the current "now" point so the
-    # solid trace ends at the latest snapshot regardless of sample
-    # cadence.
+    local_start = _localize_iso(block.start_time, tz)
     local_now = _localize_iso(now_iso, tz)
-    if actual_x[-1] != local_now:
+    actual_x: list[str] = [local_start]
+    actual_y: list[float] = [0.0]
+    # A block sampled at its exact start instant has no elapsed spend to
+    # plot — the single start anchor stands. Otherwise close the line on
+    # the current "now" point at the latest reported cost.
+    if local_now != local_start:
         actual_x.append(local_now)
         actual_y.append(block.cost_usd)
 
@@ -1368,7 +1370,7 @@ def live_token_kind_composition_bar(
     """Horizontal stacked bar of the block's aggregate token-kind
     composition.
 
-    Replaces the prior `live_token_throughput` time-series. The
+    Replaces a prior per-interval token-throughput time-series. The
     time-series was conceptually a per-interval percent-stacked
     area, but ccusage's `blocks --active --json` only exposes
     aggregate `tokenCounts` for the block — no per-entry
@@ -1399,7 +1401,11 @@ def live_token_kind_composition_bar(
     Returns ``None`` when the block has zero tokens (the caller
     renders an empty-state caption).
     """
-    from tokenscope.analytics import block_token_counts_by_kind, format_compact_int
+    from tokenscope.analytics import (
+        block_cache_hit_ratio,
+        block_token_counts_by_kind,
+        format_compact_int,
+    )
 
     counts = block_token_counts_by_kind(block)
     total = sum(counts.values())
@@ -1459,16 +1465,11 @@ def live_token_kind_composition_bar(
             zeroline=False,
         ),
     )
-    # Cache-hit ratio uses the same formula `analytics.block_cache_hit_ratio`
-    # exposes — compute inline so the log line is self-contained and
-    # doesn't require the caller to compute it twice. Identical
-    # denominator (input + cache_create + cache_read).
-    cache_eligible = (
-        counts["input"] + counts["cache_create"] + counts["cache_read"]
-    )
-    cache_hit_ratio = (
-        counts["cache_read"] / cache_eligible if cache_eligible else 0.0
-    )
+    # Cache-hit ratio for the diagnostic log line. Delegated to
+    # `analytics.block_cache_hit_ratio` — the authoritative formula — so
+    # the cache-eligible denominator has exactly one definition rather
+    # than being recomputed here.
+    cache_hit_ratio = block_cache_hit_ratio(block)
     _log.info(
         "chart.live_token_mix.built trace_names=%s total_tokens=%d "
         "cache_hit_ratio=%.4f",
@@ -1516,6 +1517,10 @@ def session_blocks_timeline(
         x_end="end",
         y="block_id",
         color="label",
+        color_discrete_map={
+            "Active": PALETTE["active"],
+            "Completed": PALETTE["completed"],
+        },
         category_orders={"label": ["Active", "Completed"]},
         hover_data={
             "block_id": False,

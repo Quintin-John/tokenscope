@@ -174,7 +174,6 @@ def test_live_charts_x_axis_in_local_timezone() -> None:
     block = _active_block()
     fig = live_spend_trajectory(
         block,
-        samples=[],
         now_iso="2026-05-16T15:30:00Z",
         tz="America/New_York",
     )
@@ -197,7 +196,7 @@ def test_live_spend_trajectory_x_axis_range_spans_full_block_window() -> None:
     ticks on the user's screenshot)."""
     block = _active_block()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T13:30:00Z",
+        block, now_iso="2026-05-16T13:30:00Z",
         tz="America/New_York",
     )
     xrange = fig.layout.xaxis.range
@@ -228,7 +227,7 @@ def test_live_spend_trajectory_now_reference_is_localized() -> None:
     line at the wrong horizontal position relative to the trace."""
     block = _active_block()
     fig = live_spend_trajectory(
-        block, samples=[],
+        block,
         now_iso="2026-05-16T15:30:00Z",
         tz="America/New_York",
     )
@@ -248,7 +247,7 @@ def test_live_charts_fall_back_to_utc_when_tz_none() -> None:
     unchanged, which Plotly treats as UTC by convention."""
     block = _active_block()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z", tz=None
+        block, now_iso="2026-05-16T15:30:00Z", tz=None
     )
     actual = next(t for t in fig.data if t.name == "Actual")
     # Raw UTC ISO from the block fixture (trailing `.000Z` retained).

@@ -95,7 +95,7 @@ from tokenscope.models import DailyReport
 from tokenscope.navigation import Navigation
 from tokenscope.plans import Plan
 from tokenscope.query import Query
-from tokenscope.ui._data import load_daily
+from tokenscope.ui._data import EMPTY_WINDOW_MESSAGE, load_daily
 from tokenscope.ui._nav import handle_chart_drill
 from tokenscope.ui._tables import render_data_table
 from tokenscope.ui.charts import (
@@ -169,10 +169,7 @@ def render(state: SidebarState, nav: Navigation, today: date | None = None) -> N
         _render_cost_composition(daily_report)
 
     if not daily_report.daily:
-        st.info(
-            "No usage in the selected window. Try widening the **Date range** "
-            "in the sidebar, or clearing the **Project** filter if one is set."
-        )
+        st.info(EMPTY_WINDOW_MESSAGE)
         return
 
     _render_cost_trend(daily_report, nav, spike)
@@ -437,8 +434,9 @@ def _render_cost_trend(
       ON TOP of dominant families). Surfaces small-usage families
       that the stacked view crushes against the baseline.
 
-    Both modes carry the dotted 7-day rolling-average line and the
-    spike annotation. Clicking a point still drills into the day view.
+    Both modes carry the dotted rolling-average line (window size from
+    config.OVERVIEW_ROLLING_WINDOW_DAYS) and the spike annotation.
+    Clicking a point still drills into the day view.
     """
     with st.container(border=True):
         title_cols = st.columns([3, 2])
@@ -459,13 +457,14 @@ def _render_cost_trend(
                 ),
             )
         mode = "overlay" if mode_choice == "Overlay" else "stacked"
+        rolling_days = config.OVERVIEW_ROLLING_WINDOW_DAYS
         st.caption(
-            "Dotted line is the 7-day rolling average. "
+            f"Dotted line is the {rolling_days}-day rolling average. "
             "Click any day to drill in."
         )
         fig = cost_trend_with_rolling(
             daily_report,
-            rolling_window_days=7,
+            rolling_window_days=rolling_days,
             spike=spike,
             mode=mode,
         )

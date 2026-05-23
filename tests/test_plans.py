@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import pytest
 
-from tokenscope.plans import PLANS, get_plan, plan_names
+from tokenscope.plans import DEFAULT_PLAN, PLANS, get_plan, plan_names
 
 
 def test_plan_names_order() -> None:
     # Enterprise must be first so it's the default selectbox option (PLAN §3.3).
     assert plan_names() == ["Enterprise", "Pro", "Max 5×", "Max 20×"]
+
+
+def test_default_plan_is_first_and_pay_as_you_go() -> None:
+    # DEFAULT_PLAN is the single authority for "which plan is the default":
+    # the first entry, pay-as-you-go (no flat-rate banner). The sidebar's
+    # selectbox index and URL-omission both derive from it.
+    assert DEFAULT_PLAN is PLANS[0]
+    assert DEFAULT_PLAN.name == "Enterprise"
+    assert DEFAULT_PLAN.is_flat_rate is False
 
 
 def test_enterprise_is_pay_as_you_go() -> None:

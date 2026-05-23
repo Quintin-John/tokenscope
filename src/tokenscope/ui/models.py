@@ -41,7 +41,7 @@ from tokenscope.analytics import (
 from tokenscope.log import get_logger
 from tokenscope.models import DailyReport
 from tokenscope.navigation import Navigation
-from tokenscope.ui._data import load_daily
+from tokenscope.ui._data import EMPTY_WINDOW_MESSAGE, load_daily
 from tokenscope.ui._nav import route_to
 from tokenscope.ui.charts import per_model_token_kind_bar
 from tokenscope.ui.sidebar import SidebarState
@@ -63,11 +63,7 @@ def render(state: SidebarState, nav: Navigation) -> None:
         return
 
     if not daily_report.daily:
-        st.info(
-            "No usage in the selected window. Try widening the **Date "
-            "range** in the sidebar, or clearing the **Project** filter "
-            "if one is set."
-        )
+        st.info(EMPTY_WINDOW_MESSAGE)
         return
 
     rows = model_breakdown(daily_report)
