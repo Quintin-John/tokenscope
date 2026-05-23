@@ -1269,7 +1269,6 @@ def _add_now_reference(fig: go.Figure, now_iso: str) -> None:
 
 def live_spend_trajectory(
     block: BlockEntry,
-    samples: list[tuple[str, float]],
     *,
     now_iso: str,
     tz: str | None = None,
@@ -1278,11 +1277,9 @@ def live_spend_trajectory(
 
     Two traces:
 
-    * "Actual" — solid line tracking cost from the block's start
-      (cost=$0) through every recorded ``samples`` point up to the
-      "now" point at ``block.cost_usd``. Without persisted samples
-      this collapses to a two-point line (start → now); with samples
-      it shows the real intra-session trajectory.
+    * "Actual" — solid two-point line from the block's start (cost=$0)
+      to the "now" point at ``block.cost_usd``. Its slope is the
+      average burn rate so far in the window.
     * "Projected" — dashed continuation from the "now" point to the
       block's end at ``block.projection.total_cost`` (if a projection
       exists).
@@ -1297,8 +1294,7 @@ def live_spend_trajectory(
     naive local-clock ISO before reaching Plotly so the axis ticks
     render in the user's wall-clock time rather than UTC. The block
     window's start and end set the X-axis range explicitly so the
-    chart always spans the full 5 hours regardless of how many
-    samples have accumulated.
+    chart always spans the full 5 hours.
 
     Returns ``None`` if the block has no projection (gap block,
     finished block) — the caller renders an empty-state caption
@@ -1308,16 +1304,14 @@ def live_spend_trajectory(
         return None
 
     color = PALETTE["7-day avg"]
-    actual_x: list[str] = [_localize_iso(block.start_time, tz)]
-    actual_y: list[float] = [0.0]
-    for sample_t, sample_cost in samples:
-        actual_x.append(_localize_iso(sample_t, tz))
-        actual_y.append(sample_cost)
-    # Always anchor the actual line on the current "now" point so the
-    # solid trace ends at the latest snapshot regardless of sample
-    # cadence.
+    local_start = _localize_iso(block.start_time, tz)
     local_now = _localize_iso(now_iso, tz)
-    if actual_x[-1] != local_now:
+    actual_x: list[str] = [local_start]
+    actual_y: list[float] = [0.0]
+    # A block sampled at its exact start instant has no elapsed spend to
+    # plot — the single start anchor stands. Otherwise close the line on
+    # the current "now" point at the latest reported cost.
+    if local_now != local_start:
         actual_x.append(local_now)
         actual_y.append(block.cost_usd)
 

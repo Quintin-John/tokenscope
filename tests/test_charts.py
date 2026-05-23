@@ -1249,7 +1249,7 @@ def test_live_spend_trajectory_returns_two_traces() -> None:
     `Actual` and `Projected`."""
     block = _block_with_burn()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     )
     assert fig is not None
     names = [t.name for t in fig.data]
@@ -1262,7 +1262,7 @@ def test_live_spend_trajectory_actual_starts_at_zero_cost() -> None:
     from some arbitrary baseline."""
     block = _block_with_burn()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     )
     actual = next(t for t in fig.data if t.name == "Actual")
     assert list(actual.y)[0] == 0.0
@@ -1274,7 +1274,7 @@ def test_live_spend_trajectory_actual_ends_at_current_cost() -> None:
     line stops where the dashed projection picks up."""
     block = _block_with_burn()
     now = "2026-05-16T15:30:00Z"
-    fig = live_spend_trajectory(block, samples=[], now_iso=now)
+    fig = live_spend_trajectory(block, now_iso=now)
     actual = next(t for t in fig.data if t.name == "Actual")
     assert list(actual.x)[-1] == now
     assert list(actual.y)[-1] == block.cost_usd
@@ -1285,7 +1285,7 @@ def test_live_spend_trajectory_projection_is_dashed() -> None:
     projected" as a single visual contract."""
     block = _block_with_burn()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     )
     projected = next(t for t in fig.data if t.name == "Projected")
     assert projected.line.dash == "dot"
@@ -1296,29 +1296,22 @@ def test_live_spend_trajectory_projection_endpoints() -> None:
     `projection.total_cost`. Verified for end-to-end correctness."""
     block = _block_with_burn()
     now = "2026-05-16T15:30:00Z"
-    fig = live_spend_trajectory(block, samples=[], now_iso=now)
+    fig = live_spend_trajectory(block, now_iso=now)
     projected = next(t for t in fig.data if t.name == "Projected")
     assert list(projected.x) == [now, block.end_time]
     assert list(projected.y) == [block.cost_usd, block.projection.total_cost]
 
 
-def test_live_spend_trajectory_samples_extend_actual_line() -> None:
-    """Persisted samples (from session_state) get woven into the
-    actual line so a long-open page shows real intra-block
-    trajectory instead of a straight start→now segment."""
+def test_live_spend_trajectory_actual_is_two_points() -> None:
+    """The actual line is exactly two points — block start at $0 and the
+    current `now` snapshot at `block.cost_usd`. No intra-block sample
+    history is woven in; the chart rebuilds from the latest snapshot on
+    each refresh."""
     block = _block_with_burn()
-    samples = [
-        ("2026-05-16T13:30:00Z", 0.20),
-        ("2026-05-16T14:00:00Z", 0.50),
-        ("2026-05-16T14:30:00Z", 0.80),
-    ]
-    fig = live_spend_trajectory(
-        block, samples=samples, now_iso="2026-05-16T15:30:00Z"
-    )
+    fig = live_spend_trajectory(block, now_iso="2026-05-16T15:30:00Z")
     actual = next(t for t in fig.data if t.name == "Actual")
-    # Anchor + 3 samples + now = 5 points
-    assert len(actual.x) == 5
-    assert list(actual.y) == [0.0, 0.20, 0.50, 0.80, block.cost_usd]
+    assert list(actual.x) == [block.start_time, "2026-05-16T15:30:00Z"]
+    assert list(actual.y) == [0.0, block.cost_usd]
 
 
 def test_live_spend_trajectory_returns_none_without_projection() -> None:
@@ -1344,7 +1337,7 @@ def test_live_spend_trajectory_returns_none_without_projection() -> None:
         projection=None,
     )
     assert live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     ) is None
 
 
@@ -1354,7 +1347,7 @@ def test_live_spend_trajectory_uses_palette_overlay_color() -> None:
     Single palette source of truth."""
     block = _block_with_burn()
     fig = live_spend_trajectory(
-        block, samples=[], now_iso="2026-05-16T15:30:00Z"
+        block, now_iso="2026-05-16T15:30:00Z"
     )
     for trace in fig.data:
         assert trace.line.color == PALETTE["7-day avg"]
@@ -1958,7 +1951,7 @@ def test_live_spend_trajectory_renders_now_reference_line() -> None:
     so the spend and throughput charts share one visual anchor."""
     block = _block_with_burn()
     now = "2026-05-16T15:30:00Z"
-    fig = live_spend_trajectory(block, samples=[], now_iso=now)
+    fig = live_spend_trajectory(block, now_iso=now)
     now_lines = [
         s for s in fig.layout.shapes
         if s.type == "line" and s.x0 == now and s.x1 == now

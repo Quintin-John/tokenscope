@@ -35,10 +35,10 @@ Implementation notes:
   in `@st.cache_data(ttl=30)`). Compounding two 30s windows would
   give the user a snapshot up to a minute stale, which defeats
   "live". The fragment is the only refresh cadence.
-- Spend-trajectory samples are appended to `st.session_state` on
-  each fragment refresh so the chart's solid line gets richer as
-  the user keeps the page open. Samples are keyed by block id so
-  a new active block starts the history fresh.
+- The spend-trajectory chart is a two-point actual line (block start
+  → now) plus a dashed projection to the window end. Each fragment
+  refresh rebuilds it from the latest ccusage snapshot; no
+  intra-block sample history is persisted.
 """
 
 from __future__ import annotations
@@ -535,7 +535,7 @@ def _render_spend_trajectory(
     with st.container(border=True):
         st.markdown(_spend_chart_title(plan))
         st.caption(_spend_chart_caption(plan))
-        fig = live_spend_trajectory(active, [], now_iso=now_iso, tz=tz)
+        fig = live_spend_trajectory(active, now_iso=now_iso, tz=tz)
         if fig is None:
             st.caption(_spend_chart_no_projection_caption(plan))
             return
