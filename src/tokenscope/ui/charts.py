@@ -1394,7 +1394,11 @@ def live_token_kind_composition_bar(
     Returns ``None`` when the block has zero tokens (the caller
     renders an empty-state caption).
     """
-    from tokenscope.analytics import block_token_counts_by_kind, format_compact_int
+    from tokenscope.analytics import (
+        block_cache_hit_ratio,
+        block_token_counts_by_kind,
+        format_compact_int,
+    )
 
     counts = block_token_counts_by_kind(block)
     total = sum(counts.values())
@@ -1454,16 +1458,11 @@ def live_token_kind_composition_bar(
             zeroline=False,
         ),
     )
-    # Cache-hit ratio uses the same formula `analytics.block_cache_hit_ratio`
-    # exposes — compute inline so the log line is self-contained and
-    # doesn't require the caller to compute it twice. Identical
-    # denominator (input + cache_create + cache_read).
-    cache_eligible = (
-        counts["input"] + counts["cache_create"] + counts["cache_read"]
-    )
-    cache_hit_ratio = (
-        counts["cache_read"] / cache_eligible if cache_eligible else 0.0
-    )
+    # Cache-hit ratio for the diagnostic log line. Delegated to
+    # `analytics.block_cache_hit_ratio` — the authoritative formula — so
+    # the cache-eligible denominator has exactly one definition rather
+    # than being recomputed here.
+    cache_hit_ratio = block_cache_hit_ratio(block)
     _log.info(
         "chart.live_token_mix.built trace_names=%s total_tokens=%d "
         "cache_hit_ratio=%.4f",

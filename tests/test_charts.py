@@ -2119,3 +2119,26 @@ def test_overview_rolling_window_days_shipped_default() -> None:
 
     assert isinstance(config.OVERVIEW_ROLLING_WINDOW_DAYS, int)
     assert config.OVERVIEW_ROLLING_WINDOW_DAYS == 7
+
+
+# ---------- composition bar delegates cache-hit ratio to analytics ----------
+
+
+def test_composition_bar_logs_delegated_cache_hit_ratio(caplog) -> None:
+    """The diagnostic cache_hit_ratio logged by the composition bar equals
+    analytics.block_cache_hit_ratio(block) — proving the formula is sourced
+    from the single authority, not recomputed inline. Compared against the
+    function (not a literal) so it can't drift from the canonical rule."""
+    import logging
+
+    from tokenscope.analytics import block_cache_hit_ratio
+
+    block = _block_with_burn()
+    with caplog.at_level(logging.INFO, logger="tokenscope.ui.charts"):
+        live_token_kind_composition_bar(block)
+    records = [
+        r for r in caplog.records if "live_token_mix.built" in r.getMessage()
+    ]
+    assert records, "expected the composition-bar build log line"
+    logged_ratio = records[-1].args[-1]
+    assert logged_ratio == pytest.approx(block_cache_hit_ratio(block))
