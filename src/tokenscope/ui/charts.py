@@ -26,6 +26,7 @@ import plotly.graph_objects as go
 
 from tokenscope import config
 from tokenscope.analytics import (
+    KNOWN_MODEL_FAMILIES,
     UNKNOWN_MODEL_FAMILY,
     cost_share_by_model,
     daily_cache_hit_ratio,
@@ -170,9 +171,15 @@ TOKEN_KIND_LABELS: frozenset[str] = frozenset(TOKEN_KIND_COLORS)
 # Canonical colors for currently-known Anthropic families. Each
 # family keeps the same hue across every render regardless of input
 # ordering or which other families are present.
+#
+# Keyed by `analytics.KNOWN_MODEL_FAMILIES` — the single registry of
+# known families — so registering a new family there (plus a matching
+# PALETTE entry) flows into the chart colors with no edit here. The
+# dict-build raises `KeyError` at import time if a known family lacks a
+# PALETTE entry, which is the right failure mode (load-time loud).
 _FAMILY_CANONICAL_COLORS: dict[str, str] = {
     family: PALETTE[family]
-    for family in ("opus", "sonnet", "haiku")
+    for family in KNOWN_MODEL_FAMILIES
 }
 
 # Color for any family the registry doesn't recognise (the

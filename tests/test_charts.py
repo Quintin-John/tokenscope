@@ -2142,3 +2142,19 @@ def test_composition_bar_logs_delegated_cache_hit_ratio(caplog) -> None:
     assert records, "expected the composition-bar build log line"
     logged_ratio = records[-1].args[-1]
     assert logged_ratio == pytest.approx(block_cache_hit_ratio(block))
+
+
+# ---------- canonical family colors derive from the known registry --------
+
+
+def test_family_canonical_colors_built_from_known_registry() -> None:
+    """The canonical family→color map is derived from
+    analytics.KNOWN_MODEL_FAMILIES (the single registry of known
+    families), not a re-listed tuple — so registering a new family there
+    (plus a PALETTE entry) flows into the chart colors automatically."""
+    from tokenscope.analytics import KNOWN_MODEL_FAMILIES
+    from tokenscope.ui.charts import _FAMILY_CANONICAL_COLORS
+
+    assert set(_FAMILY_CANONICAL_COLORS) == set(KNOWN_MODEL_FAMILIES)
+    for family in KNOWN_MODEL_FAMILIES:
+        assert _FAMILY_CANONICAL_COLORS[family] == PALETTE[family]
