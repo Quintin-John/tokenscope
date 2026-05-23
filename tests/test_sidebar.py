@@ -257,3 +257,21 @@ def test_sidebar_css_file_lives_next_to_module() -> None:
     `packages = ["src/tokenscope"]`)."""
     css_path = Path(sidebar.__file__).parent / "_sidebar_styles.css"
     assert css_path.is_file()
+
+
+# ---------- _plan_url_value ----------
+
+
+def test_plan_url_value_omits_default_plan() -> None:
+    """The default plan is omitted from the URL (None) so shared links
+    stay short. Keys off plans.DEFAULT_PLAN, not a hardcoded name."""
+    from tokenscope.plans import DEFAULT_PLAN
+
+    assert sidebar._plan_url_value(DEFAULT_PLAN.name) is None
+
+
+@pytest.mark.parametrize("name", ["Pro", "Max 5×", "Max 20×"])
+def test_plan_url_value_writes_non_default_plan(name: str) -> None:
+    """Any non-default plan is written to the URL verbatim so it
+    round-trips through a shared link."""
+    assert sidebar._plan_url_value(name) == name

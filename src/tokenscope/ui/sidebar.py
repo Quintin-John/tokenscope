@@ -33,7 +33,7 @@ from tokenscope.analytics import (
 from tokenscope.ccusage import CcusageError
 from tokenscope.log import get_logger
 from tokenscope.paths import project_display_name
-from tokenscope.plans import Plan, get_plan, plan_names
+from tokenscope.plans import DEFAULT_PLAN, Plan, get_plan, plan_names
 from tokenscope.query import Query
 from tokenscope.tz import detect_local_iana
 
@@ -250,6 +250,17 @@ def _seed_session_from_url() -> None:
             st.session_state[_KEY_PLAN] = params["plan"]
 
 
+def _plan_url_value(plan_name: str) -> str | None:
+    """The `plan` URL value for `plan_name`: ``None`` for the default
+    plan (omitted to keep shared links short), otherwise the name.
+
+    Keys off `plans.DEFAULT_PLAN` rather than a hardcoded name so the
+    default and the omission rule stay in sync — reordering PLANS or
+    renaming the default updates one place.
+    """
+    return plan_name if plan_name != DEFAULT_PLAN.name else None
+
+
 def _sync_url_from_session(
     since_date: date,
     until_date: date,
@@ -259,7 +270,7 @@ def _sync_url_from_session(
     plan_name: str,
 ) -> None:
     """Write current sidebar state back into the URL so the page is
-    bookmarkable / shareable. Defaults are omitted (Enterprise plan,
+    bookmarkable / shareable. Defaults are omitted (default plan,
     offline=False, no model narrowing) — keeps shared links short."""
     desired: dict[str, str | None] = {
         "since": since_date.isoformat() if since_date else None,
@@ -267,7 +278,7 @@ def _sync_url_from_session(
         "offline": "true" if offline else None,
         "project": project_value,
         "models": ",".join(selected_models) if selected_models else None,
-        "plan": plan_name if plan_name != "Enterprise" else None,
+        "plan": _plan_url_value(plan_name),
     }
     for key, value in desired.items():
         cur = st.query_params.get(key)
@@ -411,7 +422,7 @@ def _render_plan_selectbox() -> str:
     label alone."""
     plan_kwargs: dict = {"key": _KEY_PLAN}
     if _KEY_PLAN not in st.session_state:
-        plan_kwargs["index"] = 0
+        plan_kwargs["index"] = plan_names().index(DEFAULT_PLAN.name)
     return st.selectbox(
         "Subscription", options=plan_names(), help=_HELP_PLAN, **plan_kwargs
     )

@@ -44,6 +44,14 @@ PLANS: tuple[Plan, ...] = (
 )
 
 
+# Authoritative default plan. The sidebar selects this on first load and
+# omits it from shareable URLs to keep links short (PLAN.md §3.3). Both
+# the selectbox default-index and the URL-omission check derive from this
+# constant, so changing the default — or reordering PLANS — is a one-line
+# edit here rather than scattered name/index literals at the call sites.
+DEFAULT_PLAN: Plan = PLANS[0]
+
+
 def get_plan(name: str) -> Plan:
     for plan in PLANS:
         if plan.name == name:
