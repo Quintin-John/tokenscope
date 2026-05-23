@@ -560,8 +560,8 @@ def _render_token_kind_kpis(active: BlockEntry) -> None:
       * The kind's PALETTE colour as a 12×12 swatch beside the
         label, so the visual category (input is pink, output is
         blue, ...) is established BEFORE the user reads the
-        throughput chart below. The same swatch hue paints the
-        matching band in `live_token_throughput`, so the cards
+        composition chart below. The same swatch hue paints the
+        matching band in the composition bar below, so the cards
         and the chart share one mental mapping.
       * Abbreviated token count (`format_compact_int`) — the
         magnitudes span 5+ orders of magnitude (cache_read in

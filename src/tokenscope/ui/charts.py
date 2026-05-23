@@ -1211,10 +1211,9 @@ def _apply_block_window_xaxis(
     regression the user flagged).
 
     Tick density of 11 gives roughly half-hourly ticks across five
-    hours — readable without crowding. Both `live_spend_trajectory`
-    and `live_token_throughput` route through this helper so the
-    two charts share one X-axis contract: same range, same ticks,
-    same `now` reference position.
+    hours — readable without crowding. `live_spend_trajectory` routes
+    through this helper to pin the X-axis to the block window: fixed
+    range, fixed ticks, and a `now` reference at a stable position.
     """
     fig.update_xaxes(
         range=[
@@ -1364,7 +1363,7 @@ def live_token_kind_composition_bar(
     """Horizontal stacked bar of the block's aggregate token-kind
     composition.
 
-    Replaces the prior `live_token_throughput` time-series. The
+    Replaces a prior per-interval token-throughput time-series. The
     time-series was conceptually a per-interval percent-stacked
     area, but ccusage's `blocks --active --json` only exposes
     aggregate `tokenCounts` for the block — no per-entry

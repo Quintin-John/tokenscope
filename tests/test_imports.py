@@ -284,3 +284,24 @@ def test_day_view_row_entity_param_types_resolve() -> None:
 
     assert _resolved_hint(_session_row, "session") is SessionEntry
     assert _resolved_hint(_block_row, "block") is BlockEntry
+
+
+def test_no_stale_live_token_throughput_references() -> None:
+    """`live_token_throughput` was replaced by
+    `live_token_kind_composition_bar`. The deleted symbol must not appear
+    anywhere in the package source — comments/docstrings naming a function
+    a reader can't find are misleading. Negative guard so it can't creep
+    back (mirrors the dead-duplicate guard in test_ccusage_public_surface)."""
+    from pathlib import Path
+
+    import tokenscope
+
+    root = Path(tokenscope.__file__).parent
+    offenders = [
+        str(p.relative_to(root))
+        for p in root.rglob("*.py")
+        if "live_token_throughput" in p.read_text(encoding="utf-8")
+    ]
+    assert not offenders, (
+        f"stale `live_token_throughput` references remain in: {offenders}"
+    )
