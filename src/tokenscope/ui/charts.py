@@ -24,6 +24,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+from tokenscope import config
 from tokenscope.analytics import (
     UNKNOWN_MODEL_FAMILY,
     cost_share_by_model,
@@ -376,7 +377,7 @@ def _normalised_cost_rows(
 def cost_trend_with_rolling(
     daily_report: DailyReport,
     *,
-    rolling_window_days: int = 7,
+    rolling_window_days: int = config.OVERVIEW_ROLLING_WINDOW_DAYS,
     spike: tuple[str, float] | None = None,
     mode: str = "stacked",
 ) -> go.Figure | None:

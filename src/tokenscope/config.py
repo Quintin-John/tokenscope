@@ -66,6 +66,13 @@ OVERVIEW_SPIKE_THRESHOLD: float = float(
     _get("overview", "spike_threshold_median_multiplier", 3.0)
 )
 
+# Trailing-window size (in calendar days) for the rolling-average overlay
+# line on the Overview cost chart. The chart's "{N}-day avg" label is
+# derived from this. 7 matches the conventional week-long smoothing.
+OVERVIEW_ROLLING_WINDOW_DAYS: int = int(
+    _get("overview", "rolling_window_days", 7)
+)
+
 
 # [pricing]
 PRICING_LITELLM_URL: str = str(

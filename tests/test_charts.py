@@ -2090,3 +2090,32 @@ def test_drill_chart_uses_no_reserved_red(chart_name: str) -> None:
     fig = _drill_figures()[chart_name]
     reds = _data_colors(fig) & _RESERVED_REDS
     assert not reds, f"{chart_name}: data series uses reserved red {sorted(reds)}"
+
+
+# ---------- rolling-window config wiring ----------
+
+
+def test_cost_trend_rolling_window_default_is_config_backed() -> None:
+    """The rolling-average window is operator-tunable via config, not a
+    hardcoded literal: the builder's default equals
+    config.OVERVIEW_ROLLING_WINDOW_DAYS so changing the TOML moves the
+    default without a code edit."""
+    import inspect
+
+    from tokenscope import config
+
+    default = (
+        inspect.signature(cost_trend_with_rolling)
+        .parameters["rolling_window_days"]
+        .default
+    )
+    assert default == config.OVERVIEW_ROLLING_WINDOW_DAYS
+
+
+def test_overview_rolling_window_days_shipped_default() -> None:
+    """The shipped tokenscope.config.toml default is a positive int
+    (7 = week-long smoothing)."""
+    from tokenscope import config
+
+    assert isinstance(config.OVERVIEW_ROLLING_WINDOW_DAYS, int)
+    assert config.OVERVIEW_ROLLING_WINDOW_DAYS == 7
