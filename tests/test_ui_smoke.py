@@ -4922,6 +4922,115 @@ def test_session_without_session_param(mock_ccusage, mock_ccusage_version) -> No
     _assert_clean(at)
 
 
+# ---------- session drill: concurrent session+blocks fetch + failure modes ----
+
+
+def _first_session_id() -> str:
+    session = json.loads((FIXTURES / "session.json").read_text())
+    return session["sessions"][0]["sessionId"]
+
+
+def test_session_view_errors_when_session_fetch_fails(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """When `data.session` raises, the session view shows st.error and
+    early-returns before the KPIs/charts. The blocks fetch runs eagerly
+    in its worker but its result is discarded — no exception leaks."""
+    from tokenscope.ccusage import CcusageError
+
+    def _raises(*a, **kw):
+        raise CcusageError("simulated session fetch failure")
+
+    _wire_default_fixtures(mock_ccusage)
+    monkeypatch.setattr("tokenscope.data.session", _raises)
+
+    at = _at("session", session=_first_session_id())
+    at.run()
+
+    assert any(
+        v.startswith("ccusage failed") for v in [e.value for e in at.error]
+    ), f"expected ccusage-failed st.error; got {[e.value for e in at.error]!r}"
+    assert len(at.exception) == 0, [str(e.value)[:300] for e in at.exception]
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Cost share by model" not in md, (
+        "charts rendered despite session-fetch failure — the early return "
+        "did not fire"
+    )
+
+
+def test_session_view_blocks_failure_degrades_gracefully(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """A blocks-fetch failure surfaces in the timeline section ONLY — the
+    session KPIs and charts above it still render. Pins the graceful
+    degradation preserved when the blocks fetch moved into a worker
+    future: the future is read under `_render_blocks_timeline`'s own
+    try/except, not at the top of the view."""
+    from tokenscope.ccusage import CcusageError
+
+    def _raises(*a, **kw):
+        raise CcusageError("simulated blocks fetch failure")
+
+    _wire_default_fixtures(mock_ccusage)
+    monkeypatch.setattr("tokenscope.data.blocks", _raises)
+
+    at = _at("session", session=_first_session_id())
+    at.run()
+
+    assert len(at.exception) == 0, [str(e.value)[:300] for e in at.exception]
+    # KPIs + charts above the timeline still rendered.
+    assert "Cost" in {m.label for m in at.metric}, "session KPIs missing"
+    md = "\n".join(m.value for m in at.markdown)
+    assert "Cost share by model" in md, (
+        "charts missing — a blocks failure must not abort the whole view"
+    )
+    assert "Blocks on this day" in md, "timeline section header missing"
+    # The blocks failure surfaced as an error inside the timeline section.
+    assert any(
+        v.startswith("ccusage failed") for v in [e.value for e in at.error]
+    ), f"expected timeline ccusage-failed st.error; got {[e.value for e in at.error]!r}"
+
+
+def test_session_view_fetches_run_in_parallel(
+    mock_ccusage, mock_ccusage_version, monkeypatch
+) -> None:
+    """Session view dispatches `data.session` (main thread) and
+    `data.blocks` (worker) concurrently. Proof: a 2-party
+    `threading.Barrier` blocks each patched fetch until both arrive. A
+    serial implementation deadlocks until the 5s timeout fires
+    (BrokenBarrierError surfaces as a Python exception); the parallel one
+    lets both reach the barrier within microseconds and proceed.
+
+    The sidebar's discovery only calls `data.daily` / `daily_by_project`
+    (never session/blocks), so exactly two parties hit this barrier."""
+    import threading
+
+    from tokenscope import data as _data_mod
+
+    barrier = threading.Barrier(2, timeout=5.0)
+    original_session = _data_mod.session
+    original_blocks = _data_mod.blocks
+
+    def _barriered_session(*a, **kw):
+        barrier.wait()
+        return original_session(*a, **kw)
+
+    def _barriered_blocks(*a, **kw):
+        barrier.wait()
+        return original_blocks(*a, **kw)
+
+    monkeypatch.setattr("tokenscope.data.session", _barriered_session)
+    monkeypatch.setattr("tokenscope.data.blocks", _barriered_blocks)
+    _wire_default_fixtures(mock_ccusage)
+
+    at = _at("session", session=_first_session_id())
+    at.run()
+    _assert_clean(at)
+    # Reaching here without a BrokenBarrierError proves both fetches
+    # arrived at the barrier concurrently.
+    assert "Cost" in {m.label for m in at.metric}
+
+
 def test_block_renders_with_valid_id(mock_ccusage, mock_ccusage_version) -> None:
     _wire_default_fixtures(mock_ccusage)
     blocks = json.loads((FIXTURES / "blocks.json").read_text())
