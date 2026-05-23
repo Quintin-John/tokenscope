@@ -18,8 +18,6 @@ means building the figure and ending with
 
 from __future__ import annotations
 
-from typing import Literal
-
 import logging
 
 import pandas as pd
@@ -339,36 +337,6 @@ def apply_enterprise_style(fig: go.Figure) -> go.Figure:
 
 
 __all_style_exports__ = ("apply_enterprise_style", "BRAND_HUE_SHADES")
-
-
-def _daily_metric_figure(
-    df: pd.DataFrame,
-    *,
-    x: str,
-    y: str,
-    labels: dict[str, str],
-    color: str | None = None,
-    multi_day: Literal["area", "line"],
-) -> go.Figure:
-    """Single-day-safe per-day metric figure.
-
-    `px.area` paints a zero-width band when only one x-value is
-    present; `px.line` shrinks to a marker that's easy to miss next to
-    a $-axis. Both fall back to `px.bar` (stacked when ``color`` is
-    set) so the data stays visible in every window length. This is the
-    one authoritative path for that fallback — chart builders compose
-    it instead of duplicating the branching logic.
-    """
-    if df[x].nunique() == 1:
-        fig = px.bar(df, x=x, y=y, color=color, labels=labels)
-        if color is not None:
-            fig.update_layout(barmode="stack")
-        return fig
-    if multi_day == "area":
-        return px.area(df, x=x, y=y, color=color, labels=labels)
-    fig = px.line(df, x=x, y=y, color=color, labels=labels)
-    fig.update_traces(mode="lines+markers")
-    return fig
 
 
 def _normalised_cost_rows(

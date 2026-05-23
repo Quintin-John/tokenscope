@@ -26,7 +26,6 @@ from tokenscope.ui.charts import (
     BRAND_HUE_SHADES,
     PALETTE,
     TOKEN_KIND_COLORS,
-    _daily_metric_figure,
     apply_enterprise_style,
     burn_gauge,
     cache_hit_sparkline,
@@ -81,87 +80,6 @@ def _report(entries: list[DailyEntry]) -> DailyReport:
             totalCost=sum(e.total_cost for e in entries),
         ),
     )
-
-
-# ---------- _daily_metric_figure (the single-day fallback helper) ----------
-
-
-def _two_day_df():
-    import pandas as pd
-    return pd.DataFrame(
-        [
-            {"date": "2026-05-15", "y": 1.0, "g": "a"},
-            {"date": "2026-05-15", "y": 2.0, "g": "b"},
-            {"date": "2026-05-16", "y": 3.0, "g": "a"},
-            {"date": "2026-05-16", "y": 4.0, "g": "b"},
-        ]
-    )
-
-
-def _one_day_df():
-    import pandas as pd
-    return pd.DataFrame(
-        [
-            {"date": "2026-05-16", "y": 5.0, "g": "a"},
-            {"date": "2026-05-16", "y": 6.0, "g": "b"},
-        ]
-    )
-
-
-def test_daily_metric_figure_multi_day_area_uses_stackgroup() -> None:
-    fig = _daily_metric_figure(
-        _two_day_df(),
-        x="date", y="y", color="g",
-        labels={"date": "Date", "y": "Y", "g": "G"},
-        multi_day="area",
-    )
-    # px.area renders scatter traces with stackgroup set (that's how
-    # plotly_express distinguishes "area" from "line" — fill is None,
-    # the stackgroup attr carries the layering identity).
-    assert all(t.type == "scatter" for t in fig.data)
-    assert all(t.stackgroup for t in fig.data), (
-        f"expected stackgroup on every trace, got "
-        f"{[t.stackgroup for t in fig.data]}"
-    )
-
-
-def test_daily_metric_figure_multi_day_line_has_markers_and_lines() -> None:
-    fig = _daily_metric_figure(
-        _two_day_df()[["date", "y"]].drop_duplicates(subset=["date"]),
-        x="date", y="y",
-        labels={"date": "Date", "y": "Y"},
-        multi_day="line",
-    )
-    assert len(fig.data) == 1
-    assert fig.data[0].type == "scatter"
-    assert fig.data[0].mode == "lines+markers"
-
-
-def test_daily_metric_figure_single_day_forces_bar_with_stack_when_coloured() -> None:
-    fig = _daily_metric_figure(
-        _one_day_df(),
-        x="date", y="y", color="g",
-        labels={"date": "Date", "y": "Y", "g": "G"},
-        multi_day="area",
-    )
-    assert all(t.type == "bar" for t in fig.data)
-    assert fig.layout.barmode == "stack"
-
-
-def test_daily_metric_figure_single_day_uncoloured_bar_no_stack_directive() -> None:
-    """When ``color`` is None there's no series split, so barmode must not
-    be touched — leaving Plotly's default is the correct authoritative
-    behaviour (no spurious layout override)."""
-    fig = _daily_metric_figure(
-        _one_day_df()[["date", "y"]].drop_duplicates(subset=["date"]),
-        x="date", y="y",
-        labels={"date": "Date", "y": "Y"},
-        multi_day="line",
-    )
-    assert len(fig.data) == 1
-    assert fig.data[0].type == "bar"
-    # We did not set barmode in this branch — Plotly default ('group') stands.
-    assert fig.layout.barmode != "stack"
 
 
 # ---------- cost_trend_with_rolling ----------
