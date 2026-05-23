@@ -1443,16 +1443,18 @@ def test_live_spend_trajectory_uses_palette_overlay_color() -> None:
 
 
 def test_burn_gauge_with_typical_renders_threshold_marker() -> None:
-    """When ``typical`` is provided and > 0, the gauge gets a red
-    threshold line at that value — visual cue for "above/below my usual
-    burn". Threshold structure: gauge.threshold = {"line": {"color":
-    "#d62728", ...}, "thickness": 0.85, "value": typical}."""
+    """When ``typical`` is provided and > 0, the gauge gets a neutral
+    reference line at that value — visual cue for "above/below my usual
+    burn". The line uses the PALETTE "7-day avg" reference hue, never a
+    reserved red. Threshold structure: gauge.threshold = {"line":
+    {"color": PALETTE["7-day avg"], ...}, "thickness": 0.85,
+    "value": typical}."""
     fig = burn_gauge(_block_with_burn(), typical=5.0)
     assert isinstance(fig, go.Figure)
     threshold = fig.data[0].gauge.threshold
     assert threshold is not None
     assert threshold.value == 5.0
-    assert threshold.line.color == "#d62728"
+    assert threshold.line.color == PALETTE["7-day avg"]
 
 
 def test_burn_gauge_typical_zero_does_not_set_threshold() -> None:
@@ -2045,3 +2047,135 @@ def test_live_spend_trajectory_renders_now_reference_line() -> None:
     ]
     assert len(now_lines) == 1
     assert now_lines[0].line.dash == "dot"
+
+
+# ---------- drill-chart color contract (PALETTE / no-red) ----------
+#
+# Enforces the invariant the module docstring asserts (charts.py:
+# "every chart references PALETTE … NO data series anywhere in the app
+# uses red"). The "drill" detail charts (donut / session token mix /
+# burn gauge / session timeline) were built outside the PALETTE
+# discipline the Overview/Cache charts follow; this guard catches any
+# regression where a builder reintroduces an off-PALETTE or red data
+# color via a Plotly default sequence.
+
+import re as _re
+
+_HEX6 = _re.compile(r"^#[0-9a-fA-F]{6}$")
+
+# Plotly's default-qualitative red and the legacy hardcoded gauge red.
+# A data series must never use either (red is reserved for warnings).
+_RESERVED_REDS = {"#ef553b", "#d62728"}
+
+
+def _data_colors(fig: go.Figure) -> set[str]:
+    """Every explicit 6-digit hex color carried by a figure's DATA
+    series — trace line/marker/fill colors, pie per-slice marker
+    colors, and Indicator gauge bar + threshold-line colors.
+
+    Layout chrome (gridlines, text, backgrounds) is deliberately
+    excluded: the PALETTE / no-red contract governs data series, not
+    styling neutrals. Colors are lower-cased so the comparison is
+    case-insensitive.
+    """
+    found: set[str] = set()
+
+    def _add(value: object) -> None:
+        if isinstance(value, str) and _HEX6.match(value):
+            found.add(value.lower())
+
+    for trace in fig.data:
+        line = getattr(trace, "line", None)
+        if line is not None:
+            _add(getattr(line, "color", None))
+        marker = getattr(trace, "marker", None)
+        if marker is not None:
+            _add(getattr(marker, "color", None))
+            for c in getattr(marker, "colors", None) or ():
+                _add(c)
+        _add(getattr(trace, "fillcolor", None))
+        gauge = getattr(trace, "gauge", None)
+        if gauge is not None:
+            bar = getattr(gauge, "bar", None)
+            if bar is not None:
+                _add(getattr(bar, "color", None))
+            threshold = getattr(gauge, "threshold", None)
+            thr_line = getattr(threshold, "line", None) if threshold else None
+            if thr_line is not None:
+                _add(getattr(thr_line, "color", None))
+    return found
+
+
+def _drill_figures() -> dict[str, go.Figure]:
+    """One representative figure per drill chart, each with data that
+    exercises its full color path (multi-family donut, both block
+    states on the timeline, a gauge threshold)."""
+    donut_entry = DailyEntry(
+        date="2026-05-16",
+        inputTokens=100, outputTokens=200,
+        cacheCreationTokens=300, cacheReadTokens=400,
+        totalTokens=1000, totalCost=12.0,
+        modelsUsed=["claude-opus-4-7", "claude-sonnet-4-6"],
+        modelBreakdowns=[
+            ModelBreakdown(
+                modelName="claude-opus-4-7", inputTokens=100, outputTokens=200,
+                cacheCreationTokens=300, cacheReadTokens=400, cost=8.0,
+            ),
+            ModelBreakdown(
+                modelName="claude-sonnet-4-6", inputTokens=50, outputTokens=60,
+                cacheCreationTokens=70, cacheReadTokens=80, cost=4.0,
+            ),
+        ],
+    )
+    return {
+        "donut_cost_by_model": donut_cost_by_model(donut_entry),
+        "session_token_mix": session_token_mix(_session()),
+        "burn_gauge": burn_gauge(_block_with_burn(), typical=5.0),
+        "session_blocks_timeline": session_blocks_timeline(
+            [
+                _block(
+                    block_id="b-1",
+                    start="2026-05-16T13:00:00.000Z",
+                    end="2026-05-16T18:00:00.000Z",
+                ),
+                _block(
+                    block_id="b-2",
+                    start="2026-05-16T19:00:00.000Z",
+                    end="2026-05-17T00:00:00.000Z",
+                    is_active=True,
+                ),
+            ]
+        ),
+    }
+
+
+_DRILL_CHART_NAMES = (
+    "donut_cost_by_model",
+    "session_token_mix",
+    "burn_gauge",
+    "session_blocks_timeline",
+)
+
+
+@pytest.mark.parametrize("chart_name", _DRILL_CHART_NAMES)
+def test_drill_chart_data_colors_all_from_palette(chart_name: str) -> None:
+    """Every data-series color in each drill chart comes from PALETTE —
+    no Plotly default-sequence color leaks through."""
+    fig = _drill_figures()[chart_name]
+    colors = _data_colors(fig)
+    allowed = {c.lower() for c in PALETTE.values()}
+    assert colors, f"{chart_name}: expected at least one explicit data color"
+    off_palette = colors - allowed
+    assert not off_palette, (
+        f"{chart_name}: off-PALETTE data colors {sorted(off_palette)} "
+        f"(allowed: {sorted(allowed)})"
+    )
+
+
+@pytest.mark.parametrize("chart_name", _DRILL_CHART_NAMES)
+def test_drill_chart_uses_no_reserved_red(chart_name: str) -> None:
+    """No drill chart paints a data series in a reserved red — red is
+    reserved for warning / error states throughout the product."""
+    fig = _drill_figures()[chart_name]
+    reds = _data_colors(fig) & _RESERVED_REDS
+    assert not reds, f"{chart_name}: data series uses reserved red {sorted(reds)}"

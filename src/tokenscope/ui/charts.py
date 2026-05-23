@@ -115,6 +115,12 @@ BRAND_HUE_SHADES: tuple[str, ...] = (
 #   * Token kinds (Token mix, Cost composition): pink / blue / amber / teal
 #   * Overlay reference line (7-day avg): near-black so it sits as a
 #     summary line over the colored bands.
+#   * Block lifecycle (Session timeline) + burn-rate gauge value: a
+#     neutral slate ramp, deliberately OUTSIDE the family/kind hues so a
+#     block-state or gauge bar never reads as a model family or token
+#     kind. Drill-detail charts (donut / session token mix / burn gauge
+#     / session timeline) reference these instead of falling back to a
+#     Plotly default sequence (whose 2nd entry is the reserved red).
 PALETTE: dict[str, str] = {
     # Model families
     "opus": "#8b5cf6",         # violet
@@ -130,6 +136,16 @@ PALETTE: dict[str, str] = {
 
     # Overlay lines
     "7-day avg": "#1f2937",    # near-black (dashed)
+
+    # Block lifecycle states (Session timeline). Active is darker so the
+    # live block stands out against the muted completed ones.
+    "active": "#475569",       # slate-600 (prominent)
+    "completed": "#cbd5e1",    # slate-300 (muted)
+
+    # Burn-rate gauge value bar — neutral slate, distinct from the two
+    # block-state shades above. The gauge's "typical" threshold reuses
+    # the "7-day avg" reference hue rather than introducing a fourth.
+    "burn_rate": "#334155",    # slate-700
 }
 
 
@@ -754,6 +770,15 @@ def token_mix_non_cache_percent_bar(
 def donut_cost_by_model(entry: DailyEntry | SessionEntry) -> go.Figure | None:
     """Donut: cost share by model for a single day or session.
 
+    Each slice is one model, colored by its FAMILY hue via the shared
+    `family_color_map` — so a model's slice carries the same color it
+    has on every other chart (opus violet, sonnet cyan, …). Two
+    versions of one family (e.g. opus-4-6 + opus-4-7) intentionally
+    share the family hue and are told apart by the slice label; this
+    keeps the donut on the single PALETTE source of truth rather than
+    falling back to a Plotly default sequence (whose 2nd color is the
+    reserved red).
+
     Returns None when the entry has no model breakdowns (defensive — every
     entry ccusage emits has at least one in practice).
     """
@@ -761,10 +786,14 @@ def donut_cost_by_model(entry: DailyEntry | SessionEntry) -> go.Figure | None:
     if not rows:
         return None
     df = pd.DataFrame(rows)
+    fam_colors = family_color_map([r["family"] for r in rows])
+    color_map = {r["model"]: fam_colors[r["family"]] for r in rows}
     fig = px.pie(
         df,
         values="cost",
         names="model",
+        color="model",
+        color_discrete_map=color_map,
         hole=0.55,
     )
     fig.update_traces(textposition="inside", textinfo="percent+label")
@@ -786,6 +815,7 @@ def session_token_mix(entry: SessionEntry) -> go.Figure:
         x="kind",
         y="tokens",
         color="kind",
+        color_discrete_map=TOKEN_KIND_COLORS,
         category_orders={"kind": list(KINDS)},
         labels={"kind": "", "tokens": "Tokens"},
     )
@@ -802,9 +832,12 @@ def burn_gauge(
     """Burn-rate gauge: actual cost-per-hour with projected end-of-window cost as a delta.
 
     When `typical` is provided (median burn from completed historical
-    blocks), a red threshold line is drawn at that value — gives users an
-    instant "above/below my usual" read instead of asking them to remember
-    what their typical burn looks like.
+    blocks), a neutral reference line is drawn at that value — gives
+    users an instant "above/below my usual" read instead of asking them
+    to remember what their typical burn looks like. The line uses the
+    PALETTE "7-day avg" reference hue (NOT red — red is reserved for
+    warning / error states throughout the product); the value bar uses
+    the PALETTE "burn_rate" slate.
 
     Returns None when the block has no burn rate (gap block or finished block).
     """
@@ -814,11 +847,11 @@ def burn_gauge(
     delta = {"reference": projected, "valueformat": "$,.2f"} if projected else None
     gauge: dict = {
         "axis": {"tickprefix": "$"},
-        "bar": {"color": "#1f77b4"},
+        "bar": {"color": PALETTE["burn_rate"]},
     }
     if typical is not None and typical > 0:
         gauge["threshold"] = {
-            "line": {"color": "#d62728", "width": 3},
+            "line": {"color": PALETTE["7-day avg"], "width": 3},
             "thickness": 0.85,
             "value": typical,
         }
@@ -1516,6 +1549,10 @@ def session_blocks_timeline(
         x_end="end",
         y="block_id",
         color="label",
+        color_discrete_map={
+            "Active": PALETTE["active"],
+            "Completed": PALETTE["completed"],
+        },
         category_orders={"label": ["Active", "Completed"]},
         hover_data={
             "block_id": False,
