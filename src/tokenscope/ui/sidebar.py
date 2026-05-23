@@ -19,6 +19,7 @@ carry inline copy at their call sites.
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -324,23 +325,40 @@ def _fetch_discovery_options(query: Query) -> tuple[list[str], list[str]]:
     """Populate the Project / Models dropdown option lists.
 
     Two ccusage calls (daily for models, daily_by_project for projects)
-    cached via `data.*`. Failures are swallowed so a first-run user
-    without ccusage configured still gets a usable sidebar — the
-    dropdowns just render empty option lists, the rest of the dashboard
-    surfaces the underlying error via its own `st.error` paths.
+    cached via `data.*`. They are independent, so they run concurrently:
+    on a cold cache the sidebar's wall-clock latency drops from the sum
+    of the two subprocess calls to their max. The sidebar renders on
+    every page, so this is on the hot path. `subprocess.run` releases
+    the GIL while it waits on the child, so the two genuinely overlap —
+    the same fan-out `day.py` / `overview.py` already use.
+
+    Each result is read under its own `except CcusageError`, so a
+    failure of one call still yields the other's options (daily fails →
+    models empty, projects intact; and vice versa). Both futures are
+    submitted eagerly, so `daily_by_project` runs even when `daily`
+    fails — that's the intended swallow behaviour (we want projects even
+    when models can't be read), and matches the prior serial code, whose
+    two separate try-blocks already attempted both on `CcusageError`.
+    Failures are swallowed so a first-run user without ccusage configured
+    still gets a usable sidebar; non-`CcusageError` bugs still propagate.
+
+    The threads touch no Streamlit state (no `st.*` here), so the
+    concurrency is safe — error presentation stays on the main thread in
+    the views' own `st.error` paths.
     """
     model_options: list[str] = []
     project_options: list[str] = []
-    try:
-        discovery_daily = data.daily(query)
-        model_options = available_models(discovery_daily)
-    except CcusageError as exc:
-        _log.warning("sidebar.discovery.daily_failed exc=%s", exc)
-    try:
-        discovery_proj = data.daily_by_project(query)
-        project_options = sorted(discovery_proj.projects.keys())
-    except CcusageError as exc:
-        _log.warning("sidebar.discovery.by_project_failed exc=%s", exc)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        daily_future = pool.submit(data.daily, query)
+        proj_future = pool.submit(data.daily_by_project, query)
+        try:
+            model_options = available_models(daily_future.result())
+        except CcusageError as exc:
+            _log.warning("sidebar.discovery.daily_failed exc=%s", exc)
+        try:
+            project_options = sorted(proj_future.result().projects.keys())
+        except CcusageError as exc:
+            _log.warning("sidebar.discovery.by_project_failed exc=%s", exc)
     return model_options, project_options
 
 

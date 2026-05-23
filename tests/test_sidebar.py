@@ -119,15 +119,60 @@ def test_fetch_discovery_options_swallows_both_errors(monkeypatch) -> None:
 def test_fetch_discovery_options_does_not_swallow_unrelated_errors(monkeypatch) -> None:
     """The except clauses catch CcusageError specifically, not
     Exception. A real bug (TypeError, ValueError, etc.) must surface
-    rather than being silently swallowed."""
+    rather than being silently swallowed.
+
+    `daily_by_project` is patched to a valid report: the two fetches now
+    run concurrently, so the by_project worker starts regardless of
+    daily failing — patching it keeps the test off real ccusage. The
+    RuntimeError raised by daily still re-raises at `.result()` on the
+    main thread and propagates (it is not a CcusageError)."""
 
     def _raise_runtime(_q: Query | None = None):
         raise RuntimeError("not a ccusage failure — a programmer error")
 
+    class _ProjReport:
+        projects = {"-Users-foo-proj-a": object()}
+
     monkeypatch.setattr(data, "daily", _raise_runtime)
+    monkeypatch.setattr(data, "daily_by_project", lambda _q=None: _ProjReport())
 
     with pytest.raises(RuntimeError, match="programmer error"):
         sidebar._fetch_discovery_options(_q())
+
+
+def test_fetch_discovery_options_runs_calls_concurrently(monkeypatch) -> None:
+    """Proves the two discovery fetches run concurrently, not serially.
+
+    Each fake fetch blocks on a shared 2-party barrier that only
+    releases once BOTH have arrived. A serial implementation calls the
+    first fetch, which blocks forever (the second never starts), so the
+    barrier times out and raises — the test fails. The concurrent
+    implementation lets both threads reach the barrier, it releases
+    immediately, and both return."""
+    import threading
+
+    barrier = threading.Barrier(2, timeout=5)
+
+    class _DailyReport:
+        daily = [type("E", (), {"models_used": ["claude-opus-4-7"]})()]
+
+    class _ProjReport:
+        projects = {"-Users-foo-proj-a": object()}
+
+    def fake_daily(_q: Query | None = None):
+        barrier.wait()
+        return _DailyReport()
+
+    def fake_by_project(_q: Query | None = None):
+        barrier.wait()
+        return _ProjReport()
+
+    monkeypatch.setattr(data, "daily", fake_daily)
+    monkeypatch.setattr(data, "daily_by_project", fake_by_project)
+
+    models, projects = sidebar._fetch_discovery_options(_q())
+    assert models == ["claude-opus-4-7"]
+    assert projects == ["-Users-foo-proj-a"]
 
 
 # ---------- date-range preset helpers ----------
